@@ -49,6 +49,18 @@ int main(int argc, char** argv) {
   printf("  maxBoost      : %.2f  hdrCapacityMax: %.2f\n", p.maxContentBoost, p.hdrCapacityMax);
 
   std::string outPathArg(output);
+  if (endsWith(outPathArg, ".yplane")) {
+    int w = 0, h = 0;
+    std::vector<uint8_t> plane = ultraslim::debugDecodePlaneY(inFd, w, h);
+    printf("yplane %dx%d bytes=%zu\n", w, h, plane.size());
+    if (!plane.empty()) {
+      int outFd2 = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      write(outFd2, plane.data(), plane.size());
+      close(outFd2);
+    }
+    close(inFd);
+    return plane.empty() ? 1 : 0;
+  }
   if (endsWith(outPathArg, ".prev.jpg")) {
     std::vector<uint8_t> jpeg = ultraslim::decodePreviewJpeg(inFd, 512);
     printf("== decodePreviewJpeg ==\n");
@@ -86,6 +98,7 @@ int main(int argc, char** argv) {
   if (argc > 6) o.speedLevel = atoi(argv[6]);
   if (argc > 7) o.resizePercent = atoi(argv[7]);
   if (argc > 8) o.preserveGainMap = atoi(argv[8]) != 0;
+  if (argc > 9) o.codecThreads = atoi(argv[9]);
 
   int outFd = open(output, O_RDWR | O_CREAT | O_TRUNC, 0644);
   if (outFd < 0) {

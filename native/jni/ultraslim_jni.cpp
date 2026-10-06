@@ -72,4 +72,22 @@ JNIEXPORT jbyteArray JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeDeco
   return arr;
 }
 
+// Debug aid: raw Y plane of the primary image, packed as [w32][h32][pixels...].
+JNIEXPORT jbyteArray JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeDebugPlaneY(
+    JNIEnv* env, jclass /*unused*/, jint fd) {
+  int w = 0, h = 0;
+  std::vector<uint8_t> plane = ultraslim::debugDecodePlaneY(fd, w, h);
+  if (plane.empty()) return nullptr;
+  jbyteArray arr = env->NewByteArray(static_cast<jsize>(plane.size() + 8));
+  if (arr == nullptr) return nullptr;
+  jbyte header[8] = {static_cast<jbyte>(w & 0xFF), static_cast<jbyte>((w >> 8) & 0xFF),
+                     static_cast<jbyte>((w >> 16) & 0xFF), static_cast<jbyte>((w >> 24) & 0xFF),
+                     static_cast<jbyte>(h & 0xFF), static_cast<jbyte>((h >> 8) & 0xFF),
+                     static_cast<jbyte>((h >> 16) & 0xFF), static_cast<jbyte>((h >> 24) & 0xFF)};
+  env->SetByteArrayRegion(arr, 0, 8, header);
+  env->SetByteArrayRegion(arr, 8, static_cast<jsize>(plane.size()),
+                          reinterpret_cast<const jbyte*>(plane.data()));
+  return arr;
+}
+
 }  // extern "C"

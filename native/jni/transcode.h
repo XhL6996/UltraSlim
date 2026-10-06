@@ -59,4 +59,7 @@ TranscodeResult transcodeImage(int inFd, int outFd, const TranscodeOptions& opti
  */
 std::vector<uint8_t> decodePreviewJpeg(int fd, int maxDim, int quality = 82);
 
+/** Debug: decode the primary image with heif_chroma_undefined and return the raw Y plane. */
+std::vector<uint8_t> debugDecodePlaneY(int fd, int& w, int& h);
+
 }  // namespace ultraslim

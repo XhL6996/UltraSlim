@@ -89,4 +89,8 @@ object UltraHdrBridge {
      */
     @JvmStatic
     external fun nativeDecodePreview(fd: Int, maxDim: Int): ByteArray?
+
+    /** Debug: raw Y plane of the primary image, [w32][h32][pixels...]. */
+    @JvmStatic
+    external fun nativeDebugPlaneY(fd: Int): ByteArray?
 }

@@ -1423,6 +1423,44 @@ TranscodeResult transcodeImage(int inFd, int outFd, const TranscodeOptions& opti
   }
 }
 
+std::vector<uint8_t> debugDecodePlaneY(int fd, int& w, int& h) {
+  std::vector<uint8_t> empty;
+  std::vector<uint8_t> data = readAll(fd);
+  if (data.empty()) return empty;
+
+  heif_context* ctx = heif_context_alloc();
+  if (heif_context_read_from_memory_without_copy(ctx, data.data(), data.size(), nullptr).code !=
+      heif_error_Ok) {
+    heif_context_free(ctx);
+    return empty;
+  }
+  heif_image_handle* handle = nullptr;
+  heif_error e = heif_context_get_primary_image_handle(ctx, &handle);
+  if (e.code != heif_error_Ok || handle == nullptr) {
+    heif_context_free(ctx);
+    return empty;
+  }
+  heif_image* himg = nullptr;
+  e = heif_decode_image(handle, &himg, heif_colorspace_undefined, heif_chroma_undefined, nullptr);
+  if (e.code != heif_error_Ok || himg == nullptr) {
+    heif_image_handle_release(handle);
+    heif_context_free(ctx);
+    return empty;
+  }
+  w = heif_image_get_width(himg, heif_channel_Y);
+  h = heif_image_get_height(himg, heif_channel_Y);
+  int stride = 0;
+  const uint8_t* plane = heif_image_get_plane_readonly(himg, heif_channel_Y, &stride);
+  std::vector<uint8_t> out(static_cast<size_t>(w) * h);
+  for (int y = 0; y < h; y++) {
+    memcpy(out.data() + static_cast<size_t>(w) * y, plane + static_cast<size_t>(stride) * y, w);
+  }
+  heif_image_release(himg);
+  heif_image_handle_release(handle);
+  heif_context_free(ctx);
+  return out;
+}
+
 std::vector<uint8_t> decodePreviewJpeg(int fd, int maxDim, int quality) {
   std::vector<uint8_t> empty;
   std::vector<uint8_t> data = readAll(fd);
