@@ -106,6 +106,20 @@ ExternalProject_Add(svt-av1
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --parallel
     INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)
 
+# ---------------------------------------------------------------- dav1d (AV1 decoder)
+set(DAV1D_MESON_CROSS_ARGS "")
+if(DEFINED ANDROID_ABI)
+  set(DAV1D_MESON_CROSS_ARGS --cross-file ${CMAKE_CURRENT_BINARY_DIR}/android-meson-cross.ini)
+endif()
+ExternalProject_Add(dav1d
+    URL https://code.videolan.org/videolan/dav1d/-/archive/1.5.1/dav1d-1.5.1.tar.gz
+    CONFIGURE_COMMAND meson setup <BINARY_DIR> <SOURCE_DIR>
+        --buildtype release --default-library static --prefix=${DEPS_PREFIX}
+        -Denable_tests=false -Denable_tools=false -Dbitdepths=8
+        ${DAV1D_MESON_CROSS_ARGS}
+    BUILD_COMMAND ninja -C <BINARY_DIR>
+    INSTALL_COMMAND meson install -C <BINARY_DIR>)
+
 # ---------------------------------------------------------------- libde265 (HEVC decoder)
 ExternalProject_Add(libde265
     URL https://github.com/strukturag/libde265/releases/download/v1.0.16/libde265-1.0.16.tar.gz
@@ -118,7 +132,7 @@ ExternalProject_Add(libde265
 
 # ---------------------------------------------------------------- libheif (container)
 ExternalProject_Add(libheif
-    DEPENDS x265 aom libde265 svt-av1
+    DEPENDS x265 aom libde265 dav1d svt-av1
     URL https://github.com/strukturag/libheif/archive/4a3f74bc593ebfc29becc1ed5dd0a61cc66d40e1.tar.gz
     PATCH_COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_libheif.sh <SOURCE_DIR> ${CMAKE_CURRENT_SOURCE_DIR}/patches/libheif_pr1503.patch
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
@@ -140,11 +154,11 @@ ExternalProject_Add(libheif
                -DWITH_LIBTIFF=OFF
                -DWITH_FFMPEG_DECODER=OFF
                -DWITH_X265=ON
-               -DWITH_AOM_DECODER=ON
+               -DWITH_AOM_DECODER=OFF
                -DWITH_AOM_ENCODER=ON
                -DWITH_SvtEnc=ON
                -DWITH_LIBDE265=ON
-               -DWITH_DAV1D=OFF
+               -DWITH_DAV1D=ON
                -DWITH_RAV1E=OFF
                -DWITH_OpenH264=OFF
                -DWITH_VVENC=OFF

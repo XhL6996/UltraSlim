@@ -50,6 +50,11 @@ fi
 
 mkdir -p "$BUILD_DIR" "$PREFIX"
 
+if [ "$MODE" = "android" ]; then
+  # dav1d uses Meson; pre-generate its cross file for this ABI/API
+  bash "$SCRIPT_DIR/patches/gen_meson_cross.sh" "$NDK" "$API" "$BUILD_DIR/android-meson-cross.ini"
+fi
+
 cmake -G Ninja -S "$SCRIPT_DIR" -B "$BUILD_DIR" \
   -DCMAKE_BUILD_TYPE=Release \
   -DDEPS_PREFIX="$PREFIX" \
