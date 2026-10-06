@@ -721,6 +721,9 @@ uhdr_error_info_t getMetadataFromXMP(uint8_t* xmp_data, size_t xmp_size, uint8_t
   }
 
   if (handler.getIsApple()) {
+    // Apple maps apply in the base rendition's color space. Leaving this field
+    // uninitialized made the same file use different application spaces on Android.
+    metadata->use_base_cg = true;
     metadata->version = kJpegrVersion;
     for (int c = 0; c < 3; ++c) {
       metadata->gamma[c] = 1.0f;

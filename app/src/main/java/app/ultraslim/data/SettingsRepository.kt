@@ -34,13 +34,15 @@ data class ThemeSettings(
 /** Persisted conversion defaults (ConversionSettings + 自动保存到相册). */
 data class ConversionDefaults(
     val format: OutputFormat = OutputFormat.AVIF,
-    val quality: Int = 90,
+    val quality: Int = 82,
     val gainmapQuality: Int = 60,
     val gainmapScale: Int = 4,
     val multiChannelGainmap: Boolean = true,
     val keepExif: Boolean = true,
     val allowSdr: Boolean = true,
     val autoSave: Boolean = true,
+    val onlySmaller: Boolean = true,
+    val keepLocation: Boolean = true,
     val speedLevel: Int = 1,
     val resizePercent: Int = 100,
 ) {
@@ -52,6 +54,7 @@ data class ConversionDefaults(
             gainmapScale = gainmapScale,
             multiChannelGainmap = multiChannelGainmap,
             keepExif = keepExif,
+            keepLocation = keepLocation,
             allowSdr = allowSdr,
             speedLevel = speedLevel,
             resizePercent = resizePercent,
@@ -71,6 +74,8 @@ class SettingsRepository(private val context: Context) {
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
         val AUTO_SAVE = booleanPreferencesKey("auto_save")
+        val ONLY_SMALLER = booleanPreferencesKey("only_smaller")
+        val KEEP_LOCATION = booleanPreferencesKey("keep_location")
         val SPEED_LEVEL = intPreferencesKey("speed_level")
         val RESIZE_PERCENT = intPreferencesKey("resize_percent")
     }
@@ -78,13 +83,15 @@ class SettingsRepository(private val context: Context) {
     val defaults: Flow<ConversionDefaults> = context.settingsDataStore.data.map { p ->
         ConversionDefaults(
             format = OutputFormat.parse(p[Keys.OUTPUT_FORMAT]),
-            quality = p[Keys.QUALITY] ?: 90,
+            quality = p[Keys.QUALITY] ?: 82,
             gainmapQuality = p[Keys.GAINMAP_QUALITY] ?: 60,
             gainmapScale = p[Keys.GAINMAP_SCALE] ?: 4,
             multiChannelGainmap = p[Keys.MULTI_CHANNEL] ?: true,
             keepExif = p[Keys.KEEP_EXIF] ?: true,
             allowSdr = p[Keys.ALLOW_SDR] ?: true,
             autoSave = p[Keys.AUTO_SAVE] ?: true,
+            onlySmaller = p[Keys.ONLY_SMALLER] ?: true,
+            keepLocation = p[Keys.KEEP_LOCATION] ?: true,
             speedLevel = p[Keys.SPEED_LEVEL] ?: 1,
             resizePercent = p[Keys.RESIZE_PERCENT] ?: 100,
         )
@@ -137,6 +144,9 @@ class SettingsRepository(private val context: Context) {
         context.settingsDataStore.edit { it[Keys.AUTO_SAVE] = enabled }
     }
 
+    suspend fun setOnlySmaller(value: Boolean) { context.settingsDataStore.edit { it[Keys.ONLY_SMALLER] = value } }
+    suspend fun setKeepLocation(value: Boolean) { context.settingsDataStore.edit { it[Keys.KEEP_LOCATION] = value } }
+
     suspend fun setSpeedLevel(level: Int) {
         context.settingsDataStore.edit { it[Keys.SPEED_LEVEL] = level.coerceIn(0, 2) }
     }
@@ -145,3 +155,21 @@ class SettingsRepository(private val context: Context) {
         context.settingsDataStore.edit { it[Keys.RESIZE_PERCENT] = percent.coerceIn(25, 100) }
     }
 }
+
+fun ConversionDefaults.encode(): String = org.json.JSONObject().apply {
+    put("format", format.extension); put("quality", quality); put("gainmapQuality", gainmapQuality)
+    put("gainmapScale", gainmapScale); put("multiChannel", multiChannelGainmap); put("keepExif", keepExif)
+    put("allowSdr", allowSdr); put("autoSave", autoSave); put("speed", speedLevel); put("resize", resizePercent)
+    put("onlySmaller", onlySmaller); put("keepLocation", keepLocation)
+}.toString()
+
+fun decodeDefaults(value: String): ConversionDefaults {
+    val j = org.json.JSONObject(value)
+    return ConversionDefaults(format = OutputFormat.parse(j.getString("format")), quality = j.getInt("quality"),
+        gainmapQuality = j.getInt("gainmapQuality"), gainmapScale = j.getInt("gainmapScale"),
+        multiChannelGainmap = j.getBoolean("multiChannel"), keepExif = j.getBoolean("keepExif"),
+        allowSdr = j.getBoolean("allowSdr"), autoSave = j.getBoolean("autoSave"), speedLevel = j.getInt("speed"),
+        resizePercent = j.getInt("resize"), onlySmaller = j.optBoolean("onlySmaller", true), keepLocation = j.optBoolean("keepLocation", true))
+}
+
+fun ConversionDefaults.summary(): String = "${format.label} · 编码质量 $quality · ${if (resizePercent == 100) "原始尺寸" else "尺寸 $resizePercent%"} · Gain Map 原样保留 · ${if (autoSave) "自动保存" else "手动保存"}"

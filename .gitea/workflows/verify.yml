@@ -1,0 +1,16 @@
+name: Verify UltraSlim
+on: [push, pull_request, workflow_dispatch]
+jobs:
+  verify:
+    # Register an ARM64 macOS Gitea runner with this label; see README.md.
+    runs-on: macos-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build dependencies and verify
+        shell: bash
+        run: |
+          export JAVA_HOME=/opt/homebrew/opt/openjdk@17
+          export ANDROID_HOME="$HOME/Library/Android/sdk"
+          native/deps/build_deps.sh host
+          native/deps/build_deps.sh android arm64-v8a "$ANDROID_HOME/ndk/27.2.12479018" 26
+          scripts/verify.sh

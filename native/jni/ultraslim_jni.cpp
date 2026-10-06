@@ -1,4 +1,6 @@
 #include <jni.h>
+#include <exception>
+#include <algorithm>
 
 #include "transcode.h"
 
@@ -30,13 +32,14 @@ extern "C" {
 JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeProbe(JNIEnv* env,
                                                                                jclass /*unused*/,
                                                                                jint fd) {
-  return toProbeResult(env, ultraslim::probeImage(static_cast<int>(fd)));
+  try { return toProbeResult(env, ultraslim::probeImage(static_cast<int>(fd))); }
+  catch(const std::exception&) { ultraslim::ProbeResult r; r.errorCode=99; r.error="图片过大或内存不足"; return toProbeResult(env,r); }
 }
 
 JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeTranscode(
     JNIEnv* env, jclass /*unused*/, jint inFd, jint outFd, jint outCodec, jint quality,
     jint gainmapQuality, jint gainmapScale, jboolean multiChannelGainmap, jboolean keepExif,
-    jboolean allowSdrTranscode, jint speedLevel, jint resizePercent, jint codecThreads) {
+    jboolean allowSdrTranscode, jint speedLevel, jint resizePercent, jint codecThreads, jboolean keepLocation) {
   ultraslim::TranscodeOptions o;
   o.outCodec = outCodec;
   o.quality = quality;
@@ -44,6 +47,7 @@ JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeTransco
   o.gainmapScale = gainmapScale;
   o.multiChannelGainmap = multiChannelGainmap == JNI_TRUE;
   o.keepExif = keepExif == JNI_TRUE;
+  o.keepLocation = keepLocation == JNI_TRUE;
   o.allowSdrTranscode = allowSdrTranscode == JNI_TRUE;
   o.speedLevel = speedLevel;
   o.resizePercent = resizePercent;
@@ -58,7 +62,8 @@ JNIEXPORT jstring JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeVersion
 
 JNIEXPORT jbyteArray JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeDecodePreview(
     JNIEnv* env, jclass /*unused*/, jint fd, jint maxDim) {
-  std::vector<uint8_t> jpeg = ultraslim::decodePreviewJpeg(static_cast<int>(fd), maxDim);
+  std::vector<uint8_t> jpeg;
+  try { jpeg = ultraslim::decodePreviewJpeg(static_cast<int>(fd), std::max(64,std::min(4096,int(maxDim)))); } catch(const std::exception&) { return nullptr; }
   if (jpeg.empty()) return nullptr;
   jbyteArray arr = env->NewByteArray(static_cast<jsize>(jpeg.size()));
   if (arr == nullptr) return nullptr;

@@ -42,6 +42,7 @@ private fun disambiguateName(desired: String, existing: Set<String>): String {
 }
 
 private fun queryAlbumNames(resolver: ContentResolver): Set<String> {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptySet()
     val names = mutableSetOf<String>()
     val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
     runCatching {
@@ -74,12 +75,30 @@ object MediaStoreSaver {
         displayName: String,
         format: OutputFormat,
         names: AlbumNames? = null,
+        taskId: String? = null,
     ): Uri? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         if (!sourceFile.isFile) return null
 
         val resolver = context.contentResolver
-        val chosen = names?.reserve(displayName) ?: disambiguateName(displayName, queryAlbumNames(resolver))
+        // Stable name enables recovery if the process died after MediaStore publication.
+        val desired = if (taskId != null && !displayName.matches(Regex(".*_Slim_[0-9a-f]{8}\\.[^.]+"))) {
+            // Recover records created by earlier app versions with their original stable name.
+            displayName.substringBeforeLast('.') + "_" + taskId + "." + format.extension
+        } else displayName
+        if (taskId != null) {
+            resolver.query(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+                arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.IS_PENDING),
+                "${MediaStore.Images.Media.DISPLAY_NAME} = ? AND ${MediaStore.Images.Media.RELATIVE_PATH} = ?",
+                arrayOf(desired, "Pictures/UltraSlim/"), null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val found = android.content.ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), cursor.getLong(0))
+                    if (cursor.getInt(1) == 0) return found
+                    resolver.delete(found, null, null)
+                }
+            }
+        }
+        val chosen = if (taskId != null) desired else names?.reserve(desired) ?: disambiguateName(desired, queryAlbumNames(resolver))
 
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, chosen)
@@ -102,7 +121,7 @@ object MediaStoreSaver {
 
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
+            check(resolver.update(uri, values, null, null) == 1) { "无法发布相册文件" }
             uri
         } catch (e: Exception) {
             names?.release(chosen)

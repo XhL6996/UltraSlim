@@ -76,6 +76,7 @@ object UltraHdrBridge {
         speedLevel: Int,
         resizePercent: Int,
         codecThreads: Int,
+        keepLocation: Boolean = true,
     ): TranscodeResult
 
     @JvmStatic

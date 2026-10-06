@@ -1,5 +1,12 @@
 package app.ultraslim.data
 
+import androidx.room.Index
+import androidx.room.Embedded
+import androidx.room.OnConflictStrategy
+import androidx.room.Transaction
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
+import app.ultraslim.convert.QueueItem
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -10,12 +17,12 @@ import androidx.room.RoomDatabase
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
-@Entity(tableName = "history")
+@Entity(tableName = "history", indices = [Index(value = ["taskId"], unique = true)])
 data class HistoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val displayName: String,
     val inputUri: String,
-    /** MediaStore content uri when saved to the album, otherwise a cache file path. */
+    /** MediaStore content uri when saved to the album, otherwise a durable private file path. */
     val outputUri: String,
     val inputBytes: Long,
     val outputBytes: Long,
@@ -32,6 +39,12 @@ data class HistoryEntity(
     val maxContentBoost: Float,
     val createdAt: Long,
     val status: String,
+    val taskId: String? = null,
+    val batchId: String = "",
+    val saveState: String = "SAVED",
+    val settingsSummary: String = "",
+    val hasExif: Boolean = false,
+
 ) {
     companion object {
         const val STATUS_DONE = "DONE"
@@ -44,6 +57,18 @@ interface HistoryDao {
 
     @Query("SELECT * FROM history ORDER BY createdAt DESC")
     fun flowAll(): Flow<List<HistoryEntity>>
+
+    @Query("SELECT * FROM history ORDER BY createdAt DESC LIMIT :limit")
+    fun flowPage(limit: Int): Flow<List<HistoryEntity>>
+
+    @Query("SELECT * FROM history WHERE taskId = :taskId LIMIT 1")
+    suspend fun byTask(taskId: String): HistoryEntity?
+
+    @Query("SELECT * FROM history WHERE id = :id")
+    suspend fun byId(id: Long): HistoryEntity?
+
+    @Query("SELECT * FROM history")
+    suspend fun all(): List<HistoryEntity>
 
     @Query("SELECT * FROM history WHERE id = :id")
     fun flowById(id: Long): Flow<HistoryEntity?>
@@ -67,7 +92,48 @@ interface HistoryDao {
     fun countDone(): Flow<Int>
 }
 
-@Database(entities = [HistoryEntity::class], version = 1, exportSchema = false)
+@Entity(tableName = "batches")
+data class BatchEntity(@PrimaryKey val id: String, val itemIds: String, val settings: String,
+    val cancelled: Boolean = false, val createdAt: Long = System.currentTimeMillis())
+
+@Dao
+interface TaskDao {
+    @Query("SELECT * FROM tasks ORDER BY createdAt") suspend fun all(): List<QueueItem>
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun put(items: List<QueueItem>)
+    @Query("DELETE FROM tasks WHERE id IN (:ids)") suspend fun removeIds(ids: List<String>)
+    @Transaction suspend fun snapshot(items: List<QueueItem>) {
+        val previous = all().associateBy { it.id }
+        val ids = items.mapTo(HashSet()) { it.id }
+        previous.keys.filter { it !in ids }.chunked(500).forEach { removeIds(it) }
+        val changed = items.filter { previous[it.id] != it }
+        if (changed.isNotEmpty()) put(changed)
+    }
+    @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putBatch(batch: BatchEntity)
+    @Query("SELECT * FROM batches ORDER BY createdAt DESC LIMIT 1") suspend fun latestBatch(): BatchEntity?
+    @Query("SELECT * FROM batches WHERE id = :id") suspend fun batch(id: String): BatchEntity?
+    @Query("UPDATE batches SET cancelled = 1 WHERE id = :id") suspend fun cancel(id: String)
+}
+
+@Database(entities = [HistoryEntity::class, QueueItem::class, BatchEntity::class], version = 2, exportSchema = true)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun historyDao(): HistoryDao
+    abstract fun taskDao(): TaskDao
+
+    companion object {
+        val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE history ADD COLUMN taskId TEXT")
+                db.execSQL("ALTER TABLE history ADD COLUMN batchId TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE history ADD COLUMN saveState TEXT NOT NULL DEFAULT 'SAVED'")
+                db.execSQL("ALTER TABLE history ADD COLUMN settingsSummary TEXT NOT NULL DEFAULT ''")
+                db.execSQL("ALTER TABLE history ADD COLUMN hasExif INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("UPDATE history SET saveState = 'PENDING' WHERE outputUri NOT LIKE 'content://%'")
+                db.execSQL("CREATE UNIQUE INDEX index_history_taskId ON history(taskId)")
+                db.execSQL(TASK_TABLE_SQL)
+                db.execSQL("CREATE TABLE IF NOT EXISTS batches (id TEXT NOT NULL PRIMARY KEY, itemIds TEXT NOT NULL, settings TEXT NOT NULL, cancelled INTEGER NOT NULL, createdAt INTEGER NOT NULL)")
+            }
+        }
+    }
 }
+
+private const val TASK_TABLE_SQL = "CREATE TABLE IF NOT EXISTS tasks (id TEXT NOT NULL PRIMARY KEY, uri TEXT NOT NULL, displayName TEXT NOT NULL, sizeBytes INTEGER NOT NULL, status TEXT NOT NULL, progress INTEGER NOT NULL, outputUri TEXT, error TEXT, historyId INTEGER, createdAt INTEGER NOT NULL, batchId TEXT NOT NULL, probe_errorCode INTEGER, probe_error TEXT, probe_hasGainMap INTEGER, probe_container INTEGER, probe_width INTEGER, probe_height INTEGER, probe_gainmapWidth INTEGER, probe_gainmapHeight INTEGER, probe_hasExif INTEGER, probe_maxContentBoost REAL, probe_hdrCapacityMax REAL, result_errorCode INTEGER, result_error TEXT, result_inputHadGainMap INTEGER, result_width INTEGER, result_height INTEGER, result_gainmapWidth INTEGER, result_gainmapHeight INTEGER, result_inputBytes INTEGER, result_outputBytes INTEGER, result_durationMs REAL)"

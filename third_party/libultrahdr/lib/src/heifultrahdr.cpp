@@ -28,11 +28,11 @@
 
 // [UltraSlim] weak defaults; the app glue (transcode.cpp) provides the strong definitions.
 #if defined(__clang__) || defined(__GNUC__)
-__attribute__((weak)) int ultraslim_codec_speed_level = 1;
-__attribute__((weak)) int ultraslim_codec_threads = 0;
+__attribute__((weak)) thread_local int ultraslim_codec_speed_level = 1;
+__attribute__((weak)) thread_local int ultraslim_codec_threads = 0;
 #else
-int ultraslim_codec_speed_level = 1;
-int ultraslim_codec_threads = 0;
+thread_local int ultraslim_codec_speed_level = 1;
+thread_local int ultraslim_codec_threads = 0;
 #endif
 
 namespace ultrahdr {

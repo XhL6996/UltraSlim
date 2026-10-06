@@ -14,8 +14,12 @@ android {
         applicationId = "app.ultraslim"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "1.0"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        versionCode = 3
+        versionName = "1.2"
+
+        // Filter transitive JNI libraries too, not only our CMake target.
+        ndk { abiFilters += listOf("arm64-v8a") }
 
         externalNativeBuild {
             cmake {
@@ -41,6 +45,7 @@ android {
     externalNativeBuild {
         cmake {
             path = file("../native/CMakeLists.txt")
+            providers.environmentVariable("ULTRASLIM_BUILD_ROOT").orNull?.let { buildStagingDirectory = file("$it/cxx") }
             version = "3.22.1"
         }
     }
@@ -56,11 +61,15 @@ android {
         }
     }
 
+    sourceSets.getByName("androidTest").assets.srcDir("../third_party/libultrahdr/tests/data")
+
     buildFeatures {
         compose = true
     }
 
     packaging {
+        // Project-built JNI replacement takes precedence; verification checks the packaged bytes.
+        jniLibs.pickFirsts += "lib/arm64-v8a/libandroidx.graphics.path.so"
         resources {
             excludes += setOf("META-INF/**", "META-INF/LICENSE.md", "META-INF/LICENSE-notice.md")
         }
@@ -68,6 +77,16 @@ android {
 }
 
 dependencies {
+    constraints {
+        implementation("androidx.graphics:graphics-path") {
+            version { strictly("1.0.1") }
+            because("The aligned JNI replacement is built from the matching 1.0.1 source")
+        }
+    }
+    testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.room:room-testing:2.8.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.lifecycle.runtime.compose)
@@ -93,3 +112,5 @@ dependencies {
     implementation(libs.coil.compose)
     implementation(libs.kotlinx.coroutines.android)
 }
+
+ksp { arg("room.schemaLocation", "$projectDir/schemas") }

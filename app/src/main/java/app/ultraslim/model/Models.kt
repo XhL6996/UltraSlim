@@ -25,11 +25,12 @@ enum class OutputFormat(
 /** The subset of options that is passed straight to the native transcode call. */
 data class ConversionSettings(
     val format: OutputFormat = OutputFormat.AVIF,
-    val quality: Int = 90,
+    val quality: Int = 82,
     val gainmapQuality: Int = 60,
     val gainmapScale: Int = 4,
     val multiChannelGainmap: Boolean = true,
     val keepExif: Boolean = true,
+    val keepLocation: Boolean = true,
     val allowSdr: Boolean = true,
     val speedLevel: Int = 1,
     val resizePercent: Int = 100,

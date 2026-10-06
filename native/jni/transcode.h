@@ -22,10 +22,13 @@ struct ProbeResult {
 struct TranscodeOptions {
   int outCodec = 1;  // 0 = JPEG, 1 = HEIF, 2 = AVIF
   int quality = 90;
+  // Legacy rebuild parameters are only used by host fixture generation.
+  bool preserveGainMap = true;
   int gainmapQuality = 60;
   int gainmapScale = 4;
   bool multiChannelGainmap = true;
   bool keepExif = true;
+  bool keepLocation = true;
   bool allowSdrTranscode = true;  // re-encode plain SDR images too (no gain map)
   int speedLevel = 1;             // 0 = 画质优先, 1 = 平衡, 2 = 速度优先
   int resizePercent = 100;        // 25..100, output resolution as % of source

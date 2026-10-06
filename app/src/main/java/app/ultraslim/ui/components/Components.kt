@@ -96,12 +96,12 @@ fun StatsCard(totalSavedBytes: Long, convertedCount: Int, modifier: Modifier = M
         ) {
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    "累计节省",
+                    if (totalSavedBytes >= 0) "输出体积减少" else "输出体积增加",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f),
                 )
                 Text(
-                    formatBytes(totalSavedBytes),
+                    formatBytes(kotlin.math.abs(totalSavedBytes)),
                     style = MaterialTheme.typography.headlineMedium,
                     fontWeight = FontWeight.Bold,
                 )
@@ -109,7 +109,7 @@ fun StatsCard(totalSavedBytes: Long, convertedCount: Int, modifier: Modifier = M
             Spacer(Modifier.width(16.dp))
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    "转换次数",
+                    "已转换 · 原图保留",
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f),
                 )
@@ -253,6 +253,8 @@ class OptionsCallbacks(
     val onPreset: (CompressionPreset) -> Unit,
     val onSpeedLevelChange: (Int) -> Unit,
     val onResizePercentChange: (Int) -> Unit,
+    val onOnlySmallerChange: (Boolean) -> Unit = {},
+    val onKeepLocationChange: (Boolean) -> Unit = {},
 )
 
 /** Named bundles of conversion parameters shown as quick-select chips. */
@@ -264,15 +266,13 @@ enum class CompressionPreset(
     val resizePercent: Int,
     val speedLevel: Int,
 ) {
-    QUALITY("画质优先", quality = 95, gainmapQuality = 70, gainmapScale = 2, resizePercent = 100, speedLevel = 0),
-    BALANCED("平衡", quality = 90, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 1),
-    EXTREME("极致压缩", quality = 80, gainmapQuality = 50, gainmapScale = 8, resizePercent = 50, speedLevel = 2),
+    QUALITY("细节优先", quality = 92, gainmapQuality = 70, gainmapScale = 2, resizePercent = 100, speedLevel = 0),
+    BALANCED("推荐", quality = 82, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 1),
+    EXTREME("体积优先", quality = 65, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 0),
     ;
 
     fun matches(defaults: ConversionDefaults): Boolean =
         defaults.quality == quality &&
-            defaults.gainmapQuality == gainmapQuality &&
-            defaults.gainmapScale == gainmapScale &&
             defaults.resizePercent == resizePercent &&
             defaults.speedLevel == speedLevel
 }
@@ -298,25 +298,7 @@ fun ConversionOptionsPanel(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            SectionHeader("压缩预设", "选择预设，或微调下方参数")
-            val matchedPreset = CompressionPreset.entries.firstOrNull { it.matches(defaults) }
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                CompressionPreset.entries.forEach { preset ->
-                    FilterChip(
-                        selected = matchedPreset == preset,
-                        onClick = { callbacks.onPreset(preset) },
-                        label = { Text(preset.label) },
-                    )
-                }
-                FilterChip(
-                    selected = matchedPreset == null,
-                    onClick = {},
-                    enabled = false,
-                    label = { Text("自定义") },
-                )
-            }
-
-            SectionHeader("输出格式", "AVIF 体积最小，HEIC 兼容更好，JPEG 便于分享")
+            SectionHeader("输出格式", "体积和 HDR 显示支持取决于图片、设备与查看应用")
             val formats = OutputFormat.entries
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                 formats.forEachIndexed { index, format ->
@@ -330,8 +312,33 @@ fun ConversionOptionsPanel(
                 }
             }
 
-            SectionHeader("速度", "速度越快画质损失越大")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SectionHeader("主图压缩", "只调整主图；Gain Map 保留原始尺寸、通道与参数")
+            val matchedPreset = CompressionPreset.entries.firstOrNull { it.matches(defaults) }
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                CompressionPreset.entries.forEach { preset ->
+                    FilterChip(selected = matchedPreset == preset, onClick = { callbacks.onPreset(preset) }, label = { Text(preset.label) })
+                }
+            }
+            SliderOption("编码质量", defaults.quality, 50f..100f, 0, callbacks.onQualityChange)
+            Text(
+                if (defaults.quality >= 95) "高质量重编码可能比原图更大。100 是编码器档位，不代表无损或保留原图 100% 画质。"
+                else "数值越高通常体积越大。不同格式的同一数值不等价，建议先试转一张。",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.medium) {
+                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Gain Map · 跟随原图", style = MaterialTheme.typography.titleSmall)
+                    Text(if (defaults.format == OutputFormat.JPEG) "直接复用 JPEG 原始增益图；其他 HDR 输入请选择 HEIC / AVIF。"
+                        else "增益图独立无损编码，不缩小、不重建；方向与主图同步。", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+            SwitchRow("仅保留更小结果", "没有节省空间时跳过，原图始终保留", defaults.onlySmaller, callbacks.onOnlySmallerChange)
+            var advanced by remember { mutableStateOf(false) }
+            androidx.compose.material3.TextButton(onClick = { advanced = !advanced }) { Text(if(advanced) "收起更多选项" else "尺寸、速度与元数据") }
+            if(advanced) {
+            SectionHeader("编码速度", "更快编码可能增加体积或影响细节，建议先试转")
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(0 to "画质", 1 to "平衡", 2 to "速度").forEach { (level, label) ->
                     FilterChip(
                         selected = defaults.speedLevel == level,
@@ -342,7 +349,7 @@ fun ConversionOptionsPanel(
             }
 
             SectionHeader("分辨率", "缩小分辨率可大幅减小体积")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf(100, 75, 50).forEach { percent ->
                     FilterChip(
                         selected = defaults.resizePercent == percent,
@@ -352,50 +359,20 @@ fun ConversionOptionsPanel(
                 }
             }
 
-            SliderOption(
-                label = "画质",
-                value = defaults.quality,
-                valueRange = 50f..100f,
-                steps = 9,
-                onChange = callbacks.onQualityChange,
-            )
-            SliderOption(
-                label = "Gainmap 画质",
-                value = defaults.gainmapQuality,
-                valueRange = 30f..90f,
-                steps = 11,
-                onChange = callbacks.onGainmapQualityChange,
-            )
-
-            SectionHeader("Gainmap 缩放", "缩放越大，Gainmap 体积越小")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(1, 2, 4, 8).forEach { scale ->
-                    FilterChip(
-                        selected = defaults.gainmapScale == scale,
-                        onClick = { callbacks.onGainmapScaleChange(scale) },
-                        label = { Text("1/$scale") },
-                    )
-                }
-            }
-
-            SwitchRow(
-                title = "多通道 Gainmap",
-                hint = "保留更完整的色彩动态范围",
-                checked = defaults.multiChannelGainmap,
-                onCheckedChange = callbacks.onMultiChannelChange,
-            )
             SwitchRow(
                 title = "保留 EXIF",
                 hint = "保留拍摄时间、地点等元数据",
                 checked = defaults.keepExif,
                 onCheckedChange = callbacks.onKeepExifChange,
             )
+            SwitchRow("保留位置数据", "关闭后移除 EXIF GPS 信息", defaults.keepLocation, callbacks.onKeepLocationChange)
             SwitchRow(
                 title = "允许纯 SDR 转换",
                 hint = "没有 Gain Map 的图片也进行转码",
                 checked = defaults.allowSdr,
                 onCheckedChange = callbacks.onAllowSdrChange,
             )
+            }
             if (showAutoSave) {
                 SwitchRow(
                     title = "自动保存到相册",
@@ -463,21 +440,10 @@ fun UltraAsyncImage(
     contentScale: ContentScale,
     modifier: Modifier = Modifier,
     maxDim: Int = 1280,
+    forceSdr: Boolean = false,
 ) {
     val context = LocalContext.current
-    val cached = remember(uriString, maxDim) { PreviewCache.get(uriString, maxDim) }
-    if (cached != null) {
-        AsyncImage(
-            model = cached,
-            contentDescription = contentDescription,
-            contentScale = contentScale,
-            modifier = modifier,
-        )
-        return
-    }
-
-    var useNative by remember(uriString, maxDim) { mutableStateOf(false) }
-
+    var useNative by remember(uriString, maxDim, forceSdr) { mutableStateOf(forceSdr) }
     if (!useNative) {
         AsyncImage(
             model = imageModelOf(uriString),
@@ -487,20 +453,14 @@ fun UltraAsyncImage(
             onError = { useNative = true },
         )
     } else {
-        val bitmap = produceState<Bitmap?>(null, uriString, maxDim) {
-            value = withContext(Dispatchers.IO) {
-                PreviewCache.load(context, uriString, maxDim)
-            }
+        data class Loaded(val bitmap: Bitmap? = null, val finished: Boolean = false)
+        val result = produceState(Loaded(), uriString, maxDim) {
+            value = withContext(Dispatchers.IO) { Loaded(PreviewCache.load(context, uriString, maxDim), true) }
         }.value
-        if (bitmap != null) {
-            AsyncImage(
-                model = bitmap,
-                contentDescription = contentDescription,
-                contentScale = contentScale,
-                modifier = modifier,
-            )
-        } else {
-            ImageFallbackPlaceholder()
+        Box(modifier = modifier, contentAlignment = Alignment.Center) {
+            if(result.bitmap != null) AsyncImage(model = result.bitmap, contentDescription = contentDescription, contentScale = contentScale, modifier = Modifier.fillMaxSize())
+            else if(!result.finished) androidx.compose.material3.CircularProgressIndicator(Modifier.size(24.dp))
+            else Text("图片不可访问\n请检查文件或重新授权", style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center)
         }
     }
 }

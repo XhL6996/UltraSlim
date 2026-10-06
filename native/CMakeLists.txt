@@ -52,11 +52,33 @@ set(TRANSCODE_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/jni/transcode.cpp)
 
 if(ULTRASLIM_HOST_TEST)
   add_executable(transcode_test ${TRANSCODE_SRCS} ${CMAKE_CURRENT_SOURCE_DIR}/host_test/main.cpp)
-  target_include_directories(transcode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr ${DEPS_PREFIX}/include)
+  target_include_directories(transcode_test PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr/lib/include ${DEPS_PREFIX}/include)
   target_link_libraries(transcode_test PRIVATE core ${HEIF_LIB} ${SVT_LIB} ${AOM_LIB} ${X265_LIB} ${DE265_LIB} ${JPEG_LIB})
+
+  add_executable(rendition_dump ${CMAKE_CURRENT_SOURCE_DIR}/host_test/rendition_dump.cpp)
+  target_include_directories(rendition_dump PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr/lib/include ${DEPS_PREFIX}/include)
+  target_link_libraries(rendition_dump PRIVATE core ${HEIF_LIB} ${SVT_LIB} ${AOM_LIB} ${X265_LIB} ${DE265_LIB} ${JPEG_LIB})
+
+  add_executable(gm_dump ${CMAKE_CURRENT_SOURCE_DIR}/host_test/gm_dump.cpp)
+  target_include_directories(gm_dump PRIVATE ${DEPS_PREFIX}/include ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr)
+  target_link_libraries(gm_dump PRIVATE core ${HEIF_LIB} ${SVT_LIB} ${AOM_LIB} ${X265_LIB} ${DE265_LIB} ${JPEG_LIB})
 else()
   add_library(ultraslim SHARED ${TRANSCODE_SRCS} ${CMAKE_CURRENT_SOURCE_DIR}/jni/ultraslim_jni.cpp)
-  target_include_directories(ultraslim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr ${DEPS_PREFIX}/include)
+  # NDK r27 defaults to 4 KB. Align both LOAD segments and the RELRO boundary.
+  target_link_options(ultraslim PRIVATE
+      "-Wl,-z,max-page-size=16384"
+      "-Wl,-z,common-page-size=16384")
+  target_include_directories(ultraslim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr/lib/include ${DEPS_PREFIX}/include)
+  # Keep the Maven 1.0.1 Kotlin API, rebuilding its JNI component with aligned RELRO.
+  add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/androidx-graphics-path
+                   ${CMAKE_CURRENT_BINARY_DIR}/graphics-path)
+  target_compile_features(androidx.graphics.path PRIVATE cxx_std_17)
+  target_compile_options(androidx.graphics.path PRIVATE -fno-exceptions -fno-rtti
+      -ffast-math -ffp-contract=fast -fvisibility=hidden -fvisibility-inlines-hidden
+      -fomit-frame-pointer -ffunction-sections -fdata-sections)
+  target_link_options(androidx.graphics.path PRIVATE
+      "-Wl,-z,max-page-size=16384" "-Wl,-z,common-page-size=16384"
+      "-Wl,--gc-sections" "-Wl,-Bsymbolic-functions")
   find_library(log-lib log REQUIRED)
   # link order matters for static archives: consumers before providers
   target_link_libraries(ultraslim PRIVATE core ${HEIF_LIB} ${SVT_LIB} ${AOM_LIB} ${X265_LIB} ${DE265_LIB} ${JPEG_LIB} ${log-lib})
@@ -92,4 +114,22 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
       target_link_options(transcode_test PRIVATE -flto=thin)
     endif()
   endif()
+endif()
+
+add_compile_definitions(WITH_EXPERIMENTAL_GAIN_MAP=1)
+
+if(ULTRASLIM_HOST_TEST)
+  enable_testing()
+  add_executable(transcode_regression ${TRANSCODE_SRCS} ${CMAKE_CURRENT_SOURCE_DIR}/host_test/regression.cpp)
+  target_include_directories(transcode_regression PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr/lib/include ${DEPS_PREFIX}/include)
+  target_link_libraries(transcode_regression PRIVATE core ${HEIF_LIB} ${SVT_LIB} ${AOM_LIB} ${X265_LIB} ${DE265_LIB} ${JPEG_LIB})
+  file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/regression-output)
+  add_test(NAME transcode_regression COMMAND transcode_regression ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr/tests/data ${CMAKE_CURRENT_BINARY_DIR}/regression-output)
+endif()
+
+if(ULTRASLIM_HOST_TEST)
+  add_executable(gainmap_preservation ${TRANSCODE_SRCS} ${CMAKE_CURRENT_SOURCE_DIR}/host_test/gainmap_preservation.cpp)
+  target_include_directories(gainmap_preservation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr/lib/include ${DEPS_PREFIX}/include)
+  target_link_libraries(gainmap_preservation PRIVATE core ${HEIF_LIB} ${SVT_LIB} ${AOM_LIB} ${X265_LIB} ${DE265_LIB} ${JPEG_LIB})
+  add_test(NAME gainmap_preservation COMMAND gainmap_preservation ${CMAKE_CURRENT_BINARY_DIR}/regression-output ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr/tests/data/apple_gainmap_new.jpg)
 endif()

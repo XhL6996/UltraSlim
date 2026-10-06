@@ -27,8 +27,8 @@
 #define UHDR_CG_BT_601 static_cast<uhdr_color_gamut_t>(3)
 
 // [UltraSlim] defined in heifultrahdr.cpp (weak) / transcode.cpp (strong)
-extern int ultraslim_codec_speed_level;
-extern int ultraslim_codec_threads;
+extern thread_local int ultraslim_codec_speed_level;
+extern thread_local int ultraslim_codec_threads;
 
 namespace ultrahdr {
 

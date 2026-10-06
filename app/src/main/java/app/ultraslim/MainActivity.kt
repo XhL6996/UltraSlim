@@ -24,7 +24,7 @@ class MainActivity : ComponentActivity() {
         installSplashScreen()
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        forwardShareIntent(intent)
+        if (savedInstanceState == null) forwardShareIntent(intent)
         setContent {
             val app = application as UltraSlimApp
             val themeSettings by app.settingsRepository.theme

@@ -62,3 +62,5 @@ fun formatRelativeTime(timeMs: Long, nowMs: Long = System.currentTimeMillis()): 
         else -> SimpleDateFormat("yyyy年M月d日", Locale.getDefault()).format(Date(timeMs))
     }
 }
+
+fun formatByteDelta(bytes: Long): String = (if (bytes > 0) "+" else if (bytes < 0) "−" else "") + formatBytes(kotlin.math.abs(bytes))

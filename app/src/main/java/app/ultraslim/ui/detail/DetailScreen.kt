@@ -1,5 +1,16 @@
 package app.ultraslim.ui.detail
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.material3.Slider
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.platform.LocalDensity
+import app.ultraslim.convert.OutputStore
+import app.ultraslim.model.OutputFormat
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
@@ -8,7 +19,10 @@ import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
-import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.rememberTransformableState
+import androidx.compose.foundation.gestures.transformable
+import androidx.compose.foundation.gestures.detectHorizontalDragGestures
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -20,6 +34,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -60,6 +75,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -100,6 +117,8 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    val sourcePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(vm::relinkSource) }
+    val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(OutputFormat.parse(state.entity?.format).mimeType)) { it?.let(vm::exportTo) }
 
     LaunchedEffect(Unit) {
         vm.events.collect { event ->
@@ -113,7 +132,7 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("详情") },
+                title = { Text("转换结果") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
@@ -129,7 +148,7 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                 modifier = Modifier.fillMaxSize().padding(innerPadding),
                 contentAlignment = Alignment.Center,
             ) {
-                Text(
+                if(state.loading) CircularProgressIndicator() else Text(
                     "记录不存在或已删除",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -140,6 +159,8 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                 entity = entity,
                 saving = state.saving,
                 onSaveToAlbum = { vm.saveToAlbum() },
+                onRelink = { sourcePicker.launch(arrayOf("image/*")) },
+                onExport = { export.launch(state.entity?.displayName ?: "image.heic") },
                 onDelete = { showDeleteConfirm = true },
                 onBack = onBack,
                 context = context,
@@ -152,7 +173,7 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
             title = { Text("删除这条记录？") },
-            text = { Text("只会删除转换记录，相册中的图片不受影响。") },
+            text = { Text("删除记录及尚未保存的应用内成品；已保存到相册的图片不受影响。") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -177,6 +198,8 @@ private fun DetailContent(
     entity: HistoryEntity,
     saving: Boolean,
     onSaveToAlbum: () -> Unit,
+    onExport: () -> Unit,
+    onRelink: () -> Unit,
     onDelete: () -> Unit,
     onBack: () -> Unit,
     context: Context,
@@ -194,6 +217,7 @@ private fun DetailContent(
     }
 
     val saved = entity.outputUri.startsWith("content://")
+    val scope = rememberCoroutineScope()
 
     Column(
         modifier = modifier
@@ -202,6 +226,18 @@ private fun DetailContent(
             .padding(horizontal = 20.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
+        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+            Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(if(entity.outputBytes < entity.inputBytes) "为这张照片省下" else "本次转换体积增加", style = MaterialTheme.typography.labelMedium)
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(formatBytes(kotlin.math.abs(entity.inputBytes - entity.outputBytes)), style = MaterialTheme.typography.headlineLarge)
+                    BadgeChip(formatSavedPercent(entity.inputBytes, entity.outputBytes), MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.primary)
+                }
+                Text("${formatBytes(entity.inputBytes)} → ${formatBytes(entity.outputBytes)} · ${entity.format}", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+        SectionHeader("看看细节", "拖动分界线对比，双指放大查看")
+        Text("此页为 SDR 预览；HDR 亮度请在兼容相册中查看。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         HeroCompareCard(
             entity = entity,
             scale = 1f - 0.08f * backProgress,
@@ -209,7 +245,7 @@ private fun DetailContent(
         )
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (!saved) {
+            if (!saved && android.os.Build.VERSION.SDK_INT >= 29) {
                 FilledTonalButton(
                     onClick = onSaveToAlbum,
                     enabled = !saving,
@@ -221,8 +257,8 @@ private fun DetailContent(
                 }
             }
             OutlinedButton(
-                onClick = { shareImage(context, entity) },
-                enabled = saved,
+                onClick = { if(!OutputStore.share(context, listOf(entity))) android.widget.Toast.makeText(context, "分享失败：文件不可访问", android.widget.Toast.LENGTH_LONG).show() },
+                enabled = !saving,
                 modifier = Modifier.weight(1f),
             ) {
                 Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -231,33 +267,27 @@ private fun DetailContent(
             }
         }
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            OutlinedButton(
-                onClick = { viewInAlbum(context, entity) },
-                enabled = saved,
-                modifier = Modifier.weight(1f),
-            ) {
-                Icon(Icons.Rounded.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("在相册中查看")
-            }
-            TextButton(
-                onClick = onDelete,
-                modifier = Modifier.weight(1f),
-                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
-            ) {
-                Icon(Icons.Rounded.DeleteOutline, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("删除记录")
+            TextButton(onClick = { viewInAlbum(context, entity) }, enabled = saved, modifier = Modifier.weight(1f)) { Text("在相册中查看") }
+            var menu by remember { mutableStateOf(false) }
+            Box(Modifier.weight(1f)) {
+                TextButton(onClick = { menu = true }, enabled = !saving) { Text("更多操作") }
+                androidx.compose.material3.DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("导出到文件") }, onClick = {menu=false;onExport()})
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("重新关联原图") }, onClick = {menu=false;onRelink()})
+                    androidx.compose.material3.DropdownMenuItem(text = { Text("删除记录") }, onClick = {menu=false;onDelete()})
+                }
             }
         }
         if (!saved) {
             Text(
-                "此文件尚未保存到相册，保存后才能分享或在相册中查看。",
+                if(entity.saveState == "FAILED") "保存到相册失败，成品已在应用内保留，可重试、导出或分享。" else "成品已在应用内保留，可直接分享或导出。",
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
 
+        Text(entity.displayName, style = MaterialTheme.typography.titleSmall)
+        Text(entity.settingsSummary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         MetadataCard(entity)
 
         Spacer(Modifier.height(24.dp))
@@ -271,19 +301,22 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
     var zoomScale by remember { mutableFloatStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     val scope = rememberCoroutineScope()
-    val ratio = remember(entity.width, entity.height) {
-        if (entity.width > 0 && entity.height > 0) {
-            entity.width.toFloat() / entity.height.toFloat()
-        } else {
-            4f / 3f
-        }
-    }
-
+    val density = LocalDensity.current
     fun maxPan(scaleNow: Float): Offset = Offset(
         (scaleNow - 1f) * viewSize.width / 2f,
         (scaleNow - 1f) * viewSize.height / 2f,
     )
 
+    val previewHeight = with(density) { (LocalWindowInfo.current.containerSize.height.toDp() * .4f).coerceIn(220.dp, 420.dp) }
+    val transform = rememberTransformableState { zoom, pan, _ ->
+        val newScale = (zoomScale * zoom).coerceIn(1f, 4f)
+        zoomScale = newScale
+        val max = maxPan(newScale)
+        panOffset = if(newScale <= 1f) Offset.Zero else Offset(
+            (panOffset.x + pan.x).coerceIn(-max.x, max.x),
+            (panOffset.y + pan.y).coerceIn(-max.y, max.y),
+        )
+    }
     Card(
         shape = RoundedCornerShape(corner),
         modifier = Modifier
@@ -296,7 +329,7 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
-                .aspectRatio(ratio.coerceIn(0.5f, 1.9f))
+                .height(previewHeight)
                 .clip(RoundedCornerShape(corner))
                 .onSizeChanged {
                     viewSize = IntSize(it.width.coerceAtLeast(1), it.height.coerceAtLeast(1))
@@ -317,27 +350,7 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                         },
                     )
                 }
-                .pointerInput(Unit) {
-                    detectTransformGestures { _, pan, zoom, _ ->
-                        if (zoom != 1f || zoomScale > 1f) {
-                            // 缩放 / 平移模式
-                            val newScale = (zoomScale * zoom).coerceIn(1f, 4f)
-                            zoomScale = newScale
-                            val max = maxPan(newScale)
-                            panOffset = if (newScale <= 1f) {
-                                Offset.Zero
-                            } else {
-                                Offset(
-                                    (panOffset.x + pan.x).coerceIn(-max.x, max.x),
-                                    (panOffset.y + pan.y).coerceIn(-max.y, max.y),
-                                )
-                            }
-                        } else {
-                            // 1x 时整图拖动 = 移动分割线
-                            fraction = (fraction + pan.x / viewSize.width).coerceIn(0.02f, 0.98f)
-                        }
-                    }
-                }
+                .transformable(state = transform, canPan = { zoomScale > 1f })
                 .graphicsLayer {
                     scaleX = zoomScale
                     scaleY = zoomScale
@@ -345,36 +358,33 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                     translationY = panOffset.y
                 },
         ) {
-            val fullWidth = maxWidth
-
             // 压缩后（右侧，底层）
             UltraAsyncImage(
                 uriString = entity.outputUri,
-                contentDescription = "压缩后",
-                contentScale = ContentScale.Crop,
+                contentDescription = "压缩后 SDR",
+                contentScale = ContentScale.Fit,
+                forceSdr = true,
+                maxDim = if(zoomScale > 1f) 4096 else 1600,
                 modifier = Modifier.fillMaxSize(),
             )
 
-            // 原图（左侧，按分割线裁剪）
-            Box(
-                modifier = Modifier
-                    .fillMaxHeight()
-                    .width(fullWidth * fraction)
-                    .clipToBounds(),
-            ) {
-                UltraAsyncImage(
-                    uriString = entity.inputUri,
-                    contentDescription = "原图",
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.width(fullWidth).fillMaxHeight(),
-                )
-            }
+            // 原图（左侧，按分割线裁剪）。输出分辨率更小时，原图预览也按输出尺寸
+            // 解码，保证两侧锐度一致、对比公平。
+            val outputLong = maxOf(entity.width, entity.height)
+            UltraAsyncImage(
+                uriString = entity.inputUri,
+                contentDescription = "原图 SDR",
+                contentScale = ContentScale.Fit,
+                forceSdr = true,
+                maxDim = if(zoomScale > 1f) 4096 else if(outputLong in 1 until 1600) outputLong else 1600,
+                modifier = Modifier.fillMaxSize().drawWithContent { clipRect(right = size.width * fraction) { this@drawWithContent.drawContent() } },
+            )
 
             // 分割线
             Box(
                 modifier = Modifier
                     .align(Alignment.CenterStart)
-                    .offset(x = fullWidth * fraction - 1.dp, y = 0.dp)
+                    .offset { androidx.compose.ui.unit.IntOffset((viewSize.width * fraction - with(density) { 1.dp.toPx() }).toInt(), 0) }
                     .width(2.dp)
                     .fillMaxHeight()
                     .background(Color.White.copy(alpha = 0.9f)),
@@ -387,12 +397,18 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                 shadowElevation = 4.dp,
                 modifier = Modifier
                     .align(Alignment.CenterStart)
-                    .offset(x = fullWidth * fraction - 18.dp, y = 0.dp)
-                    .size(36.dp),
+                    .offset { androidx.compose.ui.unit.IntOffset((viewSize.width * fraction - with(density) { 18.dp.toPx() }).toInt(), 0) }
+                    .size(36.dp)
+                    .pointerInput(Unit) {
+                        detectHorizontalDragGestures { change, drag ->
+                            change.consume()
+                            fraction = (fraction + drag / viewSize.width).coerceIn(0f, 1f)
+                        }
+                    },
             ) {
                 Icon(
                     Icons.Rounded.DragIndicator,
-                    contentDescription = "拖动对比",
+                    contentDescription = null,
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(8.dp),
                 )
@@ -401,6 +417,8 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
             CompareLabel("原图", Modifier.align(Alignment.TopStart).padding(12.dp))
             CompareLabel("压缩后", Modifier.align(Alignment.TopEnd).padding(12.dp))
         }
+        Slider(modifier = Modifier.padding(horizontal = 16.dp).semantics { contentDescription = "原图与成品比较比例" }, value = fraction, onValueChange = { fraction = it }, valueRange = 0f..1f)
+        Text("左右拖动滑杆对比 · 双指缩放", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelSmall)
     }
 }
 
@@ -434,7 +452,7 @@ private fun MetadataCard(entity: HistoryEntity) {
             InfoRow("格式", "${entity.inputFormat} → ${entity.format}")
             InfoRow("分辨率", formatResolution(entity.width, entity.height))
             InfoRow(
-                "Gainmap 尺寸",
+                "Gain Map 尺寸",
                 if (entity.hadGainMap) formatResolution(entity.gainmapWidth, entity.gainmapHeight) else "无",
             )
             InfoRow(
@@ -449,7 +467,7 @@ private fun MetadataCard(entity: HistoryEntity) {
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "压缩率",
+                    "体积变化",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -469,6 +487,7 @@ private fun MetadataCard(entity: HistoryEntity) {
                 )
             }
             InfoRow("耗时", formatDuration(entity.durationMs))
+            InfoRow("输出 EXIF", if(entity.hasExif) "已保留" else "无 / 旧记录未校验")
         }
     }
 }
@@ -477,7 +496,7 @@ private fun shareImage(context: Context, entity: HistoryEntity) {
     runCatching {
         val uri = Uri.parse(entity.outputUri)
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = if (entity.format.equals("AVIF", ignoreCase = true)) "image/avif" else "image/heic"
+            type = OutputFormat.parse(entity.format).mimeType
             putExtra(Intent.EXTRA_STREAM, uri)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
@@ -491,10 +510,10 @@ private fun viewInAlbum(context: Context, entity: HistoryEntity) {
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(
                 uri,
-                if (entity.format.equals("AVIF", ignoreCase = true)) "image/avif" else "image/heic",
+                OutputFormat.parse(entity.format).mimeType,
             )
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
         }
         context.startActivity(intent)
-    }
+    }.onFailure { android.widget.Toast.makeText(context, "无法打开文件，请导出或选择其他查看应用", android.widget.Toast.LENGTH_LONG).show() }
 }

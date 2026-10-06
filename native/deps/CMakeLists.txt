@@ -77,7 +77,7 @@ ExternalProject_Add(x265
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --parallel
     INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)
 
-# ---------------------------------------------------------------- aom (AV1 decode only; encoding is SVT-AV1)
+# ---------------------------------------------------------------- aom (AV1 decoder + lossless 4:4:4 gain map encoder)
 ExternalProject_Add(aom
     URL https://storage.googleapis.com/aom-releases/libaom-3.12.1.tar.gz
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
@@ -86,7 +86,7 @@ ExternalProject_Add(aom
                -DENABLE_EXAMPLES=0
                -DENABLE_TOOLS=0
                -DENABLE_NASM=0
-               -DCONFIG_AV1_ENCODER=0
+               -DCONFIG_AV1_ENCODER=1
                -DCONFIG_AV1_DECODER=1
                -DCONFIG_MULTITHREAD=1
                -DCONFIG_WEBM_IO=0
@@ -97,6 +97,7 @@ ExternalProject_Add(aom
 # ---------------------------------------------------------------- svt-av1 (fast AV1 encoder)
 ExternalProject_Add(svt-av1
     URL https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v3.0.0/SVT-AV1-v3.0.0.tar.gz
+    PATCH_COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_svt.sh <SOURCE_DIR>
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
                -DBUILD_APPS=OFF
                -DBUILD_TESTING=OFF
@@ -140,7 +141,7 @@ ExternalProject_Add(libheif
                -DWITH_FFMPEG_DECODER=OFF
                -DWITH_X265=ON
                -DWITH_AOM_DECODER=ON
-               -DWITH_AOM_ENCODER=OFF
+               -DWITH_AOM_ENCODER=ON
                -DWITH_SvtEnc=ON
                -DWITH_LIBDE265=ON
                -DWITH_DAV1D=OFF
@@ -151,3 +152,15 @@ ExternalProject_Add(libheif
                -DWITH_KVAZAAR=OFF
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --parallel --target heif
     INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)
+
+# Changes to local patches must invalidate an existing superbuild, not only a fresh clone.
+ExternalProject_Add_Step(svt-av1 patch_inputs
+    INDEPENDENT TRUE
+    DEPENDEES update DEPENDERS patch
+    COMMAND ${CMAKE_COMMAND} -E true
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_svt.sh)
+ExternalProject_Add_Step(libheif patch_inputs
+    INDEPENDENT TRUE
+    DEPENDEES update DEPENDERS patch
+    COMMAND ${CMAKE_COMMAND} -E true
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_libheif.sh)

@@ -140,6 +140,8 @@ fun SettingsScreen(onBack: () -> Unit) {
                         onPreset = vm::applyPreset,
                         onSpeedLevelChange = vm::setSpeedLevel,
                         onResizePercentChange = vm::setResizePercent,
+                        onOnlySmallerChange = vm::setOnlySmaller,
+                        onKeepLocationChange = vm::setKeepLocation,
                     )
                 },
             )

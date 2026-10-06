@@ -1,7 +1,9 @@
 package app.ultraslim.convert
 
+import app.ultraslim.util.outputName
 import android.Manifest
 import android.app.PendingIntent
+import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -9,406 +11,135 @@ import android.content.pm.ServiceInfo
 import android.net.Uri
 import android.os.Build
 import android.os.ParcelFileDescriptor
-import android.provider.OpenableColumns
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.work.CoroutineWorker
-import androidx.work.Data
-import androidx.work.ForegroundInfo
-import androidx.work.WorkerParameters
+import androidx.work.*
 import app.ultraslim.R
 import app.ultraslim.UltraSlimApp
-import app.ultraslim.bridge.ProbeResult
-import app.ultraslim.bridge.TranscodeResult
 import app.ultraslim.bridge.UltraHdrBridge
-import app.ultraslim.data.ConversionDefaults
-import app.ultraslim.data.HistoryDao
-import app.ultraslim.data.HistoryEntity
-import app.ultraslim.model.OutputFormat
+import app.ultraslim.data.*
 import app.ultraslim.util.formatBytes
 import java.io.File
-import java.util.UUID
-import java.util.concurrent.atomic.AtomicInteger
-import java.util.concurrent.atomic.AtomicLong
-import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.ensureActive
-import kotlinx.coroutines.sync.Semaphore
-import kotlinx.coroutines.sync.withPermit
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.*
+import org.json.JSONArray
 
-/**
- * Converts the queued images on background threads, publishing progress through
- * a foreground-service notification and through the shared [ConversionRepository].
- * Successful conversions are recorded in Room.
- *
- * Up to [MAX_PARALLEL] items are transcoded concurrently; overall progress is
- * tracked as completed/total. When the work is cancelled (WorkManager stop),
- * items still in CONVERTING are reset to READY/PENDING and the worker finishes
- * quietly without a summary notification.
- */
-class ConversionWorker(
-    appContext: Context,
-    params: WorkerParameters,
-) : CoroutineWorker(appContext, params) {
-
+/** Durable, sequential batches. Each result is checkpointed before publishing to the album. */
+class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     companion object {
         const val UNIQUE_WORK_NAME = "conversion"
         const val CHANNEL_ID = "conversion"
-
-        private val PROCESSORS = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
-
-        /** Two HDR jobs already fill a phone; fewer cores get one job. */
-        private val MAX_PARALLEL = (PROCESSORS / 4).coerceIn(1, 2)
-
-        private fun codecThreadCount(): Int = (PROCESSORS / MAX_PARALLEL).coerceAtLeast(1)
-
         private const val NOTIFICATION_ID = 42
         private const val SUMMARY_ID = 43
-
-        private const val KEY_BATCH_FILE = "batch_file"
-        private const val KEY_FORMAT = "format"
-        private const val KEY_QUALITY = "quality"
-        private const val KEY_GAINMAP_QUALITY = "gainmap_quality"
-        private const val KEY_GAINMAP_SCALE = "gainmap_scale"
-        private const val KEY_MULTI_CHANNEL = "multi_channel_gainmap"
-        private const val KEY_KEEP_EXIF = "keep_exif"
-        private const val KEY_ALLOW_SDR = "allow_sdr"
-        private const val KEY_AUTO_SAVE = "auto_save"
-        private const val KEY_SPEED_LEVEL = "speed_level"
-        private const val KEY_RESIZE_PERCENT = "resize_percent"
-
-        fun buildInputData(context: Context, uris: List<String>, defaults: ConversionDefaults): Data {
-            val dir = File(context.cacheDir, "batches").apply { mkdirs() }
-            val file = File(dir, "${UUID.randomUUID()}.txt")
-            file.writeText(uris.joinToString("\n"))
-            return Data.Builder()
-                .putString(KEY_BATCH_FILE, file.absolutePath)
-                .putString(KEY_FORMAT, defaults.format.extension)
-                .putInt(KEY_QUALITY, defaults.quality)
-                .putInt(KEY_GAINMAP_QUALITY, defaults.gainmapQuality)
-                .putInt(KEY_GAINMAP_SCALE, defaults.gainmapScale)
-                .putBoolean(KEY_MULTI_CHANNEL, defaults.multiChannelGainmap)
-                .putBoolean(KEY_KEEP_EXIF, defaults.keepExif)
-                .putBoolean(KEY_ALLOW_SDR, defaults.allowSdr)
-                .putBoolean(KEY_AUTO_SAVE, defaults.autoSave)
-                .putInt(KEY_SPEED_LEVEL, defaults.speedLevel)
-                .putInt(KEY_RESIZE_PERCENT, defaults.resizePercent)
-                .build()
-        }
-
-        /** Null when the batch file exists but could not be read, so the run can retry. */
-        private fun readBatch(path: String?): List<String>? {
-            if (path.isNullOrBlank()) return emptyList()
-            val file = File(path)
-            if (!file.isFile) return emptyList()
-            return runCatching {
-                file.readLines().map { it.trim() }.filter { it.isNotEmpty() }
-            }.getOrNull()
-        }
-
-        private fun deleteBatch(path: String?) {
-            if (!path.isNullOrBlank()) File(path).delete()
-        }
+        const val KEY_BATCH = "batch_id"
     }
-
-    /** Immutable options shared by every item of one run. */
-    private data class RunOptions(
-        val format: OutputFormat,
-        val quality: Int,
-        val gainmapQuality: Int,
-        val gainmapScale: Int,
-        val multiChannel: Boolean,
-        val keepExif: Boolean,
-        val allowSdr: Boolean,
-        val autoSave: Boolean,
-        val speedLevel: Int,
-        val resizePercent: Int,
-        val codecThreads: Int,
-    )
-
-    override suspend fun getForegroundInfo(): ForegroundInfo =
-        createForegroundInfo(0, "正在准备转换…", null, indeterminate = true)
+    override suspend fun getForegroundInfo() = createForegroundInfo(0, "正在准备转换…", null, true)
 
     override suspend fun doWork(): Result {
         val app = applicationContext as UltraSlimApp
         val repo = app.conversionRepository
-        val dao = app.database.historyDao()
-
-        val opts = RunOptions(
-            format = OutputFormat.parse(inputData.getString(KEY_FORMAT)),
-            quality = inputData.getInt(KEY_QUALITY, 90),
-            gainmapQuality = inputData.getInt(KEY_GAINMAP_QUALITY, 60),
-            gainmapScale = inputData.getInt(KEY_GAINMAP_SCALE, 4),
-            multiChannel = inputData.getBoolean(KEY_MULTI_CHANNEL, true),
-            keepExif = inputData.getBoolean(KEY_KEEP_EXIF, true),
-            allowSdr = inputData.getBoolean(KEY_ALLOW_SDR, true),
-            autoSave = inputData.getBoolean(KEY_AUTO_SAVE, true),
-            speedLevel = inputData.getInt(KEY_SPEED_LEVEL, 1),
-            resizePercent = inputData.getInt(KEY_RESIZE_PERCENT, 100),
-            codecThreads = codecThreadCount(),
-        )
-
-        val batchPath = inputData.getString(KEY_BATCH_FILE)
-        val uris = readBatch(batchPath) ?: return Result.retry()
-        if (uris.isEmpty()) {
-            deleteBatch(batchPath)
-            return Result.success()
+        repo.awaitReady()
+        val batchId = inputData.getString(KEY_BATCH) ?: return Result.failure()
+        val batch = app.database.taskDao().batch(batchId) ?: return Result.failure()
+        val options = decodeDefaults(batch.settings)
+        val json = JSONArray(batch.itemIds)
+        val ids = List(json.length()) { json.getString(it) }
+        if (batch.cancelled) return Result.success()
+        try { setForeground(getForegroundInfo()) } catch (e: Exception) {
+            if (e is CancellationException) throw e
+            ids.forEach { id -> repo.update(id) { it.copy(status = QueueStatus.FAILED, error = "后台任务启动失败，请回到应用重试：${e.message}") } }
+            repo.flush()
+            return Result.failure()
         }
-
-        runCatching { setForeground(getForegroundInfo()) }
-
-        val total = uris.size
-        val completed = AtomicInteger(0)
-        val doneCount = AtomicInteger(0)
-        val savedBytes = AtomicLong(0)
-        val semaphore = Semaphore(MAX_PARALLEL)
-        val albumNames = AlbumNames(applicationContext)
-
+        var done = 0; var saved = 0L
+        val started = System.currentTimeMillis()
         try {
-            coroutineScope {
-                uris.map { uriString ->
-                    async {
-                        semaphore.withPermit {
-                            val (success, saved) = processItem(repo, dao, uriString, opts, albumNames) {
-                                completed.get() * 100 / total
-                            }
-                            val done = completed.incrementAndGet()
-                            if (success) {
-                                doneCount.incrementAndGet()
-                                savedBytes.addAndGet(saved)
-                            }
-                            runCatching {
-                                setForeground(
-                                    createForegroundInfo(
-                                        progress = done * 100 / total,
-                                        title = "正在转换 $done/$total",
-                                        text = null,
-                                        indeterminate = false,
-                                    ),
-                                )
+            for ((index, id) in ids.withIndex()) {
+                currentCoroutineContext().ensureActive()
+                if (app.database.taskDao().batch(batchId)?.cancelled != false) break
+                if (Build.VERSION.SDK_INT >= 29 && app.getSystemService(android.os.PowerManager::class.java).currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_SEVERE) {
+                    repo.update(id) { it.copy(error = "设备温度较高，稍后自动重试") }; repo.flush(); return Result.retry()
+                }
+                val item = repo.find(id) ?: continue // Removed pending items never run.
+                if (item.status == QueueStatus.DONE || item.status == QueueStatus.SKIPPED) continue
+                // Keep each scheduled run short; durable checkpoints make rescheduling safe.
+                if (System.currentTimeMillis() - started > 180_000) { repo.flush(); return Result.retry() }
+                setForeground(createForegroundInfo(index * 100 / ids.size.coerceAtLeast(1), "正在转换 ${index + 1}/${ids.size}", "当前图片完成后可停止", false))
+                if (repo.claim(id, batchId) == null) continue
+                repo.flush()
+                try {
+                    var existing = app.database.historyDao().byTask(id)
+                    if (existing != null) {
+                        if (options.autoSave && app.database.taskDao().batch(batchId)?.cancelled == false) existing = OutputStore.save(app, existing)
+                        val recovered = existing
+                        repo.update(id) { it.copy(status = QueueStatus.DONE, outputUri = recovered.outputUri, historyId = recovered.id,
+                            error = if(recovered.saveState == "SAVED") null else "转换完成，待保存；可在详情重试") }
+                        continue
+                    }
+                    val source = Uri.parse(item.uri)
+                    val probe = withContext(Dispatchers.IO) {
+                        app.contentResolver.openFileDescriptor(source, "r")?.use { UltraHdrBridge.nativeProbe(it.fd) }
+                    } ?: error("无法读取原图，请重新选择或授权")
+                    check(probe.isSuccess) { probe.error }
+                    repo.update(id) { it.copy(probe = probe) }
+                    if (!probe.hasGainMap && !options.allowSdr) {
+                        repo.update(id) { it.copy(status = QueueStatus.SKIPPED, error = "按设置跳过 SDR 图片") }; continue
+                    }
+                    val mem = ActivityManager.MemoryInfo().also { app.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }
+                    val pixels = probe.width.toLong() * probe.height
+                    check(pixels > 0 && pixels * (if (probe.hasGainMap) 40 else 16) < mem.availMem * 3 / 5) { "当前可用内存不足，请关闭其他应用后重试" }
+                    val file = File(app.filesDir, "outputs/$id.${options.format.extension}").apply { parentFile?.mkdirs() }
+                    val result = withContext(Dispatchers.IO) {
+                        app.contentResolver.openFileDescriptor(source, "r")!!.use { input ->
+                            ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_WRITE or ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_TRUNCATE).use { output ->
+                                UltraHdrBridge.nativeTranscode(input.fd, output.fd, options.format.codecId, options.quality,
+                                    options.gainmapQuality, options.gainmapScale, options.multiChannelGainmap, options.keepExif,
+                                    options.allowSdr, options.speedLevel, options.resizePercent,
+                                    Runtime.getRuntime().availableProcessors().coerceIn(1, 4), options.keepLocation)
                             }
                         }
                     }
-                }.awaitAll()
+                    if (!result.isSuccess) { file.delete(); error(result.error) }
+                    val verified = withContext(Dispatchers.IO) {
+                        ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use {
+                            val probeOut = UltraHdrBridge.nativeProbe(it.fd)
+                            check(UltraHdrBridge.nativeDecodePreview(it.fd,64) != null) { "输出无法解码" }
+                            probeOut
+                        }
+                    }
+                    if (!verified.isSuccess || (probe.hasGainMap && !verified.hasGainMap) || (options.keepExif && probe.hasExif && !verified.hasExif)) { file.delete(); error("输出校验失败") }
+                    if (options.onlySmaller && result.outputBytes >= result.inputBytes) {
+                        file.delete()
+                        repo.update(id) { it.copy(status = QueueStatus.SKIPPED, result = result, error = "输出没有更小，已按设置保留原图") }
+                        continue
+                    }
+                    val name = outputName(item.displayName, options.format.extension, id, item.createdAt)
+                    // Commit the durable private output first. Saving can be retried without encoding again.
+                    var entity = HistoryEntity(displayName = name, inputUri = item.uri, outputUri = file.path,
+                        inputBytes = result.inputBytes, outputBytes = result.outputBytes, width = verified.width, height = verified.height,
+                        gainmapWidth = verified.gainmapWidth, gainmapHeight = verified.gainmapHeight, hadGainMap = verified.hasGainMap,
+                        format = options.format.label, inputFormat = probe.containerLabel, durationMs = result.durationMs,
+                        maxContentBoost = verified.maxContentBoost, createdAt = System.currentTimeMillis(), status = HistoryEntity.STATUS_DONE,
+                        taskId = id, batchId = batchId, saveState = "PENDING", settingsSummary = options.summary(), hasExif = verified.hasExif)
+                    val historyId = withContext(NonCancellable) { app.database.historyDao().insert(entity) }
+                    entity = entity.copy(id = historyId)
+                    if (options.autoSave && app.database.taskDao().batch(batchId)?.cancelled == false) {
+                        entity = OutputStore.save(app, entity)
+                    }
+                    repo.update(id) { it.copy(status = QueueStatus.DONE, progress = 100, result = result,
+                        outputUri = entity.outputUri, historyId = historyId,
+                        error = if (entity.saveState == "FAILED") "转换完成，保存失败；可在详情重试保存" else if (entity.saveState != "SAVED") "待保存，可直接分享" else null) }
+                    done++; saved += result.inputBytes - result.outputBytes
+                } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                    repo.update(id) { it.copy(status = QueueStatus.FAILED, error = e.message ?: "转换失败") }
+                } finally { withContext(NonCancellable) { repo.flush() } }
             }
-        } catch (ce: CancellationException) {
-            // WorkManager stopped us (e.g. user pressed 取消): leave the queue in
-            // a re-runnable state and finish quietly, without a summary.
-            resetInterruptedItems(repo, uris)
-            deleteBatch(batchPath)
-            return Result.success()
+        } finally {
+            ids.forEach { id -> repo.update(id) { if (it.status == QueueStatus.CONVERTING) it.copy(status = QueueStatus.READY, error = "已中断，可继续") else it } }
+            withContext(NonCancellable) { repo.flush() }
         }
-
-        deleteBatch(batchPath)
-        showSummary(doneCount.get(), savedBytes.get())
+        if (app.database.taskDao().batch(batchId)?.cancelled == false) showSummary(done, saved)
         return Result.success()
-    }
-
-    /**
-     * Probe → transcode → persist one image. Returns (success, savedBytes).
-     * Per-item repository state is updated as it goes. CancellationException is
-     * rethrown so the whole run unwinds; other failures mark the item FAILED.
-     */
-    private suspend fun CoroutineScope.processItem(
-        repo: ConversionRepository,
-        dao: HistoryDao,
-        uriString: String,
-        opts: RunOptions,
-        albumNames: AlbumNames,
-        currentProgress: () -> Int,
-    ): Pair<Boolean, Long> {
-        ensureActive()
-        val uri = Uri.parse(uriString)
-        val displayName = repo.findByUri(uriString)?.displayName ?: resolveDisplayName(uri)
-        repo.updateByUri(uriString) {
-            it.copy(status = QueueStatus.CONVERTING, progress = currentProgress(), error = null)
-        }
-
-        try {
-            // Reuse a probe that survived in this process. A fresh worker re-probes.
-            val probe = repo.findByUri(uriString)?.probe?.takeIf { it.isSuccess } ?: probe(uri)
-            ensureActive()
-            if (probe == null) {
-                markFailed(repo, uriString, "无法读取此文件")
-                return false to 0L
-            }
-            if (!probe.isSuccess) {
-                markFailed(repo, uriString, probe.error.ifBlank { "无法解析图片" })
-                return false to 0L
-            }
-            repo.updateByUri(uriString) { it.copy(probe = probe) }
-
-            if (!probe.hasGainMap && !opts.allowSdr) {
-                repo.updateByUri(uriString) {
-                    it.copy(status = QueueStatus.SKIPPED, error = "不含 Gain Map，已按设置跳过")
-                }
-                return false to 0L
-            }
-
-            // 2. Transcode into a cache file via fd pair.
-            val outDir = File(applicationContext.cacheDir, "outputs").apply { mkdirs() }
-            val outName = outputDisplayName(displayName, opts.format)
-            val safeName = outName.replace(Regex("[^A-Za-z0-9._\\-一-龥]"), "_")
-            val outFile = File(outDir, "${System.currentTimeMillis()}_${Thread.currentThread().id}_$safeName")
-
-            val result = transcode(uri, outFile, opts)
-            ensureActive()
-            if (result == null) {
-                outFile.delete()
-                markFailed(repo, uriString, "无法读取此文件")
-                return false to 0L
-            }
-            if (!result.isSuccess) {
-                outFile.delete()
-                markFailed(repo, uriString, result.error.ifBlank { "转码失败" })
-                return false to 0L
-            }
-
-            // 3. Persist: optionally MediaStore, always Room. The cache file is the
-            //    preview only when the picture was not copied into the album.
-            val savedUri = if (opts.autoSave) {
-                withContext(Dispatchers.IO) {
-                    MediaStoreSaver.save(applicationContext, outFile, outName, opts.format, albumNames)
-                }
-            } else {
-                null
-            }
-            if (savedUri != null) outFile.delete()
-            val outputUriString = savedUri?.toString() ?: outFile.absolutePath
-            val inputBytes = if (result.inputBytes > 0) {
-                result.inputBytes
-            } else {
-                repo.findByUri(uriString)?.sizeBytes ?: 0L
-            }
-
-            val historyId = dao.insert(
-                HistoryEntity(
-                    displayName = outName,
-                    inputUri = uriString,
-                    outputUri = outputUriString,
-                    inputBytes = inputBytes,
-                    outputBytes = result.outputBytes,
-                    width = result.width,
-                    height = result.height,
-                    gainmapWidth = result.gainmapWidth,
-                    gainmapHeight = result.gainmapHeight,
-                    hadGainMap = result.inputHadGainMap,
-                    format = opts.format.label,
-                    inputFormat = probe.containerLabel,
-                    durationMs = result.durationMs,
-                    maxContentBoost = probe.maxContentBoost,
-                    createdAt = System.currentTimeMillis(),
-                    status = HistoryEntity.STATUS_DONE,
-                ),
-            )
-
-            repo.updateByUri(uriString) {
-                it.copy(
-                    status = QueueStatus.DONE,
-                    progress = 100,
-                    result = result,
-                    outputUri = outputUriString,
-                    historyId = historyId,
-                    error = null,
-                )
-            }
-            return true to (inputBytes - result.outputBytes).coerceAtLeast(0L)
-        } catch (ce: CancellationException) {
-            throw ce
-        } catch (e: Exception) {
-            markFailed(repo, uriString, e.message ?: "转换失败")
-            return false to 0L
-        }
-    }
-
-    /** After cancellation, items stuck in CONVERTING become re-runnable. */
-    private fun resetInterruptedItems(repo: ConversionRepository, uris: List<String>) {
-        val runUris = uris.toSet()
-        repo.queue.value
-            .filter { it.uri in runUris && it.status == QueueStatus.CONVERTING }
-            .forEach { item ->
-                repo.update(item.id) {
-                    it.copy(
-                        status = if (it.probe != null) QueueStatus.READY else QueueStatus.PENDING,
-                        progress = 0,
-                        error = null,
-                    )
-                }
-            }
-    }
-
-    private suspend fun probe(uri: Uri): ProbeResult? = withContext(Dispatchers.IO) {
-        runCatching {
-            applicationContext.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                UltraHdrBridge.nativeProbe(pfd.fd)
-            }
-        }.getOrNull()
-    }
-
-    private suspend fun transcode(
-        uri: Uri,
-        outFile: File,
-        opts: RunOptions,
-    ): TranscodeResult? = withContext(Dispatchers.IO) {
-        runCatching {
-            applicationContext.contentResolver.openFileDescriptor(uri, "r")?.use { inPfd ->
-                ParcelFileDescriptor.open(
-                    outFile,
-                    ParcelFileDescriptor.MODE_READ_WRITE or
-                        ParcelFileDescriptor.MODE_CREATE or
-                        ParcelFileDescriptor.MODE_TRUNCATE,
-                ).use { outPfd ->
-                    UltraHdrBridge.nativeTranscode(
-                        inPfd.fd,
-                        outPfd.fd,
-                        opts.format.codecId,
-                        opts.quality,
-                        opts.gainmapQuality,
-                        opts.gainmapScale,
-                        opts.multiChannel,
-                        opts.keepExif,
-                        opts.allowSdr,
-                        opts.speedLevel,
-                        opts.resizePercent,
-                        opts.codecThreads,
-                    )
-                }
-            }
-        }.getOrNull()
-    }
-
-    private fun markFailed(repo: ConversionRepository, uriString: String, error: String) {
-        repo.updateByUri(uriString) {
-            it.copy(status = QueueStatus.FAILED, error = error)
-        }
-    }
-
-    private fun resolveDisplayName(uri: Uri): String {
-        var name: String? = null
-        runCatching {
-            applicationContext.contentResolver.query(
-                uri,
-                arrayOf(OpenableColumns.DISPLAY_NAME),
-                null,
-                null,
-                null,
-            )?.use { cursor ->
-                val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
-                if (index >= 0 && cursor.moveToFirst()) name = cursor.getString(index)
-            }
-        }
-        return name?.takeIf { it.isNotBlank() } ?: "未命名图片"
-    }
-
-    private fun outputDisplayName(source: String, format: OutputFormat): String {
-        val base = source.substringBeforeLast('.', source).ifBlank { "ultraslim" }
-        return "$base.${format.extension}"
     }
 
     private fun createForegroundInfo(
@@ -453,7 +184,7 @@ class ConversionWorker(
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle("转换完成")
-            .setContentText("完成 $doneCount 张，共节省 ${formatBytes(savedBytes)}")
+            .setContentText("完成 $doneCount 张，输出体积净变化 ${app.ultraslim.util.formatByteDelta(-savedBytes)}（原图保留）")
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .build()

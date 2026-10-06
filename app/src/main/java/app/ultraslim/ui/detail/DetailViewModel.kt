@@ -2,6 +2,8 @@ package app.ultraslim.ui.detail
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import app.ultraslim.convert.InputStore
+import app.ultraslim.convert.OutputStore
 import app.ultraslim.UltraSlimApp
 import app.ultraslim.convert.MediaStoreSaver
 import app.ultraslim.data.HistoryEntity
@@ -28,6 +30,7 @@ sealed interface DetailEvent {
 data class DetailUiState(
     val entity: HistoryEntity? = null,
     val saving: Boolean = false,
+    val loading: Boolean = true,
 )
 
 class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long) : ViewModel() {
@@ -40,7 +43,7 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
         dao.flowById(historyId),
         saving,
     ) { entity, isSaving ->
-        DetailUiState(entity = entity, saving = isSaving)
+        DetailUiState(entity = entity, saving = isSaving, loading = false)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DetailUiState())
 
     private val _events = MutableSharedFlow<DetailEvent>(extraBufferCapacity = 1)
@@ -52,27 +55,48 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
         if (entity.outputUri.startsWith("content://") || saving.value) return
         viewModelScope.launch {
             saving.value = true
-            val file = File(entity.outputUri)
-            val saved = withContext(Dispatchers.IO) {
-                MediaStoreSaver.save(app, file, entity.displayName, OutputFormat.parse(entity.format))
-            }
-            saving.value = false
-            if (saved != null) {
-                dao.update(entity.copy(outputUri = saved.toString()))
-                _events.emit(DetailEvent.Message("已保存到相册/UltraSlim"))
-            } else {
-                _events.emit(DetailEvent.Message("保存失败，无法写入相册"))
-            }
+            try {
+                val saved = OutputStore.save(app, entity)
+                _events.emit(DetailEvent.Message(if(saved.saveState == "SAVED") "已保存到相册/UltraSlim" else "保存失败，成品仍保留；可重试或导出文件"))
+            } catch(e: Exception) { _events.emit(DetailEvent.Message("保存失败：${e.message}")) }
+            finally { saving.value = false }
+        }
+    }
+
+    fun exportTo(uri: android.net.Uri) {
+        val entity = uiState.value.entity ?: return
+        viewModelScope.launch {
+            saving.value = true
+            try {
+                withContext(Dispatchers.IO) {
+                    app.contentResolver.openInputStream(OutputStore.uri(app, entity.outputUri))!!.use { input ->
+                        app.contentResolver.openOutputStream(uri)!!.use { output -> input.copyTo(output) }
+                    }
+                }
+                _events.emit(DetailEvent.Message("文件已导出"))
+            } catch(e: Exception) { _events.emit(DetailEvent.Message("导出失败：${e.message}")) }
+            finally { saving.value = false }
+        }
+    }
+
+    fun relinkSource(uri: android.net.Uri) {
+        val row = uiState.value.entity ?: return
+        if(saving.value) return
+        viewModelScope.launch {
+            saving.value = true
+            try {
+                val durable = withContext(Dispatchers.IO) { InputStore.persist(app, uri, java.util.UUID.randomUUID().toString()) }
+                dao.update(row.copy(inputUri = durable.toString()))
+                _events.emit(DetailEvent.Message("原图已重新关联"))
+            } catch(e: Exception) { _events.emit(DetailEvent.Message("无法关联原图：${e.message}")) }
+            finally { saving.value = false }
         }
     }
 
     fun deleteRecord() {
+        if (saving.value) return
         viewModelScope.launch {
-            val entity = uiState.value.entity
-            dao.deleteById(historyId)
-            if (entity != null && !entity.outputUri.startsWith("content://")) {
-                withContext(Dispatchers.IO) { runCatching { File(entity.outputUri).delete() } }
-            }
+            OutputStore.delete(app, historyId)
             _events.emit(DetailEvent.Deleted)
         }
     }

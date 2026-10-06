@@ -15,11 +15,21 @@ import androidx.work.WorkInfo
 import androidx.work.WorkManager
 import app.ultraslim.UltraSlimApp
 import app.ultraslim.bridge.UltraHdrBridge
+import app.ultraslim.convert.InputStore
 import app.ultraslim.convert.ConversionRepository
 import app.ultraslim.convert.ConversionWorker
 import app.ultraslim.convert.QueueItem
 import app.ultraslim.convert.QueueStatus
 import app.ultraslim.data.ConversionDefaults
+import app.ultraslim.data.BatchEntity
+import app.ultraslim.data.encode
+import app.ultraslim.data.decodeDefaults
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.ensureActive
+import kotlin.coroutines.coroutineContext
+import org.json.JSONArray
 import app.ultraslim.model.OutputFormat
 import app.ultraslim.ui.components.CompressionPreset
 import java.util.UUID
@@ -65,11 +75,7 @@ data class HomeUiState(
         }
 
     val hasFinishedItems: Boolean
-        get() = queue.any {
-            it.status == QueueStatus.DONE ||
-                it.status == QueueStatus.FAILED ||
-                it.status == QueueStatus.SKIPPED
-        }
+        get() = queue.any { it.status == QueueStatus.DONE }
 }
 
 class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
@@ -90,18 +96,27 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     /** Set when the user cancels a run, so the summary event reads as a cancellation. */
     private var cancelledRun = false
+    private var activeBatch: String? = null
+    private var scanJob: Job? = null
+    private val runDefaults = MutableStateFlow(ConversionDefaults())
+    private val _stopping = MutableStateFlow(false)
+    val stopping: StateFlow<Boolean> = _stopping.asStateFlow()
+    private val _scanProgress = MutableStateFlow("")
+    val scanProgress: StateFlow<String> = _scanProgress.asStateFlow()
 
     /** Shared by album scan and manually added items. */
+    private val scannedProbes = java.util.concurrent.ConcurrentHashMap<String, app.ultraslim.bridge.ProbeResult>()
+
     private val probePermits = Semaphore(SCAN_PARALLELISM)
 
     private val workRunning: Flow<Boolean> = workManager
         .getWorkInfosForUniqueWorkFlow(ConversionWorker.UNIQUE_WORK_NAME)
-        .map { infos -> infos.any { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.RUNNING } }
+        .map { infos -> infos.any { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.BLOCKED } }
         .distinctUntilChanged()
 
     val uiState: StateFlow<HomeUiState> = combine(
         repo.queue,
-        settings.defaults,
+        runDefaults,
         dao.totalSaved(),
         dao.countDone(),
         workRunning,
@@ -116,6 +131,12 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
 
     init {
+        viewModelScope.launch {
+            repo.awaitReady()
+            val latest = app.database.taskDao().latestBatch()
+            activeBatch = latest?.id
+            runDefaults.value = if (latest != null && repo.queue.value.any { it.batchId == latest.id && it.status !in listOf(QueueStatus.DONE, QueueStatus.FAILED, QueueStatus.SKIPPED) }) decodeDefaults(latest.settings) else settings.defaults.first()
+        }
         viewModelScope.launch {
             repo.incoming.collect { uris ->
                 if (uris.isNotEmpty()) {
@@ -135,30 +156,26 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     fun addItems(uris: List<Uri>) {
         if (uris.isEmpty()) return
-        viewModelScope.launch { addItemsInternal(uris) }
+        viewModelScope.launch { repo.awaitReady(); addItemsInternal(uris) }
     }
 
     /** Adds fresh uris to the queue and probes them. Returns how many were added. */
     private suspend fun addItemsInternal(uris: List<Uri>): Int {
+        repo.awaitReady()
         val existing = repo.queue.value.mapTo(mutableSetOf()) { it.uri }
         val fresh = uris.map { it.toString() }.distinct().filter { it !in existing }
         if (fresh.isEmpty()) return 0
 
-        val items = fresh.map { uriString ->
+        val items = mutableListOf<QueueItem>()
+        for (uriString in fresh) {
             val uri = Uri.parse(uriString)
-            runCatching {
-                app.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION,
-                )
-            }
-            val (name, size) = resolveMeta(uri)
-            QueueItem(
-                id = UUID.randomUUID().toString(),
-                uri = uriString,
-                displayName = name,
-                sizeBytes = size,
-            )
+            try {
+                val (name, size) = withContext(Dispatchers.IO) { resolveMeta(uri) }
+                val id = UUID.randomUUID().toString()
+                val durable = withContext(Dispatchers.IO) { InputStore.persist(app, uri, id) }
+                items += QueueItem(id = id, uri = durable.toString(), displayName = name, sizeBytes = size)
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { _events.emit(HomeEvent.Info("导入失败：${e.message}")) }
         }
         repo.addAll(items)
         coroutineScope {
@@ -168,8 +185,10 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     fun cancelConversion() {
+        val batch = activeBatch ?: return
+        _stopping.value = true
         cancelledRun = true
-        workManager.cancelUniqueWork(ConversionWorker.UNIQUE_WORK_NAME)
+        viewModelScope.launch { app.database.taskDao().cancel(batch) }
     }
 
     /**
@@ -178,16 +197,21 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
      */
     fun scanAlbum() {
         if (_scanning.value) return
-        viewModelScope.launch {
+        scanJob = viewModelScope.launch {
             _scanning.value = true
+            _scanProgress.value = "检查最近 500 张可访问图片…"
             try {
                 val hdrUris = withContext(Dispatchers.IO) { findHdrImages() }
                 val added = if (hdrUris.isEmpty()) 0 else addItemsInternal(hdrUris)
                 when {
-                    hdrUris.isEmpty() -> _events.emit(HomeEvent.Info("相册中没有找到 HDR 图片"))
+                    hdrUris.isEmpty() -> _events.emit(HomeEvent.Info("最近 500 张可访问图片中没有找到 HDR；这不代表整个相册"))
                     added == 0 -> _events.emit(HomeEvent.Info("发现的 HDR 图片已在队列中"))
                     else -> _events.emit(HomeEvent.Info("相册中发现 $added 张 HDR 图片，已加入队列"))
                 }
+            } catch (e: CancellationException) {
+                _events.tryEmit(HomeEvent.Info("已停止扫描"))
+            } catch (e: Exception) {
+                _events.emit(HomeEvent.Info("扫描失败：${e.message}"))
             } finally {
                 _scanning.value = false
             }
@@ -198,12 +222,13 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         val queued = repo.queue.value.mapTo(mutableSetOf()) { it.uri }
         val candidates = queryRecentImages().filter { it.toString() !in queued }
         if (candidates.isEmpty()) return emptyList()
-        return coroutineScope {
-            candidates
-                .map { uri -> async { if (probeHasGainMap(uri)) uri else null } }
-                .awaitAll()
-                .filterNotNull()
+        val found = mutableListOf<Uri>()
+        candidates.forEachIndexed { index, uri ->
+            coroutineContext.ensureActive()
+            if (probeHasGainMap(uri)) found += uri
+            _scanProgress.value = "已检查 ${index + 1}/${candidates.size}，找到 ${found.size} 张 HDR"
         }
+        return found
     }
 
     private fun queryRecentImages(): List<Uri> {
@@ -214,7 +239,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
                 add(MediaStore.Images.Media.RELATIVE_PATH)
             }
         }.toTypedArray()
-        runCatching {
+        run {
             app.contentResolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                 projection,
@@ -254,26 +279,28 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
                     UltraHdrBridge.nativeProbe(pfd.fd)
                 }
             }.getOrNull()
+            if (probe != null && probe.isSuccess) scannedProbes[uri.toString()] = probe
             probe != null && probe.isSuccess && probe.hasGainMap
         }
     }
 
     /** Applies a named bundle of conversion parameters. */
     fun applyPreset(preset: CompressionPreset) {
-        viewModelScope.launch {
-            settings.setQuality(preset.quality)
-            settings.setGainmapQuality(preset.gainmapQuality)
-            settings.setGainmapScale(preset.gainmapScale)
-            settings.setResizePercent(preset.resizePercent)
-            settings.setSpeedLevel(preset.speedLevel)
-        }
+        if (uiState.value.isConverting) return
+        runDefaults.value = runDefaults.value.copy(quality = preset.quality, gainmapQuality = preset.gainmapQuality,
+            gainmapScale = preset.gainmapScale, resizePercent = preset.resizePercent, speedLevel = preset.speedLevel)
     }
+
+    fun permissionDenied() { _events.tryEmit(HomeEvent.Info("没有获得相册访问权限，可直接选择图片导入")) }
+
+    fun cancelScan() { scanJob?.cancel() }
 
     fun removeItem(id: String) = repo.remove(id)
 
     fun clearFinished() = repo.clearFinished()
 
     fun retryItem(id: String) {
+        if (uiState.value.isConverting) { _events.tryEmit(HomeEvent.Info("请等待当前批次结束后重试")); return }
         val item = repo.find(id) ?: return
         repo.update(id) { it.copy(status = QueueStatus.PENDING, error = null, probe = null) }
         viewModelScope.launch { probeItem(item.id, Uri.parse(item.uri)) }
@@ -281,6 +308,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     fun retryFailed() {
+        if (uiState.value.isConverting) return
         val failed = repo.queue.value.filter { it.status == QueueStatus.FAILED }
         if (failed.isEmpty()) return
         failed.forEach { item ->
@@ -290,56 +318,48 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         startConversion(onlyIds = failed.mapTo(mutableSetOf()) { it.id })
     }
 
+    private var starting = false
+    fun tryOne() { startConversion(repo.queue.value.firstOrNull { it.status == QueueStatus.READY }?.let { setOf(it.id) } ?: emptySet()) }
+
     fun startConversion(onlyIds: Set<String>? = null) {
-        val eligible = repo.queue.value.filter { item ->
-            (onlyIds == null || item.id in onlyIds) &&
-                (
-                    item.status == QueueStatus.PENDING ||
-                        item.status == QueueStatus.PROBING ||
-                        item.status == QueueStatus.READY
-                    )
+        if (starting || uiState.value.isConverting) return
+        starting = true
+        viewModelScope.launch {
+            try {
+                repo.awaitReady()
+                val eligible = repo.queue.value.filter { (onlyIds == null || it.id in onlyIds) && it.status in listOf(QueueStatus.PENDING, QueueStatus.PROBING, QueueStatus.READY) }
+                if (eligible.isEmpty()) { _events.emit(HomeEvent.Info("没有待转换的图片")); return@launch }
+                val batchId = UUID.randomUUID().toString()
+                val options = runDefaults.value
+                app.database.taskDao().putBatch(BatchEntity(batchId, JSONArray(eligible.map { it.id }).toString(), options.encode()))
+                eligible.forEach { q -> repo.update(q.id) { it.copy(batchId = batchId) } }
+                repo.flush()
+                lastRunIds = eligible.mapTo(mutableSetOf()) { it.id }
+                activeBatch = batchId; cancelledRun = false; _stopping.value = false
+                val request = OneTimeWorkRequestBuilder<ConversionWorker>()
+                    .setInputData(androidx.work.Data.Builder().putString(ConversionWorker.KEY_BATCH, batchId).build())
+                    .build()
+                workManager.enqueueUniqueWork(ConversionWorker.UNIQUE_WORK_NAME, ExistingWorkPolicy.KEEP, request)
+            } catch (e: Exception) { _events.emit(HomeEvent.Info("无法启动转换：${e.message}")) }
+            finally { starting = false }
         }
-        if (eligible.isEmpty()) {
-            _events.tryEmit(HomeEvent.Info("没有待转换的图片"))
-            return
-        }
-        lastRunIds = eligible.mapTo(mutableSetOf()) { it.id }
-        cancelledRun = false
-        val request = OneTimeWorkRequestBuilder<ConversionWorker>()
-            .setInputData(
-                ConversionWorker.buildInputData(app, eligible.map { it.uri }, uiState.value.defaults),
-            )
-            .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
-            .build()
-        workManager.enqueueUniqueWork(
-            ConversionWorker.UNIQUE_WORK_NAME,
-            ExistingWorkPolicy.REPLACE,
-            request,
-        )
     }
 
-    // ---- option setters (persisted) ----
-
-    fun setFormat(format: OutputFormat) =
-        viewModelScope.launch { settings.setOutputFormat(format) }
-
-    fun setQuality(quality: Int) = viewModelScope.launch { settings.setQuality(quality) }
-
-    fun setGainmapQuality(quality: Int) = viewModelScope.launch { settings.setGainmapQuality(quality) }
-
-    fun setGainmapScale(scale: Int) = viewModelScope.launch { settings.setGainmapScale(scale) }
-
-    fun setMultiChannel(enabled: Boolean) = viewModelScope.launch { settings.setMultiChannelGainmap(enabled) }
-
-    fun setKeepExif(keep: Boolean) = viewModelScope.launch { settings.setKeepExif(keep) }
-
-    fun setAllowSdr(allow: Boolean) = viewModelScope.launch { settings.setAllowSdr(allow) }
-
-    fun setAutoSave(enabled: Boolean) = viewModelScope.launch { settings.setAutoSave(enabled) }
-
-    fun setSpeedLevel(level: Int) = viewModelScope.launch { settings.setSpeedLevel(level) }
-
-    fun setResizePercent(percent: Int) = viewModelScope.launch { settings.setResizePercent(percent) }
+    private fun change(transform: (ConversionDefaults) -> ConversionDefaults) {
+        if (!uiState.value.isConverting && !starting) runDefaults.value = transform(runDefaults.value)
+    }
+    fun setFormat(v: OutputFormat) = change { it.copy(format = v) }
+    fun setQuality(v: Int) = change { it.copy(quality = v) }
+    fun setGainmapQuality(v: Int) = change { it.copy(gainmapQuality = v) }
+    fun setGainmapScale(v: Int) = change { it.copy(gainmapScale = v) }
+    fun setMultiChannel(v: Boolean) = change { it.copy(multiChannelGainmap = v) }
+    fun setKeepExif(v: Boolean) = change { it.copy(keepExif = v) }
+    fun setKeepLocation(v: Boolean) = change { it.copy(keepLocation = v) }
+    fun setAllowSdr(v: Boolean) = change { it.copy(allowSdr = v) }
+    fun setAutoSave(v: Boolean) = change { it.copy(autoSave = v) }
+    fun setOnlySmaller(v: Boolean) = change { it.copy(onlySmaller = v) }
+    fun setSpeedLevel(v: Int) = change { it.copy(speedLevel = v) }
+    fun setResizePercent(v: Int) = change { it.copy(resizePercent = v) }
 
     // ---- internals ----
 
@@ -347,7 +367,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         repo.update(id) {
             if (it.status == QueueStatus.PENDING) it.copy(status = QueueStatus.PROBING) else it
         }
-        val probe = withContext(Dispatchers.IO) {
+        val probe = scannedProbes.remove(uri.toString()) ?: withContext(Dispatchers.IO) {
             runCatching {
                 app.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
                     UltraHdrBridge.nativeProbe(pfd.fd)
@@ -396,6 +416,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     private fun emitRunSummary() {
+        _stopping.value = false
         if (cancelledRun) {
             cancelledRun = false
             lastRunIds = emptySet()
@@ -410,12 +431,12 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         val skipped = run.count { it.status == QueueStatus.SKIPPED }
         val saved = run
             .filter { it.status == QueueStatus.DONE }
-            .sumOf { ((it.result?.inputBytes ?: 0L) - (it.result?.outputBytes ?: 0L)).coerceAtLeast(0L) }
+            .sumOf { ((it.result?.inputBytes ?: 0L) - (it.result?.outputBytes ?: 0L)) }
         _events.tryEmit(HomeEvent.Finished(done = done, failed = failed, skipped = skipped, savedBytes = saved))
     }
 
     companion object {
         private const val MAX_SCAN_RESULTS = 500
-        private const val SCAN_PARALLELISM = 4
+        private const val SCAN_PARALLELISM = 2
     }
 }

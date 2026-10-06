@@ -19,7 +19,7 @@ class UltraSlimApp : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val database: AppDatabase by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        Room.databaseBuilder(this, AppDatabase::class.java, "ultraslim.db").build()
+        Room.databaseBuilder(this, AppDatabase::class.java, "ultraslim.db").addMigrations(AppDatabase.MIGRATION_1_2).build()
     }
 
     val settingsRepository: SettingsRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
@@ -27,13 +27,34 @@ class UltraSlimApp : Application() {
     }
 
     val conversionRepository: ConversionRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        ConversionRepository()
+        ConversionRepository(database.taskDao(), appScope)
     }
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        appScope.launch { cleanStaleOutputs() }
+        appScope.launch {
+            conversionRepository.awaitReady()
+            // Promote legacy cache outputs before any cleanup; never delete a referenced result.
+            database.historyDao().all().forEach { entity ->
+                if (!entity.outputUri.startsWith("content://")) {
+                    val old = File(entity.outputUri)
+                    if (old.isFile && old.canonicalPath.startsWith(cacheDir.canonicalPath + "/")) {
+                        val target = File(filesDir, "outputs/${entity.id}_${old.name}").apply { parentFile?.mkdirs() }
+                        if (old.renameTo(target)) database.historyDao().update(entity.copy(outputUri = target.path))
+                    }
+                }
+            }
+            val referenced = database.historyDao().all().flatMap { listOf(it.inputUri, it.outputUri) } + conversionRepository.queue.value.flatMap { listOf(it.uri, it.outputUri.orEmpty()) }
+            val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+            listOf("inputs", "outputs").forEach { folder ->
+                File(filesDir, folder).listFiles()?.forEach { file ->
+                    val uri = androidx.core.content.FileProvider.getUriForFile(this@UltraSlimApp, "$packageName.files", file).toString()
+                    if(file.lastModified() < cutoff && file.path !in referenced && uri !in referenced) file.delete()
+                }
+            }
+            cleanStaleOutputs()
+        }
     }
 
     private fun createNotificationChannel() {
@@ -50,7 +71,7 @@ class UltraSlimApp : Application() {
     /** Drops leftover transcode outputs and URI batches older than a day. */
     private fun cleanStaleOutputs() {
         val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
-        for (name in listOf("outputs", "batches")) {
+        for (name in listOf("previews")) {
             runCatching {
                 val dir = File(cacheDir, name)
                 if (!dir.isDirectory) return@runCatching

@@ -54,7 +54,7 @@ fun AppRoot() {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
     val isTopLevel = currentRoute == Routes.HOME || currentRoute == Routes.HISTORY
-    val useRail = LocalConfiguration.current.screenWidthDp >= 840
+    val useRail = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width / androidx.compose.ui.platform.LocalDensity.current.density >= 840
 
     if (isTopLevel && useRail) {
         Row(Modifier.fillMaxSize()) {
@@ -74,10 +74,11 @@ fun AppRoot() {
                 )
                 Spacer(Modifier.weight(1f))
             }
-            AppNavHost(navController = navController)
+            AppNavHost(navController = navController, modifier = Modifier.weight(1f))
         }
     } else {
         Scaffold(
+            contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
             bottomBar = {
                 if (isTopLevel) {
                     NavigationBar {

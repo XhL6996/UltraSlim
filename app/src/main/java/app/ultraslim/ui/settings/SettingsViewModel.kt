@@ -43,6 +43,9 @@ class SettingsViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     fun setAutoSave(enabled: Boolean) = viewModelScope.launch { repo.setAutoSave(enabled) }
 
+    fun setOnlySmaller(v: Boolean) = viewModelScope.launch { repo.setOnlySmaller(v) }
+    fun setKeepLocation(v: Boolean) = viewModelScope.launch { repo.setKeepLocation(v) }
+
     fun setSpeedLevel(level: Int) = viewModelScope.launch { repo.setSpeedLevel(level) }
 
     fun setResizePercent(percent: Int) = viewModelScope.launch { repo.setResizePercent(percent) }

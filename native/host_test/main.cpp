@@ -54,7 +54,7 @@ int main(int argc, char** argv) {
     printf("== decodePreviewJpeg ==\n");
     printf("  bytes         : %zu\n", jpeg.size());
     if (!jpeg.empty()) {
-      int outFd2 = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      int outFd2 = open(output, O_RDWR | O_CREAT | O_TRUNC, 0644);
       write(outFd2, jpeg.data(), jpeg.size());
       close(outFd2);
     }
@@ -85,8 +85,9 @@ int main(int argc, char** argv) {
   if (argc > 5) o.gainmapQuality = atoi(argv[5]);
   if (argc > 6) o.speedLevel = atoi(argv[6]);
   if (argc > 7) o.resizePercent = atoi(argv[7]);
+  if (argc > 8) o.preserveGainMap = atoi(argv[8]) != 0;
 
-  int outFd = open(output, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+  int outFd = open(output, O_RDWR | O_CREAT | O_TRUNC, 0644);
   if (outFd < 0) {
     fprintf(stderr, "cannot open %s: %s\n", output, strerror(errno));
     close(inFd);

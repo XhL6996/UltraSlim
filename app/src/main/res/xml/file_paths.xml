@@ -1,0 +1,2 @@
+<paths xmlns:android="http://schemas.android.com/apk/res/android"><files-path name="outputs" path="outputs/" /><cache-path name="legacy_outputs" path="outputs/" />    <files-path name="inputs" path="inputs/" />
+</paths>
