@@ -1,7 +1,26 @@
-# 极速模式（硬件编码）设计稿 — 待排期
+# 极速模式（硬件编码）设计稿 — 实测后暂缓
 
-> 状态：设计稿，未排期。触发条件已实测：M154FF（SM8975）无硬件 AV1 编码器；
-> 有 `c2.qti.hevc.encoder` / `c2.qti.hevc.encoder.cq` / `c2.qti.heic.encoder`（ Qualcomm 硬件 HEIC 图像编码器）。
+> 状态：**暂缓**（2026-10-07 实测后结论）。触发条件已实测：M154FF（SM8975，平台 "art"）无硬件 AV1 编码器；
+> 有 `c2.qti.hevc.encoder` / `c2.qti.hevc.encoder.cq` / `c2.qti.heic.encoder`（Qualcomm 硬件 HEIC 图像编码器）。
+
+## 实测结论（NDK MediaCodec 探针，2026-10-07）
+
+用独立可执行探针（`AMediaCodec` + NV12 ByteBuffer 输入，5888×4416 真实照片）在 M154FF 上实测：
+
+| 编码器 | 结果 |
+|---|---|
+| `c2.qti.av1.*` | **不存在**（vendor 配置只有 av1 解码器）→ AVIF 无法硬件加速 |
+| `c2.qti.heic.encoder`（image/vnd.android.heic，CQ 0-100，≤16384²） | configure 成功、输入喂入成功，**输出永不产生**（60s 看门狗超时，0 字节）。该编码器为相机拍照链路设计，实际只支持 Surface/ImageWriter 输入，不支持裸 ByteBuffer |
+| `c2.qti.hevc.encoder`（video/hevc，VBR/CBR，≤8192²） | configure 直接失败（-10000，vendor Cota 特性依赖，NDK 配置路径不满足） |
+| `c2.qti.hevc.encoder.cq` | 尺寸上限仅 **512×512**（缩略图档），不可用于全尺寸 |
+
+## 结论与建议
+
+- 在这台设备上，**没有一条硬件编码路径能用合理工程量接入**：HEIC 硬编码需要 Java 侧 ImageWriter/Surface 原型验证（相机式用法，无法经 NDK ByteBuffer 驱动），即使通了还要绕开 libheif 自写 HEIF/tmap 组装，且同画质体积比 x265 大 10-30%。
+- **暂缓投入**。线程 4→8（已上线）是当前性价比最高的提速手段。
+- 若后续仍觉慢，优先评估两个低风险方向：① 小图双路并行转换（现串行）；② x265 preset 映射调快一档（代价体积 +5-10%）。硬件路径重新评估的触发条件：换用带硬件 AV1 编码器的设备，或 ImageWriter 原型在该设备验证可行。
+
+## 结论先行（原始设计，保留备查）
 
 ## 结论先行
 
