@@ -1,0 +1,16 @@
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+/build/
+/app/build/
+/build-host-test/
+/native/deps/build/
+/native/prefix/
+/captures
+.externalNativeBuild
+.cxx
+*.keystore
+/build-android-test/
+/build-uhdr-app/

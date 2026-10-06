@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">UltraSlim</string>
+    <string name="channel_conversion_name">图片转换</string>
+    <string name="channel_conversion_desc">显示图片转换进度</string>
+</resources>
