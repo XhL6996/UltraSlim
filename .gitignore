@@ -15,3 +15,6 @@
 /build-android-test/
 /build-uhdr-app/
 /phone_out_sdr.raw
+/phone_out_hdr.raw
+.kotlin/
+/build-host-dbg/

@@ -40,11 +40,11 @@ build-host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 ## 关键实现说明
 
 - 两条转码路径，按请求自动选择：
-  - **preserve（原样保留 gainmap）**：仅当请求的 gainmapScale 与源采样因子一致时启用；主图重压缩/缩放/换格式，gainmap 像素逐值保留（HEIF/AVIF 走无损 GBR/mono 直写）。*不要*对 gainmap 做下采样——实验证明即使 2x bilinear 下采样也会砍掉高光增益。
-  - **rebuild（重建 gainmap）**：gainmapScale 变化时走 libultrahdr 全解码重编码（自一致、已验证）；preserve 失败也回退到这里（不报错）。
+  - **preserve（原样保留 gainmap）**：默认且唯一的 HDR 路径；主图重压缩/缩放/换格式，gainmap 像素逐值保留（HEIF/AVIF 走无损 GBR/mono 直写）。旧 gainmapScale / gainmapQuality / multiChannelGainmap 参数对保留行为无影响（仅为接口/快照兼容保留）。*不要*对 gainmap 做下采样——实验证明即使 2x bilinear 下采样也会砍掉高光增益。
+  - **rebuild（重建 gainmap）**：仅在显式传 `preserveGainMap=false` 时走的 libultrahdr 全解码重编码逃生通道（自一致、已验证）。preserve 不支持的情况（>8 位增益图、容器 HDR 转 JPEG）明确报错（errorCode 31）并保持输出为空，绝不静默回退 rebuild。
 - 验证方法：rendition_dump/gm_dump（host_test/）把文件解出 SDR/HDR 渲染版，在线性域（hlgInvOetf 之后）对比均值——*必须*用线性域，任何非线性 tonemap 都会因 Jensen 不等式产生伪"亮度差"。真机照片（小米 5888x4416、多通道 gainmap）与样本均已验证 ±3%。
 - Android 15 及更早的平台解码器不认识 ISO 21496-1 tmap HEIC，预览一律走 `nativeDecodePreview` 原生兜底（UltraAsyncImage，带 PreviewCache）。
-- 编码输出固定 8-bit（base + gainmap），所以 x265 只编 8-bit；AV1 编码走 **SVT-AV1**（比 aomenc 快数倍），AV1 解码走 aom，HEVC 解码走 libde265（支持 HEIC/AVIF 输入）。
+- 编码输出固定 8-bit（base + gainmap），所以 x265 只编 8-bit；AV1 编码走 **SVT-AV1**（比 aomenc 快数倍），AV1 解码走 dav1d（aom 解码器在大图上有横向拖影，仅保留无损 gainmap 编码用途），HEVC 解码走 libde265（支持 HEIC/AVIF 输入）。
 - 速度档位（speedLevel 0/1/2）：HEVC 映射 x265 preset slow/medium/veryfast，AV1 映射 "speed" 4/6/9；经 vendored libultrahdr 补丁注入（`heifultrahdr.cpp` / `avifultrahdr.cpp`，读取全局弱符号 `ultraslim_codec_speed_level`，强定义在 transcode.cpp）。svt 插件没有 "chroma" 参数，`set_internal_color_format` 已改为容错。
 - 分辨率缩放：HDR 路径用 `uhdr_add_effect_resize`（解码时生效），SDR 路径用自带 bilinear（RGBA8888）。
 - 预览兜底：平台解码器不认识 ISO 21496-1 tmap HEIC（Android 15 及更早）时，`UltraAsyncImage`（ui/components/Components.kt）会走 `nativeDecodePreview`（原生解码主图 → JPEG → Bitmap）显示预览；历史/队列/详情共用。
