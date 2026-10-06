@@ -14,3 +14,4 @@
 *.keystore
 /build-android-test/
 /build-uhdr-app/
+/phone_out_sdr.raw
