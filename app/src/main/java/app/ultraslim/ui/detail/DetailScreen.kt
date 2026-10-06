@@ -100,8 +100,11 @@ import app.ultraslim.ui.components.BadgeChip
 import app.ultraslim.ui.components.InfoRow
 import app.ultraslim.ui.components.SectionHeader
 import app.ultraslim.ui.components.UltraAsyncImage
+import app.ultraslim.ui.theme.Motion
 import app.ultraslim.util.formatBoost
 import app.ultraslim.util.formatBytes
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import app.ultraslim.util.formatDuration
 import app.ultraslim.util.formatResolution
 import app.ultraslim.util.formatSavedPercent
@@ -206,18 +209,26 @@ private fun DetailContent(
     modifier: Modifier = Modifier,
 ) {
     var backProgress by remember { mutableFloatStateOf(0f) }
+    val scope = rememberCoroutineScope()
+    var backSettle by remember { mutableStateOf<Job?>(null) }
     PredictiveBackHandler { progress ->
         try {
-            progress.collect { backEvent -> backProgress = backEvent.progress }
-            backProgress = 0f
+            progress.collect { backEvent ->
+                backSettle?.cancel()
+                backSettle = null
+                backProgress = backEvent.progress
+            }
+            // 提交：保留缩小形变，直接进入 pop 过渡，不再先弹回原状。
             onBack()
         } catch (e: CancellationException) {
-            backProgress = 0f
+            // 取消：弹簧回弹，而不是瞬间跳回。
+            backSettle = scope.launch {
+                animate(backProgress, 0f, animationSpec = Motion.settleBack()) { v, _ -> backProgress = v }
+            }
         }
     }
 
     val saved = entity.outputUri.startsWith("content://")
-    val scope = rememberCoroutineScope()
 
     Column(
         modifier = modifier
@@ -302,6 +313,12 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
+    // 双击缩放动画的唯一宿主：捏合/拖动随时 cancel 它，杜绝两处并发写同一状态。
+    var zoomAnim by remember { mutableStateOf<Job?>(null) }
+    fun cancelZoomAnim() {
+        zoomAnim?.cancel()
+        zoomAnim = null
+    }
     fun maxPan(scaleNow: Float): Offset = Offset(
         (scaleNow - 1f) * viewSize.width / 2f,
         (scaleNow - 1f) * viewSize.height / 2f,
@@ -309,6 +326,7 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
 
     val previewHeight = with(density) { (LocalWindowInfo.current.containerSize.height.toDp() * .4f).coerceIn(220.dp, 420.dp) }
     val transform = rememberTransformableState { zoom, pan, _ ->
+        cancelZoomAnim()
         val newScale = (zoomScale * zoom).coerceIn(1f, 4f)
         zoomScale = newScale
         val max = maxPan(newScale)
@@ -337,11 +355,12 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                 .pointerInput(Unit) {
                     detectTapGestures(
                         onDoubleTap = {
+                            cancelZoomAnim()
                             val target = if (zoomScale > 1f) 1f else 2.5f
                             val startScale = zoomScale
                             val startOffset = panOffset
-                            scope.launch {
-                                animate(0f, 1f, animationSpec = tween(220)) { t, _ ->
+                            zoomAnim = scope.launch {
+                                animate(0f, 1f, animationSpec = tween(Motion.Standard, easing = Motion.StandardEasing)) { t, _ ->
                                     zoomScale = startScale + (target - startScale) * t
                                     panOffset = if (target == 1f) startOffset * (1f - t) else startOffset
                                 }
@@ -349,6 +368,16 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                             }
                         },
                     )
+                }
+                // 未放大：整图横向拖动 = 移动分割线（手柄只是视觉锚点），纵向让给页面滚动；
+                // 放大后本检测器停用，单指交给 transformable 平移，分割线由下方滑杆控制。
+                .pointerInput(zoomScale <= 1f) {
+                    if (zoomScale <= 1f) {
+                        detectHorizontalDragGestures { change, dragAmount ->
+                            change.consume()
+                            fraction = (fraction + dragAmount / viewSize.width).coerceIn(0f, 1f)
+                        }
+                    }
                 }
                 .transformable(state = transform, canPan = { zoomScale > 1f })
                 .graphicsLayer {
@@ -390,7 +419,8 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                     .background(Color.White.copy(alpha = 0.9f)),
             )
 
-            // 拖拽手柄
+            // 拖拽手柄：视觉锚点。分割线由整图横向拖动或下方滑杆控制，这里不再拦截手势，
+            // 保证从手柄上起手的捏合/拖动也有正确仲裁。
             Surface(
                 shape = CircleShape,
                 color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
@@ -398,13 +428,7 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                 modifier = Modifier
                     .align(Alignment.CenterStart)
                     .offset { androidx.compose.ui.unit.IntOffset((viewSize.width * fraction - with(density) { 18.dp.toPx() }).toInt(), 0) }
-                    .size(36.dp)
-                    .pointerInput(Unit) {
-                        detectHorizontalDragGestures { change, drag ->
-                            change.consume()
-                            fraction = (fraction + drag / viewSize.width).coerceIn(0f, 1f)
-                        }
-                    },
+                    .size(36.dp),
             ) {
                 Icon(
                     Icons.Rounded.DragIndicator,
@@ -418,7 +442,7 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
             CompareLabel("压缩后", Modifier.align(Alignment.TopEnd).padding(12.dp))
         }
         Slider(modifier = Modifier.padding(horizontal = 16.dp).semantics { contentDescription = "原图与成品比较比例" }, value = fraction, onValueChange = { fraction = it }, valueRange = 0f..1f)
-        Text("左右拖动滑杆对比 · 双指缩放", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelSmall)
+        Text("左右拖动对比 · 双指缩放 · 放大后单指平移", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelSmall)
     }
 }
 

@@ -1,5 +1,14 @@
 package app.ultraslim.ui.history
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -21,7 +30,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import app.ultraslim.convert.OutputStore
 import app.ultraslim.ui.appViewModelFactory
 import app.ultraslim.ui.components.*
+import app.ultraslim.ui.theme.Motion
 import app.ultraslim.util.*
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -29,6 +40,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
     val vm: HistoryViewModel = viewModel(factory = appViewModelFactory { HistoryViewModel(it) })
     val state by vm.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
     var filter by remember { mutableStateOf("全部") }
     var selected by remember { mutableStateOf(setOf<Long>()) }
@@ -36,6 +48,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
     var selecting by remember { mutableStateOf(false) }
     LaunchedEffect(vm) { vm.events.collect { snackbar.showSnackbar(it) } }
     val visible = state.items.filter { when(filter) { "待保存" -> it.saveState != "SAVED"; "已保存" -> it.saveState == "SAVED"; "保存失败" -> it.saveState == "FAILED"; else -> true } }
+    val railMode = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width / androidx.compose.ui.platform.LocalDensity.current.density >= 840
     Scaffold(topBar = { TopAppBar(title = { Column { Text("成品库", style = MaterialTheme.typography.titleLarge); Text("每一次减负，都看得见", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }, actions = {
             TextButton(onClick = { selecting = !selecting; if(!selecting) selected=emptySet() }) { Text(if(selecting) "完成" else "选择") }
             var menu by remember { mutableStateOf(false) }
@@ -44,27 +57,59 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
             }
         }) },
         contentWindowInsets = WindowInsets(0,0,0,0), snackbarHost = { SnackbarHost(snackbar) },
-        bottomBar = { if(selected.isNotEmpty()) Surface(tonalElevation = 3.dp) {
-            FlowRow(Modifier.navigationBarsPadding().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Button(onClick = { vm.saveSelected(selected) }, enabled = !state.busy && android.os.Build.VERSION.SDK_INT >= 29) { Text(if(state.busy) "保存中…" else "保存 ${selected.size} 张") }
-                OutlinedButton(onClick = { if(!OutputStore.share(context, state.items.filter { it.id in selected })) android.widget.Toast.makeText(context,"分享失败，文件不可访问",android.widget.Toast.LENGTH_LONG).show() }, enabled = !state.busy) { Text("分享") }
-                TextButton(onClick = {selected=emptySet()}) { Text("取消选择") }
+        bottomBar = {
+            AnimatedVisibility(
+                visible = selected.isNotEmpty(),
+                enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.standard()),
+                exit = slideOutVertically(Motion.exit()) { it } + fadeOut(Motion.exit()),
+            ) {
+                Surface(tonalElevation = 3.dp) {
+                    FlowRow(Modifier.navigationBarsPadding().padding(16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { vm.saveSelected(selected) }, enabled = !state.busy && android.os.Build.VERSION.SDK_INT >= 29) { Text(if(state.busy) "保存中…" else "保存 ${selected.size} 张") }
+                        OutlinedButton(onClick = {
+                            if(!OutputStore.share(context, state.items.filter { it.id in selected }))
+                                scope.launch { snackbar.showSnackbar("分享失败，文件不可访问") }
+                        }, enabled = !state.busy) { Text("分享") }
+                        TextButton(onClick = {selected=emptySet()}) { Text("取消选择") }
+                    }
+                }
             }
-        } }
+        }
     ) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding), contentPadding=PaddingValues(20.dp), verticalArrangement=Arrangement.spacedBy(12.dp)) {
+        LazyColumn(
+            Modifier.fillMaxSize().padding(padding),
+            contentPadding = PaddingValues(
+                start = 20.dp, top = 20.dp, end = 20.dp,
+                // rail 模式且未在选择模式时没有批量操作栏，补上导航条避让。
+                bottom = 20.dp + if (railMode && !selecting) WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp,
+            ),
+            verticalArrangement=Arrangement.spacedBy(12.dp)) {
             item { StatsCard(state.totalSavedBytes,state.convertedCount) }
             item { FlowRow(horizontalArrangement=Arrangement.spacedBy(8.dp)) {
                 listOf("全部","待保存","已保存","保存失败").forEach { label -> FilterChip(selected=filter==label,onClick={filter=label},label={Text(label)}) }
                 if(selecting) TextButton(onClick={selected=visible.map {it.id}.toSet()}) {Text("全选当前页")}
             } }
-            if(visible.isEmpty()) item { EmptyState(Icons.Rounded.History,"暂无此类记录","完成的成品和保存状态会显示在这里") }
+            if(visible.isEmpty()) item {
+                AnimatedVisibility(
+                    visible = visible.isEmpty(),
+                    enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                    exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+                ) {
+                    EmptyState(Icons.Rounded.History,"暂无此类记录","完成的成品和保存状态会显示在这里")
+                }
+            }
             visible.groupBy {it.batchId.ifBlank {"legacy"}}.forEach { (batch, records) ->
                 item(key="batch-$batch") { Text(if(batch=="legacy") "以前的转换" else "批次 · ${formatRelativeTime(records.first().createdAt)} · ${records.size} 张",style=MaterialTheme.typography.titleSmall) }
                 items(records,key={it.id}) { entity ->
-                    Card(onClick={if(selecting) selected=if(entity.id in selected) selected-entity.id else selected+entity.id else onOpenDetail(entity.id)},modifier=Modifier.fillMaxWidth(), colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainerLow)) {
+                    Card(onClick={if(selecting) selected=if(entity.id in selected) selected-entity.id else selected+entity.id else onOpenDetail(entity.id)},modifier=Modifier.fillMaxWidth().animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast)), colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainerLow)) {
                         Row(Modifier.padding(12.dp),verticalAlignment=Alignment.CenterVertically) {
-                            if(selecting) Checkbox(checked=entity.id in selected,onCheckedChange={selected=if(it) selected+entity.id else selected-entity.id})
+                            AnimatedVisibility(
+                                visible = selecting,
+                                enter = expandHorizontally(Motion.standard()) + fadeIn(Motion.standard()),
+                                exit = shrinkHorizontally(Motion.exit()) + fadeOut(Motion.exit()),
+                            ) {
+                                Checkbox(checked=entity.id in selected,onCheckedChange={selected=if(it) selected+entity.id else selected-entity.id})
+                            }
                             UltraAsyncImage(entity.outputUri,null,ContentScale.Crop,Modifier.size(80.dp).clip(RoundedCornerShape(14.dp)),384)
                             Column(Modifier.weight(1f).padding(start=12.dp)) {
                                 Text(entity.displayName,maxLines=1,overflow=TextOverflow.Ellipsis,style=MaterialTheme.typography.titleSmall)

@@ -1,11 +1,15 @@
 package app.ultraslim.ui
 
-import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,7 +27,6 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
 import androidx.navigation.NavType
@@ -36,6 +39,7 @@ import app.ultraslim.ui.detail.DetailScreen
 import app.ultraslim.ui.history.HistoryScreen
 import app.ultraslim.ui.home.HomeScreen
 import app.ultraslim.ui.settings.SettingsScreen
+import app.ultraslim.ui.theme.Motion
 
 object Routes {
     const val HOME = "home"
@@ -46,17 +50,18 @@ object Routes {
     fun detail(historyId: Long) = "detail/$historyId"
 }
 
-private const val TRANSITION_MS = 320
+private val topLevelRoutes = setOf(Routes.HOME, Routes.HISTORY)
 
 @Composable
 fun AppRoot() {
     val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
-    val isTopLevel = currentRoute == Routes.HOME || currentRoute == Routes.HISTORY
+    val isTopLevel = currentRoute in topLevelRoutes
     val useRail = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width / androidx.compose.ui.platform.LocalDensity.current.density >= 840
 
-    if (isTopLevel && useRail) {
+    if (useRail) {
+        // 宽屏下 rail 常驻：推入设置/详情时不再整列消失。
         Row(Modifier.fillMaxSize()) {
             NavigationRail {
                 Spacer(Modifier.weight(1f))
@@ -80,7 +85,11 @@ fun AppRoot() {
         Scaffold(
             contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
             bottomBar = {
-                if (isTopLevel) {
+                AnimatedVisibility(
+                    visible = isTopLevel,
+                    enter = slideInVertically(Motion.emphasized()) { it } + fadeIn(Motion.emphasized()),
+                    exit = slideOutVertically(Motion.exit(Motion.Emphasized)) { it } + fadeOut(Motion.exit(Motion.Emphasized)),
+                ) {
                     NavigationBar {
                         NavigationBarItem(
                             selected = currentRoute == Routes.HOME,
@@ -105,25 +114,44 @@ fun AppRoot() {
 
 @Composable
 private fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) {
+    // 顶级 Tab 之间用 fade-through（轻微缩放淡换）；进出 设置/详情 保留横向推入。
+    fun bothTopLevel(initial: androidx.navigation.NavBackStackEntry, target: androidx.navigation.NavBackStackEntry) =
+        initial.destination.route in topLevelRoutes && target.destination.route in topLevelRoutes
     NavHost(
         navController = navController,
         startDestination = Routes.HOME,
         modifier = modifier,
         enterTransition = {
-            slideInHorizontally(tween(TRANSITION_MS, easing = FastOutSlowInEasing)) { it / 5 } +
-                fadeIn(tween(TRANSITION_MS))
+            if (bothTopLevel(initialState, targetState))
+                fadeIn(tween(Motion.Emphasized, easing = Motion.StandardEasing)) +
+                    scaleIn(tween(Motion.Emphasized, easing = Motion.StandardEasing), initialScale = 0.94f)
+            else
+                slideInHorizontally(tween(Motion.Emphasized, easing = Motion.StandardEasing)) { it / 5 } +
+                    fadeIn(tween(Motion.Emphasized))
         },
         exitTransition = {
-            slideOutHorizontally(tween(TRANSITION_MS, easing = FastOutSlowInEasing)) { -it / 5 } +
-                fadeOut(tween(TRANSITION_MS))
+            if (bothTopLevel(initialState, targetState))
+                fadeOut(tween(Motion.Emphasized, easing = Motion.StandardEasing)) +
+                    scaleOut(tween(Motion.Emphasized, easing = Motion.StandardEasing), targetScale = 0.94f)
+            else
+                slideOutHorizontally(tween(Motion.Emphasized, easing = Motion.StandardEasing)) { -it / 5 } +
+                    fadeOut(tween(Motion.Emphasized))
         },
         popEnterTransition = {
-            slideInHorizontally(tween(TRANSITION_MS, easing = FastOutSlowInEasing)) { -it / 5 } +
-                fadeIn(tween(TRANSITION_MS))
+            if (bothTopLevel(initialState, targetState))
+                fadeIn(tween(Motion.Emphasized, easing = Motion.StandardEasing)) +
+                    scaleIn(tween(Motion.Emphasized, easing = Motion.StandardEasing), initialScale = 0.94f)
+            else
+                slideInHorizontally(tween(Motion.Emphasized, easing = Motion.StandardEasing)) { -it / 5 } +
+                    fadeIn(tween(Motion.Emphasized))
         },
         popExitTransition = {
-            slideOutHorizontally(tween(TRANSITION_MS, easing = FastOutSlowInEasing)) { it / 5 } +
-                fadeOut(tween(TRANSITION_MS))
+            if (bothTopLevel(initialState, targetState))
+                fadeOut(tween(Motion.Emphasized, easing = Motion.StandardEasing)) +
+                    scaleOut(tween(Motion.Emphasized, easing = Motion.StandardEasing), targetScale = 0.94f)
+            else
+                slideOutHorizontally(tween(Motion.Emphasized, easing = Motion.StandardEasing)) { it / 5 } +
+                    fadeOut(tween(Motion.Emphasized))
         },
     ) {
         composable(Routes.HOME) {
