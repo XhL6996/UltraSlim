@@ -107,6 +107,11 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     /** Shared by album scan and manually added items. */
     private val scannedProbes = java.util.concurrent.ConcurrentHashMap<String, app.ultraslim.bridge.ProbeResult>()
 
+    private val _importing = MutableStateFlow(false)
+    val importing: StateFlow<Boolean> = _importing.asStateFlow()
+    private val _importProgress = MutableStateFlow("")
+    val importProgress: StateFlow<String> = _importProgress.asStateFlow()
+
     private val probePermits = Semaphore(SCAN_PARALLELISM)
 
     private val workRunning: Flow<Boolean> = workManager
@@ -259,15 +264,24 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         if (fresh.isEmpty()) return 0
 
         val items = mutableListOf<QueueItem>()
-        for (uriString in fresh) {
-            val uri = Uri.parse(uriString)
-            try {
-                val (name, size) = withContext(Dispatchers.IO) { resolveMeta(uri) }
-                val id = UUID.randomUUID().toString()
-                val durable = withContext(Dispatchers.IO) { InputStore.persist(app, uri, id) }
-                items += QueueItem(id = id, uri = durable.toString(), displayName = name, sizeBytes = size)
-            } catch (e: CancellationException) { throw e }
-            catch (e: Exception) { _events.emit(HomeEvent.Info("导入失败：${e.message}")) }
+        _importing.value = true
+        try {
+            var index = 0
+            for (uriString in fresh) {
+                index++
+                if (fresh.size > 9) _importProgress.value = "正在导入 ${index}/${fresh.size}…"
+                val uri = Uri.parse(uriString)
+                try {
+                    val (name, size) = withContext(Dispatchers.IO) { resolveMeta(uri) }
+                    val id = UUID.randomUUID().toString()
+                    val durable = withContext(Dispatchers.IO) { InputStore.persist(app, uri, id) }
+                    items += QueueItem(id = id, uri = durable.toString(), displayName = name, sizeBytes = size)
+                } catch (e: CancellationException) { throw e }
+                catch (e: Exception) { _events.emit(HomeEvent.Info("导入失败：${e.message}")) }
+            }
+        } finally {
+            _importing.value = false
+            _importProgress.value = ""
         }
         repo.addAll(items)
         coroutineScope {
@@ -387,9 +401,33 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     fun cancelScan() { scanJob?.cancel() }
 
-    fun removeItem(id: String) = repo.remove(id)
+    fun removeItem(id: String) {
+        val item = repo.find(id) ?: return
+        InputStore.deletePersisted(app, Uri.parse(item.uri))
+        repo.remove(id)
+    }
 
-    fun clearFinished() = repo.clearFinished()
+    fun clearFinished() {
+        val doomed = repo.queue.value.filter { it.status == QueueStatus.DONE }
+        doomed.forEach { InputStore.deletePersisted(app, Uri.parse(it.uri)) }
+        repo.clearFinished()
+    }
+
+    fun clearPending() {
+        val doomed = repo.queue.value.filter {
+            it.status == QueueStatus.PENDING || it.status == QueueStatus.PROBING || it.status == QueueStatus.READY
+        }
+        doomed.forEach { InputStore.deletePersisted(app, Uri.parse(it.uri)) }
+        repo.clearPending()
+        viewModelScope.launch { _events.emit(HomeEvent.Info("已移除 ${doomed.size} 张待处理照片")) }
+    }
+
+    fun clearAll() {
+        val doomed = repo.queue.value.filter { it.status != QueueStatus.CONVERTING }
+        doomed.forEach { InputStore.deletePersisted(app, Uri.parse(it.uri)) }
+        repo.clearAll()
+        viewModelScope.launch { _events.emit(HomeEvent.Info("处理列表已清空（${doomed.size} 张）")) }
+    }
 
     fun retryItem(id: String) {
         if (uiState.value.isConverting) { _events.tryEmit(HomeEvent.Info("请等待当前批次结束后重试")); return }

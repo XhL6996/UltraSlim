@@ -118,4 +118,20 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
         }
         persist()
     }
+
+    /** 待处理项（未在转换中的）：PENDING / PROBING / READY。 */
+    @Synchronized fun clearPending() {
+        _queue.update { list ->
+            list.filterNot { it.status == QueueStatus.PENDING || it.status == QueueStatus.PROBING || it.status == QueueStatus.READY }
+        }
+        persist()
+    }
+
+    /** 全部清除；正在转换的条目等它落地后再清。 */
+    @Synchronized fun clearAll() {
+        _queue.update { list ->
+            list.filterNot { it.status != QueueStatus.CONVERTING }
+        }
+        persist()
+    }
 }

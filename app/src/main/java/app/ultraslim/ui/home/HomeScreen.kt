@@ -56,7 +56,16 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     val scanning by vm.scanning.collectAsStateWithLifecycle()
     val scanProgress by vm.scanProgress.collectAsStateWithLifecycle()
     val stopping by vm.stopping.collectAsStateWithLifecycle()
+    val importing by vm.importing.collectAsStateWithLifecycle()
+    val importProgress by vm.importProgress.collectAsStateWithLifecycle()
     val railLayout = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width / androidx.compose.ui.platform.LocalDensity.current.density >= 840
+    val pendingItems = remember(state.queue) {
+        state.queue.filter { it.status != QueueStatus.DONE && it.status != QueueStatus.SKIPPED && it.status != QueueStatus.FAILED }
+    }
+    val finishedItems = remember(state.queue) {
+        state.queue.filter { it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED || it.status == QueueStatus.FAILED }
+    }
+    var confirmClear by remember { mutableStateOf<String?>(null) }  // "pending" | "all"
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     var editOptions by remember { mutableStateOf(false) }
@@ -196,14 +205,14 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                     }
                     item {
                         AnimatedVisibility(
-                            visible = scanning,
+                            visible = scanning || importing,
                             enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
                             exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 CircularProgressIndicator(Modifier.size(20.dp)); Spacer(Modifier.width(12.dp))
-                                Text(scanProgress, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                                TextButton(onClick = vm::cancelScan) { Text("停止") }
+                                Text(if (scanning) scanProgress else importProgress, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                                if (scanning) TextButton(onClick = vm::cancelScan) { Text("停止") }
                             }
                         }
                     }
@@ -244,35 +253,31 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                     }
                     item {
                         AnimatedVisibility(
-                            visible = (state.hasFinishedItems || state.queue.any { it.status == QueueStatus.FAILED }) && !state.isConverting,
+                            visible = state.queue.isNotEmpty(),
                             enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
                             exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
                         ) {
                             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                if(state.hasFinishedItems) TextButton(onClick = vm::clearFinished) { Text("清除成功项") }
+                                if(pendingItems.isNotEmpty()) TextButton(onClick = { if(pendingItems.size >= 20) confirmClear = "pending" else vm.clearPending() }) { Text("清除待处理") }
                                 if(state.queue.any { it.status == QueueStatus.FAILED }) TextButton(onClick = vm::retryFailed) { Text("重试失败项") }
+                                if(state.hasFinishedItems) TextButton(onClick = vm::clearFinished) { Text("清除成功项") }
+                                TextButton(onClick = { confirmClear = "all" }) { Text("全部清除", color = MaterialTheme.colorScheme.error) }
                             }
                         }
                     }
                     // 待处理（含转换中）在前，已完成（成功/跳过/失败）在后：新导入的只会
                     // 出现在"待处理"组里，一眼可辨；状态变化时行平滑跨组移动（key 不变）。
-                    val pending = state.queue.filter {
-                        it.status != QueueStatus.DONE && it.status != QueueStatus.SKIPPED && it.status != QueueStatus.FAILED
+                    if (pendingItems.isNotEmpty()) item(key = "hdr-pending") {
+                        Text("待处理 · ${pendingItems.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
                     }
-                    val finished = state.queue.filter {
-                        it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED || it.status == QueueStatus.FAILED
-                    }
-                    if (pending.isNotEmpty()) item(key = "hdr-pending") {
-                        Text("待处理 · ${pending.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
-                    }
-                    items(pending, key = { it.id }) { item ->
+                    items(pendingItems, key = { it.id }) { item ->
                         QueueRow(item, onRemove = { vm.removeItem(item.id) }, onRetry = { vm.retryItem(item.id) }, onOpen = { item.historyId?.let(onOpenDetail) },
                             modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast)))
                     }
-                    if (finished.isNotEmpty()) item(key = "hdr-finished") {
-                        Text("已完成 · ${finished.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                    if (finishedItems.isNotEmpty()) item(key = "hdr-finished") {
+                        Text("已完成 · ${finishedItems.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
                     }
-                    items(finished, key = { it.id }) { item ->
+                    items(finishedItems, key = { it.id }) { item ->
                         QueueRow(item, onRemove = { vm.removeItem(item.id) }, onRetry = { vm.retryItem(item.id) }, onOpen = { item.historyId?.let(onOpenDetail) },
                             modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast)))
                     }
@@ -353,6 +358,16 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             }
             Spacer(Modifier.height(12.dp))
         }
+    }
+    confirmClear?.let { what ->
+        val count = if (what == "pending") pendingItems.size else state.queue.size
+        AlertDialog(
+            onDismissRequest = { confirmClear = null },
+            title = { Text(if (what == "pending") "清除 $count 张待处理照片？" else "清空处理列表（$count 张）？") },
+            text = { Text("列表记录会被移除；已保存到相册的成品不受影响，原图始终保留。") },
+            confirmButton = { TextButton(onClick = { confirmClear = null; if (what == "pending") vm.clearPending() else vm.clearAll() }) { Text("清除", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { confirmClear = null }) { Text("取消") } },
+        )
     }
 }
 
