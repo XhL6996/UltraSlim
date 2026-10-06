@@ -36,7 +36,7 @@ JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeProbe(J
 JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeTranscode(
     JNIEnv* env, jclass /*unused*/, jint inFd, jint outFd, jint outCodec, jint quality,
     jint gainmapQuality, jint gainmapScale, jboolean multiChannelGainmap, jboolean keepExif,
-    jboolean allowSdrTranscode, jint speedLevel, jint resizePercent) {
+    jboolean allowSdrTranscode, jint speedLevel, jint resizePercent, jint codecThreads) {
   ultraslim::TranscodeOptions o;
   o.outCodec = outCodec;
   o.quality = quality;
@@ -47,6 +47,7 @@ JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeTransco
   o.allowSdrTranscode = allowSdrTranscode == JNI_TRUE;
   o.speedLevel = speedLevel;
   o.resizePercent = resizePercent;
+  o.codecThreads = codecThreads;
   return toTranscodeResult(env, ultraslim::transcodeImage(inFd, outFd, o));
 }
 

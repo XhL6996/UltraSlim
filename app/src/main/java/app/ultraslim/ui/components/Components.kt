@@ -1,9 +1,7 @@
 package app.ultraslim.ui.components
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
-import android.os.ParcelFileDescriptor
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -47,10 +45,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import app.ultraslim.bridge.UltraHdrBridge
 import app.ultraslim.data.ConversionDefaults
 import app.ultraslim.model.OutputFormat
 import app.ultraslim.util.formatBytes
@@ -442,10 +440,21 @@ private fun SliderOption(
     }
 }
 
+/** Long edge for a 56.dp row thumbnail: two device pixels, clamped for the native decoder. */
+@Composable
+fun rememberThumbMaxDim(): Int {
+    val density = LocalDensity.current
+    return remember(density) {
+        with(density) { (56.dp.toPx() * 2f).roundToInt() }.coerceIn(64, 512)
+    }
+}
+
 /**
  * AsyncImage with a native-decode fallback: when the platform decoder cannot
  * handle the file (e.g. ISO 21496-1 gain map HEIC), the primary SDR rendition
  * is decoded by the bundled native stack and shown as JPEG bytes instead.
+ * [maxDim] is the long edge requested from that fallback. List rows should pass
+ * [rememberThumbMaxDim]; detail keeps the default.
  */
 @Composable
 fun UltraAsyncImage(
@@ -453,9 +462,21 @@ fun UltraAsyncImage(
     contentDescription: String?,
     contentScale: ContentScale,
     modifier: Modifier = Modifier,
+    maxDim: Int = 1280,
 ) {
     val context = LocalContext.current
-    var useNative by remember(uriString) { mutableStateOf(false) }
+    val cached = remember(uriString, maxDim) { PreviewCache.get(uriString, maxDim) }
+    if (cached != null) {
+        AsyncImage(
+            model = cached,
+            contentDescription = contentDescription,
+            contentScale = contentScale,
+            modifier = modifier,
+        )
+        return
+    }
+
+    var useNative by remember(uriString, maxDim) { mutableStateOf(false) }
 
     if (!useNative) {
         AsyncImage(
@@ -466,20 +487,9 @@ fun UltraAsyncImage(
             onError = { useNative = true },
         )
     } else {
-        val bitmap = produceState<Bitmap?>(null, uriString) {
+        val bitmap = produceState<Bitmap?>(null, uriString, maxDim) {
             value = withContext(Dispatchers.IO) {
-                runCatching {
-                    val bytes = if (uriString.startsWith("content://")) {
-                        context.contentResolver
-                            .openFileDescriptor(Uri.parse(uriString), "r")
-                            ?.use { UltraHdrBridge.nativeDecodePreview(it.fd, 1280) }
-                    } else {
-                        ParcelFileDescriptor
-                            .open(File(uriString), ParcelFileDescriptor.MODE_READ_ONLY)
-                            .use { UltraHdrBridge.nativeDecodePreview(it.fd, 1280) }
-                    }
-                    bytes?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
-                }.getOrNull()
+                PreviewCache.load(context, uriString, maxDim)
             }
         }.value
         if (bitmap != null) {

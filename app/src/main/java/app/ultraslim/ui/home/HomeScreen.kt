@@ -91,6 +91,7 @@ import app.ultraslim.ui.components.StatsCard
 import app.ultraslim.util.formatBytes
 import app.ultraslim.util.formatSavedPercent
 import app.ultraslim.ui.components.UltraAsyncImage
+import app.ultraslim.ui.components.rememberThumbMaxDim
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -460,6 +461,7 @@ private fun QueueCard(
                 uriString = item.uri,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
+                maxDim = rememberThumbMaxDim(),
                 modifier = Modifier
                     .size(56.dp)
                     .clip(RoundedCornerShape(12.dp))

@@ -75,6 +75,7 @@ object UltraHdrBridge {
         allowSdrTranscode: Boolean,
         speedLevel: Int,
         resizePercent: Int,
+        codecThreads: Int,
     ): TranscodeResult
 
     @JvmStatic

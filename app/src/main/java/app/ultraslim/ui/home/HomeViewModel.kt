@@ -91,6 +91,9 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     /** Set when the user cancels a run, so the summary event reads as a cancellation. */
     private var cancelledRun = false
 
+    /** Shared by album scan and manually added items. */
+    private val probePermits = Semaphore(SCAN_PARALLELISM)
+
     private val workRunning: Flow<Boolean> = workManager
         .getWorkInfosForUniqueWorkFlow(ConversionWorker.UNIQUE_WORK_NAME)
         .map { infos -> infos.any { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.RUNNING } }
@@ -195,10 +198,9 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         val queued = repo.queue.value.mapTo(mutableSetOf()) { it.uri }
         val candidates = queryRecentImages().filter { it.toString() !in queued }
         if (candidates.isEmpty()) return emptyList()
-        val semaphore = Semaphore(SCAN_PARALLELISM)
         return coroutineScope {
             candidates
-                .map { uri -> async { if (semaphore.withPermit { probeHasGainMap(uri) }) uri else null } }
+                .map { uri -> async { if (probeHasGainMap(uri)) uri else null } }
                 .awaitAll()
                 .filterNotNull()
         }
@@ -216,8 +218,8 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             app.contentResolver.query(
                 MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                 projection,
-                null,
-                null,
+                "${MediaStore.Images.Media.MIME_TYPE} IN (?,?,?,?,?)",
+                arrayOf("image/jpeg", "image/jpg", "image/heic", "image/heif", "image/avif"),
                 "${MediaStore.Images.Media.DATE_ADDED} DESC",
             )?.use { cursor ->
                 val idIndex = cursor.getColumnIndex(MediaStore.Images.Media._ID)
@@ -245,13 +247,15 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         return uris
     }
 
-    private suspend fun probeHasGainMap(uri: Uri): Boolean = withContext(Dispatchers.IO) {
-        val probe = runCatching {
-            app.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
-                UltraHdrBridge.nativeProbe(pfd.fd)
-            }
-        }.getOrNull()
-        probe != null && probe.isSuccess && probe.hasGainMap
+    private suspend fun probeHasGainMap(uri: Uri): Boolean = probePermits.withPermit {
+        withContext(Dispatchers.IO) {
+            val probe = runCatching {
+                app.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    UltraHdrBridge.nativeProbe(pfd.fd)
+                }
+            }.getOrNull()
+            probe != null && probe.isSuccess && probe.hasGainMap
+        }
     }
 
     /** Applies a named bundle of conversion parameters. */
@@ -302,7 +306,9 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         lastRunIds = eligible.mapTo(mutableSetOf()) { it.id }
         cancelledRun = false
         val request = OneTimeWorkRequestBuilder<ConversionWorker>()
-            .setInputData(ConversionWorker.buildInputData(eligible.map { it.uri }, uiState.value.defaults))
+            .setInputData(
+                ConversionWorker.buildInputData(app, eligible.map { it.uri }, uiState.value.defaults),
+            )
             .setExpedited(OutOfQuotaPolicy.RUN_AS_NON_EXPEDITED_WORK_REQUEST)
             .build()
         workManager.enqueueUniqueWork(
@@ -337,7 +343,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     // ---- internals ----
 
-    private suspend fun probeItem(id: String, uri: Uri) {
+    private suspend fun probeItem(id: String, uri: Uri) = probePermits.withPermit {
         repo.update(id) {
             if (it.status == QueueStatus.PENDING) it.copy(status = QueueStatus.PROBING) else it
         }

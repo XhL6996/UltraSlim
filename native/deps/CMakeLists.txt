@@ -77,7 +77,7 @@ ExternalProject_Add(x265
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --parallel
     INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)
 
-# ---------------------------------------------------------------- aom (AV1 enc/dec)
+# ---------------------------------------------------------------- aom (AV1 decode only; encoding is SVT-AV1)
 ExternalProject_Add(aom
     URL https://storage.googleapis.com/aom-releases/libaom-3.12.1.tar.gz
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
@@ -86,7 +86,7 @@ ExternalProject_Add(aom
                -DENABLE_EXAMPLES=0
                -DENABLE_TOOLS=0
                -DENABLE_NASM=0
-               -DCONFIG_AV1_ENCODER=1
+               -DCONFIG_AV1_ENCODER=0
                -DCONFIG_AV1_DECODER=1
                -DCONFIG_MULTITHREAD=1
                -DCONFIG_WEBM_IO=0
@@ -100,7 +100,7 @@ ExternalProject_Add(svt-av1
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
                -DBUILD_APPS=OFF
                -DBUILD_TESTING=OFF
-               -DSVT_AV1_LTO=OFF
+               -DSVT_AV1_LTO=ON
                -DCOMPILE_C_ONLY=ON
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --parallel
     INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)

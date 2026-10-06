@@ -47,14 +47,16 @@ class UltraSlimApp : Application() {
         getSystemService(NotificationManager::class.java)?.createNotificationChannel(channel)
     }
 
-    /** Drops transcode outputs older than a day that were never saved to the album. */
+    /** Drops leftover transcode outputs and URI batches older than a day. */
     private fun cleanStaleOutputs() {
-        runCatching {
-            val dir = File(cacheDir, "outputs")
-            if (!dir.isDirectory) return
-            val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
-            dir.listFiles()?.forEach { file ->
-                if (file.lastModified() < cutoff) file.delete()
+        val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
+        for (name in listOf("outputs", "batches")) {
+            runCatching {
+                val dir = File(cacheDir, name)
+                if (!dir.isDirectory) return@runCatching
+                dir.listFiles()?.forEach { file ->
+                    if (file.lastModified() < cutoff) file.delete()
+                }
             }
         }
     }

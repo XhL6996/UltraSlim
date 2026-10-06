@@ -28,6 +28,7 @@ import app.ultraslim.data.HistoryEntity
 import app.ultraslim.model.OutputFormat
 import app.ultraslim.util.formatBytes
 import java.io.File
+import java.util.UUID
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlinx.coroutines.CancellationException
@@ -60,12 +61,17 @@ class ConversionWorker(
         const val UNIQUE_WORK_NAME = "conversion"
         const val CHANNEL_ID = "conversion"
 
-        private const val MAX_PARALLEL = 2
+        private val PROCESSORS = Runtime.getRuntime().availableProcessors().coerceAtLeast(1)
+
+        /** Two HDR jobs already fill a phone; fewer cores get one job. */
+        private val MAX_PARALLEL = (PROCESSORS / 4).coerceIn(1, 2)
+
+        private fun codecThreadCount(): Int = (PROCESSORS / MAX_PARALLEL).coerceAtLeast(1)
 
         private const val NOTIFICATION_ID = 42
         private const val SUMMARY_ID = 43
 
-        private const val KEY_URIS = "uris"
+        private const val KEY_BATCH_FILE = "batch_file"
         private const val KEY_FORMAT = "format"
         private const val KEY_QUALITY = "quality"
         private const val KEY_GAINMAP_QUALITY = "gainmap_quality"
@@ -77,9 +83,12 @@ class ConversionWorker(
         private const val KEY_SPEED_LEVEL = "speed_level"
         private const val KEY_RESIZE_PERCENT = "resize_percent"
 
-        fun buildInputData(uris: List<String>, defaults: ConversionDefaults): Data =
-            Data.Builder()
-                .putStringArray(KEY_URIS, uris.toTypedArray())
+        fun buildInputData(context: Context, uris: List<String>, defaults: ConversionDefaults): Data {
+            val dir = File(context.cacheDir, "batches").apply { mkdirs() }
+            val file = File(dir, "${UUID.randomUUID()}.txt")
+            file.writeText(uris.joinToString("\n"))
+            return Data.Builder()
+                .putString(KEY_BATCH_FILE, file.absolutePath)
                 .putString(KEY_FORMAT, defaults.format.extension)
                 .putInt(KEY_QUALITY, defaults.quality)
                 .putInt(KEY_GAINMAP_QUALITY, defaults.gainmapQuality)
@@ -91,6 +100,21 @@ class ConversionWorker(
                 .putInt(KEY_SPEED_LEVEL, defaults.speedLevel)
                 .putInt(KEY_RESIZE_PERCENT, defaults.resizePercent)
                 .build()
+        }
+
+        /** Null when the batch file exists but could not be read, so the run can retry. */
+        private fun readBatch(path: String?): List<String>? {
+            if (path.isNullOrBlank()) return emptyList()
+            val file = File(path)
+            if (!file.isFile) return emptyList()
+            return runCatching {
+                file.readLines().map { it.trim() }.filter { it.isNotEmpty() }
+            }.getOrNull()
+        }
+
+        private fun deleteBatch(path: String?) {
+            if (!path.isNullOrBlank()) File(path).delete()
+        }
     }
 
     /** Immutable options shared by every item of one run. */
@@ -105,6 +129,7 @@ class ConversionWorker(
         val autoSave: Boolean,
         val speedLevel: Int,
         val resizePercent: Int,
+        val codecThreads: Int,
     )
 
     override suspend fun getForegroundInfo(): ForegroundInfo =
@@ -126,10 +151,15 @@ class ConversionWorker(
             autoSave = inputData.getBoolean(KEY_AUTO_SAVE, true),
             speedLevel = inputData.getInt(KEY_SPEED_LEVEL, 1),
             resizePercent = inputData.getInt(KEY_RESIZE_PERCENT, 100),
+            codecThreads = codecThreadCount(),
         )
 
-        val uris = inputData.getStringArray(KEY_URIS)?.toList().orEmpty()
-        if (uris.isEmpty()) return Result.success()
+        val batchPath = inputData.getString(KEY_BATCH_FILE)
+        val uris = readBatch(batchPath) ?: return Result.retry()
+        if (uris.isEmpty()) {
+            deleteBatch(batchPath)
+            return Result.success()
+        }
 
         runCatching { setForeground(getForegroundInfo()) }
 
@@ -138,13 +168,14 @@ class ConversionWorker(
         val doneCount = AtomicInteger(0)
         val savedBytes = AtomicLong(0)
         val semaphore = Semaphore(MAX_PARALLEL)
+        val albumNames = AlbumNames(applicationContext)
 
         try {
             coroutineScope {
                 uris.map { uriString ->
                     async {
                         semaphore.withPermit {
-                            val (success, saved) = processItem(repo, dao, uriString, opts) {
+                            val (success, saved) = processItem(repo, dao, uriString, opts, albumNames) {
                                 completed.get() * 100 / total
                             }
                             val done = completed.incrementAndGet()
@@ -170,9 +201,11 @@ class ConversionWorker(
             // WorkManager stopped us (e.g. user pressed 取消): leave the queue in
             // a re-runnable state and finish quietly, without a summary.
             resetInterruptedItems(repo, uris)
+            deleteBatch(batchPath)
             return Result.success()
         }
 
+        deleteBatch(batchPath)
         showSummary(doneCount.get(), savedBytes.get())
         return Result.success()
     }
@@ -187,6 +220,7 @@ class ConversionWorker(
         dao: HistoryDao,
         uriString: String,
         opts: RunOptions,
+        albumNames: AlbumNames,
         currentProgress: () -> Int,
     ): Pair<Boolean, Long> {
         ensureActive()
@@ -197,8 +231,8 @@ class ConversionWorker(
         }
 
         try {
-            // 1. Probe: fresh fd so the worker does not depend on UI-side state.
-            val probe = probe(uri)
+            // Reuse a probe that survived in this process. A fresh worker re-probes.
+            val probe = repo.findByUri(uriString)?.probe?.takeIf { it.isSuccess } ?: probe(uri)
             ensureActive()
             if (probe == null) {
                 markFailed(repo, uriString, "无法读取此文件")
@@ -236,15 +270,16 @@ class ConversionWorker(
                 return false to 0L
             }
 
-            // 3. Persist: optionally MediaStore, always Room. Cache file is kept
-            //    as the queue-item preview source.
+            // 3. Persist: optionally MediaStore, always Room. The cache file is the
+            //    preview only when the picture was not copied into the album.
             val savedUri = if (opts.autoSave) {
                 withContext(Dispatchers.IO) {
-                    MediaStoreSaver.save(applicationContext, outFile, outName, opts.format)
+                    MediaStoreSaver.save(applicationContext, outFile, outName, opts.format, albumNames)
                 }
             } else {
                 null
             }
+            if (savedUri != null) outFile.delete()
             val outputUriString = savedUri?.toString() ?: outFile.absolutePath
             val inputBytes = if (result.inputBytes > 0) {
                 result.inputBytes
@@ -341,6 +376,7 @@ class ConversionWorker(
                         opts.allowSdr,
                         opts.speedLevel,
                         opts.resizePercent,
+                        opts.codecThreads,
                     )
                 }
             }

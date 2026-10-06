@@ -29,6 +29,8 @@ struct TranscodeOptions {
   bool allowSdrTranscode = true;  // re-encode plain SDR images too (no gain map)
   int speedLevel = 1;             // 0 = 画质优先, 1 = 平衡, 2 = 速度优先
   int resizePercent = 100;        // 25..100, output resolution as % of source
+  // Threads for one encoder instance. 0 = half the machine, so two parallel jobs fit.
+  int codecThreads = 0;
 };
 
 struct TranscodeResult {

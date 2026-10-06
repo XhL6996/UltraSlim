@@ -16,6 +16,7 @@
 
 #ifdef UHDR_ENABLE_HEIF
 
+#include <cstdio>
 #include <cstdlib>
 #include <map>
 
@@ -27,6 +28,7 @@
 
 // [UltraSlim] defined in heifultrahdr.cpp (weak) / transcode.cpp (strong)
 extern int ultraslim_codec_speed_level;
+extern int ultraslim_codec_threads;
 
 namespace ultrahdr {
 
@@ -405,17 +407,25 @@ uhdr_error_info_t AvifUltraHdr::encodeAvifUltraHdr(uhdr_raw_image_t* sdr_intent,
   HEIF_ERR_CHECK(heif_context_get_encoder_for_format(
       ctx, mCodec == UHDR_CODEC_AVIF ? heif_compression_AV1 : heif_compression_HEVC, &encoder));
 
-  // [UltraSlim] app-configurable codec speed: 0 = quality, 1 = balanced, 2 = fast.
+  // [UltraSlim] app-configurable codec speed and a thread budget shared across parallel jobs.
   {
     int level = ::ultraslim_codec_speed_level;
     if (level < 0 || level > 2) level = 1;
+    const int threads = ::ultraslim_codec_threads;
     if (mCodec == UHDR_CODEC_HEIF) {
       static const char* kX265Presets[] = {"slow", "medium", "veryfast"};
       heif_encoder_set_parameter(encoder, "preset", kX265Presets[level]);
+      if (threads > 0) {
+        char pools[16];
+        snprintf(pools, sizeof pools, "%d", threads);
+        heif_encoder_set_parameter(encoder, "x265:pools", pools);
+        heif_encoder_set_parameter(encoder, "x265:frame-threads", "1");
+      }
     } else {
       // aom (0..9) and svt-av1 (-2..13) both take "speed"; out-of-range fails silently
       static const int kSpeeds[] = {4, 6, 9};
       heif_encoder_set_parameter_integer(encoder, "speed", kSpeeds[level]);
+      if (threads > 0) heif_encoder_set_parameter_integer(encoder, "threads", threads);
     }
   }
 

@@ -54,6 +54,7 @@ import app.ultraslim.util.formatBytes
 import app.ultraslim.util.formatRelativeTime
 import app.ultraslim.util.formatSavedPercent
 import app.ultraslim.ui.components.UltraAsyncImage
+import app.ultraslim.ui.components.rememberThumbMaxDim
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -171,6 +172,7 @@ private fun HistoryRow(
                 uriString = entity.outputUri,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
+                maxDim = rememberThumbMaxDim(),
                 modifier = Modifier
                     .size(56.dp)
                     .clip(RoundedCornerShape(12.dp))
