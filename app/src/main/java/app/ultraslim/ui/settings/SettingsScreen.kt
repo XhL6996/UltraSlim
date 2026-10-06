@@ -158,9 +158,9 @@ fun SettingsScreen(onBack: () -> Unit) {
                     verticalArrangement = Arrangement.spacedBy(12.dp),
                 ) {
                     InfoRow("应用版本", versionName)
-                    InfoRow("引擎版本", nativeVersion)
+                    InfoRow("编码引擎", nativeVersion)
                     Text(
-                        "基于 libultrahdr · libheif · x265 · aom · libde265 · libjpeg-turbo",
+                        "全部转码在设备本地完成，照片不会上传。",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

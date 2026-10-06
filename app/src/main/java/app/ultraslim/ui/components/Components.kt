@@ -2,6 +2,13 @@ package app.ultraslim.ui.components
 
 import android.graphics.Bitmap
 import android.net.Uri
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,6 +28,7 @@ import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
@@ -32,6 +40,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -51,8 +60,11 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import app.ultraslim.data.ConversionDefaults
 import app.ultraslim.model.OutputFormat
+import app.ultraslim.ui.theme.Motion
 import app.ultraslim.util.formatBytes
 import coil3.compose.AsyncImage
+import coil3.request.ImageRequest
+import coil3.request.crossfade
 import java.io.File
 import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
@@ -221,6 +233,7 @@ fun SwitchRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    enabled: Boolean = true,
 ) {
     Row(
         modifier = modifier.fillMaxWidth(),
@@ -236,7 +249,7 @@ fun SwitchRow(
                 )
             }
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange)
+        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
     }
 }
 
@@ -266,9 +279,9 @@ enum class CompressionPreset(
     val resizePercent: Int,
     val speedLevel: Int,
 ) {
-    QUALITY("细节优先", quality = 92, gainmapQuality = 70, gainmapScale = 2, resizePercent = 100, speedLevel = 0),
-    BALANCED("推荐", quality = 82, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 1),
-    EXTREME("体积优先", quality = 65, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 0),
+    QUALITY("高画质", quality = 92, gainmapQuality = 70, gainmapScale = 2, resizePercent = 100, speedLevel = 0),
+    BALANCED("均衡", quality = 82, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 1),
+    EXTREME("极限省空间", quality = 65, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 0),
     ;
 
     fun matches(defaults: ConversionDefaults): Boolean =
@@ -288,6 +301,7 @@ fun ConversionOptionsPanel(
     callbacks: OptionsCallbacks,
     modifier: Modifier = Modifier,
     showAutoSave: Boolean = true,
+    enabled: Boolean = true,
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
@@ -305,6 +319,7 @@ fun ConversionOptionsPanel(
                     SegmentedButton(
                         selected = defaults.format == format,
                         onClick = { callbacks.onFormatChange(format) },
+                        enabled = enabled,
                         shape = SegmentedButtonDefaults.itemShape(index = index, count = formats.size),
                     ) {
                         Text(format.label)
@@ -312,20 +327,13 @@ fun ConversionOptionsPanel(
                 }
             }
 
-            SectionHeader("主图压缩", "只调整主图；Gain Map 保留原始尺寸、通道与参数")
+            SectionHeader("画质档位", "推荐「均衡」；Gain Map 始终按原图质量无损保留")
             val matchedPreset = CompressionPreset.entries.firstOrNull { it.matches(defaults) }
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CompressionPreset.entries.forEach { preset ->
-                    FilterChip(selected = matchedPreset == preset, onClick = { callbacks.onPreset(preset) }, label = { Text(preset.label) })
+                    FilterChip(selected = matchedPreset == preset, onClick = { callbacks.onPreset(preset) }, enabled = enabled, label = { Text(preset.label) })
                 }
             }
-            SliderOption("编码质量", defaults.quality, 50f..100f, 0, callbacks.onQualityChange)
-            Text(
-                if (defaults.quality >= 95) "高质量重编码可能比原图更大。100 是编码器档位，不代表无损或保留原图 100% 画质。"
-                else "数值越高通常体积越大。不同格式的同一数值不等价，建议先试转一张。",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
             Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.medium) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Gain Map · 跟随原图", style = MaterialTheme.typography.titleSmall)
@@ -333,45 +341,61 @@ fun ConversionOptionsPanel(
                         else "增益图独立无损编码，不缩小、不重建；方向与主图同步。", style = MaterialTheme.typography.bodySmall)
                 }
             }
-            SwitchRow("仅保留更小结果", "没有节省空间时跳过，原图始终保留", defaults.onlySmaller, callbacks.onOnlySmallerChange)
+            SwitchRow("仅保留更小结果", "压不过原图的照片自动保留原图，不会输出更大的文件", defaults.onlySmaller, callbacks.onOnlySmallerChange, enabled = enabled)
             var advanced by remember { mutableStateOf(false) }
-            androidx.compose.material3.TextButton(onClick = { advanced = !advanced }) { Text(if(advanced) "收起更多选项" else "尺寸、速度与元数据") }
-            if(advanced) {
-            SectionHeader("编码速度", "更快编码可能增加体积或影响细节，建议先试转")
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(0 to "画质", 1 to "平衡", 2 to "速度").forEach { (level, label) ->
-                    FilterChip(
-                        selected = defaults.speedLevel == level,
-                        onClick = { callbacks.onSpeedLevelChange(level) },
-                        label = { Text(label) },
+            TextButton(onClick = { advanced = !advanced }, enabled = enabled) { Text(if(advanced) "收起更多选项" else "更多选项（画质数值、尺寸、速度、元数据）") }
+            AnimatedVisibility(
+                visible = advanced,
+                enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+            ) {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    SliderOption("画质数值（进阶）", defaults.quality, 50f..100f, 0, callbacks.onQualityChange, enabled = enabled)
+                    Text(
+                        "数值越高画质越好、体积越大；100 是编码器档位，不代表无损。拿不准就用上面的画质档位。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    SectionHeader("编码速度", "更快编码可能增加体积或影响细节，建议先试转")
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(0 to "画质", 1 to "平衡", 2 to "速度").forEach { (level, label) ->
+                            FilterChip(
+                                selected = defaults.speedLevel == level,
+                                onClick = { callbacks.onSpeedLevelChange(level) },
+                                enabled = enabled,
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+
+                    SectionHeader("分辨率", "缩小分辨率可大幅减小体积")
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(100, 75, 50).forEach { percent ->
+                            FilterChip(
+                                selected = defaults.resizePercent == percent,
+                                onClick = { callbacks.onResizePercentChange(percent) },
+                                enabled = enabled,
+                                label = { Text("$percent%") },
+                            )
+                        }
+                    }
+
+                    SwitchRow(
+                        title = "保留 EXIF",
+                        hint = "保留拍摄时间、地点等元数据",
+                        checked = defaults.keepExif,
+                        onCheckedChange = callbacks.onKeepExifChange,
+                        enabled = enabled,
+                    )
+                    SwitchRow("保留位置数据", "关闭后移除 EXIF GPS 信息", defaults.keepLocation, callbacks.onKeepLocationChange, enabled = enabled)
+                    SwitchRow(
+                        title = "允许纯 SDR 转换",
+                        hint = "没有 Gain Map 的图片也进行转码",
+                        checked = defaults.allowSdr,
+                        onCheckedChange = callbacks.onAllowSdrChange,
+                        enabled = enabled,
                     )
                 }
-            }
-
-            SectionHeader("分辨率", "缩小分辨率可大幅减小体积")
-            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(100, 75, 50).forEach { percent ->
-                    FilterChip(
-                        selected = defaults.resizePercent == percent,
-                        onClick = { callbacks.onResizePercentChange(percent) },
-                        label = { Text("$percent%") },
-                    )
-                }
-            }
-
-            SwitchRow(
-                title = "保留 EXIF",
-                hint = "保留拍摄时间、地点等元数据",
-                checked = defaults.keepExif,
-                onCheckedChange = callbacks.onKeepExifChange,
-            )
-            SwitchRow("保留位置数据", "关闭后移除 EXIF GPS 信息", defaults.keepLocation, callbacks.onKeepLocationChange)
-            SwitchRow(
-                title = "允许纯 SDR 转换",
-                hint = "没有 Gain Map 的图片也进行转码",
-                checked = defaults.allowSdr,
-                onCheckedChange = callbacks.onAllowSdrChange,
-            )
             }
             if (showAutoSave) {
                 SwitchRow(
@@ -379,6 +403,7 @@ fun ConversionOptionsPanel(
                     hint = "转换完成后写入 相册/UltraSlim",
                     checked = defaults.autoSave,
                     onCheckedChange = callbacks.onAutoSaveChange,
+                    enabled = enabled,
                 )
             }
         }
@@ -392,8 +417,17 @@ private fun SliderOption(
     valueRange: ClosedFloatingPointRange<Float>,
     steps: Int,
     onChange: (Int) -> Unit,
+    enabled: Boolean = true,
 ) {
-    var sliderValue by remember(value) { mutableFloatStateOf(value.toFloat()) }
+    var sliderValue by remember { mutableFloatStateOf(value.toFloat()) }
+    var dragging by remember { mutableStateOf(false) }
+    var committed by remember { mutableStateOf(value) }
+    // 仅跟随外部真正变化的值；拖动中预设等其他来源的更新不打断拇指位置，
+    // 松手后以待提交值为准，避免状态回流前的一两帧回跳。
+    if (value != committed && !dragging) {
+        committed = value
+        sliderValue = value.toFloat()
+    }
     Column {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -409,10 +443,15 @@ private fun SliderOption(
         }
         Slider(
             value = sliderValue,
-            onValueChange = { sliderValue = it },
+            onValueChange = { dragging = true; sliderValue = it },
             valueRange = valueRange,
             steps = steps,
-            onValueChangeFinished = { onChange(sliderValue.roundToInt()) },
+            enabled = enabled,
+            onValueChangeFinished = {
+                dragging = false
+                committed = sliderValue.roundToInt()
+                onChange(committed)
+            },
         )
     }
 }
@@ -443,27 +482,51 @@ fun UltraAsyncImage(
     forceSdr: Boolean = false,
 ) {
     val context = LocalContext.current
-    var useNative by remember(uriString, maxDim, forceSdr) { mutableStateOf(forceSdr) }
+    var useNative by remember(uriString, forceSdr) { mutableStateOf(forceSdr) }
     if (!useNative) {
         AsyncImage(
-            model = imageModelOf(uriString),
+            model = ImageRequest.Builder(context)
+                .data(imageModelOf(uriString))
+                .crossfade(Motion.Fast)
+                .build(),
             contentDescription = contentDescription,
             contentScale = contentScale,
             modifier = modifier,
             onError = { useNative = true },
         )
     } else {
-        data class Loaded(val bitmap: Bitmap? = null, val finished: Boolean = false)
-        val result = produceState(Loaded(), uriString, maxDim) {
-            value = withContext(Dispatchers.IO) { Loaded(PreviewCache.load(context, uriString, maxDim), true) }
+        val result = produceState<NativeImage?>(null, uriString, maxDim) {
+            value = withContext(Dispatchers.IO) { NativeImage(PreviewCache.load(context, uriString, maxDim), true) }
         }.value
-        Box(modifier = modifier, contentAlignment = Alignment.Center) {
-            if(result.bitmap != null) AsyncImage(model = result.bitmap, contentDescription = contentDescription, contentScale = contentScale, modifier = Modifier.fillMaxSize())
-            else if(!result.finished) androidx.compose.material3.CircularProgressIndicator(Modifier.size(24.dp))
-            else Text("图片不可访问\n请检查文件或重新授权", style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center)
+        // 上一代解码结果跨 maxDim 保留：放大触发高分辨率重解码时旧图仍在屏，
+        // 不闪回转圈；只有首屏无图才显示 spinner。
+        var lastBitmap by remember(uriString) { mutableStateOf<Bitmap?>(null) }
+        if (result?.bitmap != null) lastBitmap = result.bitmap
+        val shown = result?.bitmap ?: lastBitmap
+        val state = when {
+            shown != null -> NativeDecoded.Ready(shown)
+            result?.finished == true -> NativeDecoded.Failed
+            else -> NativeDecoded.Loading
+        }
+        Crossfade(targetState = state, animationSpec = tween(Motion.Fast), label = "nativeImage") { s ->
+            Box(modifier = modifier, contentAlignment = Alignment.Center) {
+                when (s) {
+                    is NativeDecoded.Ready -> AsyncImage(model = s.bitmap, contentDescription = contentDescription, contentScale = contentScale, modifier = Modifier.fillMaxSize())
+                    NativeDecoded.Loading -> CircularProgressIndicator(Modifier.size(24.dp))
+                    NativeDecoded.Failed -> Text("图片不可访问\n请检查文件或重新授权", style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center)
+                }
+            }
         }
     }
 }
+
+private sealed interface NativeDecoded {
+    data class Ready(val bitmap: Bitmap) : NativeDecoded
+    data object Loading : NativeDecoded
+    data object Failed : NativeDecoded
+}
+
+private data class NativeImage(val bitmap: Bitmap?, val finished: Boolean)
 
 @Composable
 private fun ImageFallbackPlaceholder() {

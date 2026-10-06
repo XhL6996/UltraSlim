@@ -18,3 +18,4 @@
 /phone_out_hdr.raw
 .kotlin/
 /build-host-dbg/
+.zcode/

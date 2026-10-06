@@ -159,6 +159,98 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         viewModelScope.launch { repo.awaitReady(); addItemsInternal(uris) }
     }
 
+    /** 相册（图集）信息，用于批量导入。 */
+    data class AlbumBucket(val id: String, val name: String, val count: Int, val coverUri: String, val latestModified: Long)
+
+    private val _albums = MutableStateFlow<List<AlbumBucket>>(emptyList())
+    val albums: StateFlow<List<AlbumBucket>> = _albums.asStateFlow()
+
+    private val _loadingAlbums = MutableStateFlow(false)
+    val loadingAlbums: StateFlow<Boolean> = _loadingAlbums.asStateFlow()
+
+    /** 列出设备上的相册（图集），按最新照片时间排序，封面取最新一张。 */
+    fun loadAlbums() {
+        viewModelScope.launch {
+            _loadingAlbums.value = true
+            try {
+                _albums.value = withContext(Dispatchers.IO) { queryAlbums() }
+            } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                _events.emit(HomeEvent.Info("无法读取相册：${e.message}"))
+            } finally {
+                _loadingAlbums.value = false
+            }
+        }
+    }
+
+    private fun queryAlbums(): List<AlbumBucket> {
+        data class Bucket(val ids: MutableList<Long>, var latest: Long)
+        val buckets = LinkedHashMap<String, Bucket>()
+        val names = HashMap<String, String>()
+        val projection = arrayOf(
+            MediaStore.Images.Media._ID,
+            MediaStore.Images.Media.BUCKET_ID,
+            MediaStore.Images.Media.BUCKET_DISPLAY_NAME,
+            MediaStore.Images.Media.DATE_MODIFIED,
+        )
+        app.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI, projection, null, null,
+            "${MediaStore.Images.Media.DATE_MODIFIED} DESC",
+        )?.use { cursor ->
+            val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+            val bucketCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_ID)
+            val nameCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.BUCKET_DISPLAY_NAME)
+            val dateCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media.DATE_MODIFIED)
+            while (cursor.moveToNext()) {
+                val bucket = cursor.getString(bucketCol) ?: continue
+                val date = cursor.getLong(dateCol)
+                buckets.getOrPut(bucket) { Bucket(mutableListOf(), Long.MIN_VALUE) }.apply {
+                    ids.add(cursor.getLong(idCol))
+                    if (date > latest) latest = date
+                }
+                names.putIfAbsent(bucket, cursor.getString(nameCol) ?: "未命名相册")
+            }
+        }
+        return buckets.map { (id, bucket) ->
+            val latestId = bucket.ids.first()  // query is newest-first
+            AlbumBucket(
+                id = id,
+                name = names[id] ?: "未命名相册",
+                count = bucket.ids.size,
+                coverUri = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, latestId).toString(),
+                latestModified = bucket.latest,
+            )
+        }.sortedByDescending { it.latestModified }
+    }
+
+    /** 把整个相册的照片加入处理列表（自动去重；单次上限 1000 张）。 */
+    fun importAlbum(album: AlbumBucket) {
+        viewModelScope.launch {
+            val uris = withContext(Dispatchers.IO) {
+                val list = mutableListOf<Uri>()
+                app.contentResolver.query(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    arrayOf(MediaStore.Images.Media._ID),
+                    "${MediaStore.Images.Media.BUCKET_ID} = ?",
+                    arrayOf(album.id),
+                    "${MediaStore.Images.Media.DATE_MODIFIED} DESC",
+                )?.use { cursor ->
+                    val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
+                    while (cursor.moveToNext()) {
+                        list += ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cursor.getLong(idCol))
+                    }
+                }
+                list
+            }
+            if (uris.isEmpty()) { _events.emit(HomeEvent.Info("这个相册没有照片")); return@launch }
+            val capped = if (uris.size > 1000) {
+                _events.emit(HomeEvent.Info("相册共 ${uris.size} 张，单次最多导入 1000 张"))
+                uris.take(1000)
+            } else uris
+            val added = addItemsInternal(capped)
+            _events.emit(HomeEvent.Info(if (added == capped.size) "已导入 $added 张照片" else "已导入 $added 张（${capped.size - added} 张已在列表中）"))
+        }
+    }
+
     /** Adds fresh uris to the queue and probes them. Returns how many were added. */
     private suspend fun addItemsInternal(uris: List<Uri>): Int {
         repo.awaitReady()

@@ -89,17 +89,28 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     val pixels = probe.width.toLong() * probe.height
                     check(pixels > 0 && pixels * (if (probe.hasGainMap) 40 else 16) < mem.availMem * 3 / 5) { "当前可用内存不足，请关闭其他应用后重试" }
                     val file = File(app.filesDir, "outputs/$id.${options.format.extension}").apply { parentFile?.mkdirs() }
-                    val result = withContext(Dispatchers.IO) {
+                    suspend fun transcode(quality: Int) = withContext(Dispatchers.IO) {
                         app.contentResolver.openFileDescriptor(source, "r")!!.use { input ->
                             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_WRITE or ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_TRUNCATE).use { output ->
-                                UltraHdrBridge.nativeTranscode(input.fd, output.fd, options.format.codecId, options.quality,
+                                UltraHdrBridge.nativeTranscode(input.fd, output.fd, options.format.codecId, quality,
                                     options.gainmapQuality, options.gainmapScale, options.multiChannelGainmap, options.keepExif,
                                     options.allowSdr, options.speedLevel, options.resizePercent,
-                                    Runtime.getRuntime().availableProcessors().coerceIn(1, 4), options.keepLocation)
+                                    Runtime.getRuntime().availableProcessors().coerceIn(2, 8), options.keepLocation)
                             }
                         }
                     }
+                    // "仅保留更小"开启时自动降档重试：结果不比原图小就换更低画质再压一次
+                    // （最多两档），仍压不过才保留原图——保证交给用户的结果只会更小。
+                    var quality = options.quality
+                    var result = transcode(quality)
                     if (!result.isSuccess) { file.delete(); error(result.error) }
+                    var steps = 0
+                    while (options.onlySmaller && result.outputBytes >= result.inputBytes && steps < 2 && quality > 50) {
+                        quality = maxOf(50, quality - 14)
+                        steps++
+                        result = transcode(quality)
+                        if (!result.isSuccess) { file.delete(); error(result.error) }
+                    }
                     val verified = withContext(Dispatchers.IO) {
                         ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use {
                             val probeOut = UltraHdrBridge.nativeProbe(it.fd)
@@ -110,7 +121,8 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     if (!verified.isSuccess || (probe.hasGainMap && !verified.hasGainMap) || (options.keepExif && probe.hasExif && !verified.hasExif)) { file.delete(); error("输出校验失败") }
                     if (options.onlySmaller && result.outputBytes >= result.inputBytes) {
                         file.delete()
-                        repo.update(id) { it.copy(status = QueueStatus.SKIPPED, result = result, error = "输出没有更小，已按设置保留原图") }
+                        val why = if (steps > 0) "已尽力压缩（降 $steps 档画质）仍无法比原图小，已保留原图" else "输出没有比原图小，已保留原图"
+                        repo.update(id) { it.copy(status = QueueStatus.SKIPPED, result = result, error = why) }
                         continue
                     }
                     val name = outputName(item.displayName, options.format.extension, id, item.createdAt)

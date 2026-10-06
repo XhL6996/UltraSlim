@@ -6,7 +6,18 @@ import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,7 +44,9 @@ import app.ultraslim.convert.*
 import app.ultraslim.data.summary
 import app.ultraslim.ui.appViewModelFactory
 import app.ultraslim.ui.components.*
+import app.ultraslim.ui.theme.Motion
 import app.ultraslim.util.*
+import kotlinx.coroutines.flow.first
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -47,16 +60,29 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
     var editOptions by remember { mutableStateOf(false) }
+    var showAlbums by remember { mutableStateOf(false) }
+    var pendingAlbums by remember { mutableStateOf(false) }
+    val albums by vm.albums.collectAsStateWithLifecycle()
+    val loadingAlbums by vm.loadingAlbums.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { vm.addItems(it) }
     val pick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { vm.startConversion() }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
-        if (grants.values.any { it }) vm.scanAlbum() else vm.permissionDenied()
+        if (grants.values.any { it }) {
+            if (pendingAlbums) { vm.loadAlbums(); showAlbums = true }
+            else vm.scanAlbum()
+        } else vm.permissionDenied()
     }
+    val imagesPermission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
     val scan = {
-        val images = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
-        if (ContextCompat.checkSelfPermission(context, images) == PackageManager.PERMISSION_GRANTED) vm.scanAlbum()
-        else permission.launch(if (Build.VERSION.SDK_INT >= 34) arrayOf(images, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) else arrayOf(images))
+        pendingAlbums = false
+        if (ContextCompat.checkSelfPermission(context, imagesPermission) == PackageManager.PERMISSION_GRANTED) vm.scanAlbum()
+        else permission.launch(if (Build.VERSION.SDK_INT >= 34) arrayOf(imagesPermission, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) else arrayOf(imagesPermission))
+    }
+    val openAlbums = {
+        pendingAlbums = true
+        if (ContextCompat.checkSelfPermission(context, imagesPermission) == PackageManager.PERMISSION_GRANTED) { vm.loadAlbums(); showAlbums = true }
+        else permission.launch(if (Build.VERSION.SDK_INT >= 34) arrayOf(imagesPermission, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) else arrayOf(imagesPermission))
     }
     val start = {
         if (Build.VERSION.SDK_INT >= 33 && ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
@@ -65,6 +91,8 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     }
     LaunchedEffect(vm) {
         vm.events.collect { event ->
+            // 参数弹窗遮在 Snackbar 之上：弹窗开着时把通知挂起到关闭后再展示。
+            if (editOptions) snapshotFlow { editOptions }.first { !it }
             when(event) {
                 is HomeEvent.Info -> snackbar.showSnackbar(event.message)
                 is HomeEvent.Finished -> {
@@ -75,6 +103,8 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             }
         }
     }
+    // 转换一旦开始就收起参数弹窗并复位标记，避免运行结束后弹窗自己再次出现。
+    LaunchedEffect(state.isConverting) { if (state.isConverting) editOptions = false }
     val callbacks = remember(vm) { OptionsCallbacks(vm::setFormat, vm::setQuality, vm::setGainmapQuality,
         vm::setGainmapScale, vm::setMultiChannel, vm::setKeepExif, vm::setAllowSdr, vm::setAutoSave,
         vm::applyPreset, vm::setSpeedLevel, vm::setResizePercent, vm::setOnlySmaller, vm::setKeepLocation) }
@@ -88,19 +118,58 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
         snackbarHost = { SnackbarHost(snackbar) },
         contentWindowInsets = WindowInsets(0,0,0,0),
         bottomBar = {
-            if (state.queue.isNotEmpty()) Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shadowElevation = 8.dp) {
-                Column(Modifier.fillMaxWidth().then(if (railLayout) Modifier.navigationBarsPadding() else Modifier).padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                        OutlinedIconButton(onClick = pick, enabled = !state.isConverting, modifier = Modifier.size(52.dp), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.AddPhotoAlternate, "添加图片") }
-                        Button(onClick = { if(state.isConverting) vm.cancelConversion() else start() }, modifier = Modifier.weight(1f).heightIn(min = 52.dp),
-                            shape = MaterialTheme.shapes.medium, enabled = !stopping && (state.isConverting || state.convertibleCount > 0)) {
-                            Icon(if(state.isConverting) Icons.Rounded.Stop else Icons.Rounded.Compress, null, Modifier.size(20.dp))
-                            Spacer(Modifier.width(8.dp))
-                            Text(if(stopping) "正在停止…" else if(state.isConverting) "停止转换" else if(state.convertibleCount > 0) "转换 ${state.convertibleCount} 张照片" else "本批次已处理")
+            AnimatedVisibility(
+                visible = state.queue.isNotEmpty(),
+                enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.standard()),
+                exit = slideOutVertically(Motion.exit()) { it } + fadeOut(Motion.exit()),
+            ) {
+                Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shadowElevation = 8.dp) {
+                    Column(Modifier.fillMaxWidth().then(if (railLayout) Modifier.navigationBarsPadding() else Modifier).padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                            OutlinedIconButton(onClick = pick, enabled = !state.isConverting, modifier = Modifier.size(52.dp), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.AddPhotoAlternate, "添加图片") }
+                            OutlinedIconButton(onClick = openAlbums, enabled = !state.isConverting, modifier = Modifier.size(52.dp), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.PhotoLibrary, "从相册批量导入") }
+                            val mode = when {
+                                stopping -> HomeAction.Stopping
+                                state.isConverting -> HomeAction.Converting
+                                state.convertibleCount > 0 -> HomeAction.Ready
+                                else -> HomeAction.Done
+                            }
+                            Button(onClick = { if(state.isConverting) vm.cancelConversion() else start() }, modifier = Modifier.weight(1f).heightIn(min = 52.dp),
+                                shape = MaterialTheme.shapes.medium, enabled = !stopping && (state.isConverting || state.convertibleCount > 0)) {
+                                AnimatedContent(
+                                    targetState = mode,
+                                    transitionSpec = { fadeIn(Motion.fast()) togetherWith fadeOut(Motion.exit(Motion.Fast)) },
+                                    label = "mainAction",
+                                ) { m ->
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        when (m) {
+                                            HomeAction.Converting -> { Icon(Icons.Rounded.Stop, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("停止转换") }
+                                            HomeAction.Stopping -> { Icon(Icons.Rounded.Stop, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("正在停止…") }
+                                            HomeAction.Ready -> { Icon(Icons.Rounded.Compress, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("转换 ${state.convertibleCount} 张照片") }
+                                            HomeAction.Done -> { Icon(Icons.Rounded.Compress, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("本批次已处理") }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        val secondary = when {
+                            !state.isConverting && state.convertibleCount > 1 -> "try"
+                            stopping -> "waiting"
+                            else -> "hint"
+                        }
+                        AnimatedContent(
+                            targetState = secondary,
+                            transitionSpec = { fadeIn(Motion.fast()) togetherWith fadeOut(Motion.exit(Motion.Fast)) },
+                            label = "secondaryAction",
+                            modifier = Modifier.align(Alignment.CenterHorizontally),
+                        ) { s ->
+                            when (s) {
+                                "try" -> TextButton(onClick = vm::tryOne) { Text("先试转一张，比较效果与体积") }
+                                "waiting" -> Text("等待当前编码结束", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                else -> Text("原图始终保留 · 全程在设备上处理", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         }
                     }
-                    if (!state.isConverting && state.convertibleCount > 1) TextButton(onClick = vm::tryOne, modifier = Modifier.align(Alignment.CenterHorizontally)) { Text("先试转一张，比较效果与体积") }
-                    else Text(if(stopping) "等待当前编码结束" else "原图始终保留 · 全程在设备上处理", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.CenterHorizontally))
                 }
             }
         }
@@ -108,13 +177,34 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
         BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
             val wide = maxWidth >= 840.dp
             Row(Modifier.fillMaxSize()) {
-                LazyColumn(Modifier.weight(1f).fillMaxHeight(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    item { ImportHero(state.queue.isEmpty(), pick, scan, scanning) }
-                    if(scanning) item {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            CircularProgressIndicator(Modifier.size(20.dp)); Spacer(Modifier.width(12.dp))
-                            Text(scanProgress, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                            TextButton(onClick = vm::cancelScan) { Text("停止") }
+                LazyColumn(
+                    Modifier.weight(1f).fillMaxHeight(),
+                    contentPadding = PaddingValues(
+                        start = 20.dp, top = 20.dp, end = 20.dp,
+                        // rail 模式且队列为空时没有底部操作栏，补上导航条避让。
+                        bottom = 20.dp + if (railLayout && state.queue.isEmpty()) WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp,
+                    ),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    item {
+                        AnimatedContent(
+                            targetState = state.queue.isEmpty(),
+                            transitionSpec = { fadeIn(Motion.standard()) togetherWith fadeOut(Motion.exit()) },
+                            label = "importHero",
+                        ) { empty ->
+                            ImportHero(empty, pick, openAlbums, scan, scanning)
+                        }
+                    }
+                    item {
+                        AnimatedVisibility(
+                            visible = scanning,
+                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                            exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                CircularProgressIndicator(Modifier.size(20.dp)); Spacer(Modifier.width(12.dp))
+                                Text(scanProgress, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
+                                TextButton(onClick = vm::cancelScan) { Text("停止") }
+                            }
                         }
                     }
                     item {
@@ -123,7 +213,8 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Column(Modifier.weight(1f)) {
                                         Text("输出方案", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        Text("${state.defaults.format.label}  /  编码质量 ${state.defaults.quality}", style = MaterialTheme.typography.titleMedium)
+                                        val matchedPreset = CompressionPreset.entries.firstOrNull { it.matches(state.defaults) }
+                                        Text("${state.defaults.format.label} · " + (matchedPreset?.label ?: "画质 ${state.defaults.quality}"), style = MaterialTheme.typography.titleMedium)
                                     }
                                     Icon(Icons.Rounded.Tune, "调整本次参数", tint = MaterialTheme.colorScheme.primary)
                                 }
@@ -131,46 +222,100 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                 FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                     FeatureLabel(Icons.Rounded.Layers, "原始 Gain Map")
                                     FeatureLabel(Icons.Rounded.AspectRatio, if(state.defaults.resizePercent == 100) "原始尺寸" else "尺寸 ${state.defaults.resizePercent}%")
-                                    FeatureLabel(Icons.Rounded.Verified, if(state.defaults.onlySmaller) "仅保留更小" else "允许体积增加")
+                                    FeatureLabel(Icons.Rounded.Verified, if(state.defaults.onlySmaller) "保证更小" else "不限制体积（可能更大）")
                                 }
-                                if(state.defaults.quality >= 95) Text("当前为高质量编码，结果可能大于原图。点击调整。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if(state.defaults.quality >= 95) Text("高画质档：压不过原图的照片会自动保留原图，不会输出更大的文件。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                         }
                     }
-                    if(state.queue.isNotEmpty()) item {
-                        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
-                            Column(Modifier.weight(1f)) {
-                                Text("处理列表", style = MaterialTheme.typography.titleLarge)
-                                Text("${state.queue.size} 张 · ${formatBytes(state.queue.sumOf { it.sizeBytes })}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    item {
+                        AnimatedVisibility(
+                            visible = state.queue.isNotEmpty(),
+                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                            exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+                        ) {
+                            Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                Column(Modifier.weight(1f)) {
+                                    Text("处理列表", style = MaterialTheme.typography.titleLarge)
+                                    Text("${state.queue.size} 张 · ${formatBytes(state.queue.sumOf { it.sizeBytes })}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
                             }
-                            val done = state.queue.count { it.status == QueueStatus.DONE }
-                            if(done > 0) BadgeChip("$done 张完成", MaterialTheme.colorScheme.primaryContainer, MaterialTheme.colorScheme.onPrimaryContainer)
                         }
                     }
-                    if((state.hasFinishedItems || state.queue.any { it.status == QueueStatus.FAILED }) && !state.isConverting) item {
-                        FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            if(state.hasFinishedItems) TextButton(onClick = vm::clearFinished) { Text("清除成功项") }
-                            if(state.queue.any { it.status == QueueStatus.FAILED }) TextButton(onClick = vm::retryFailed) { Text("重试失败项") }
+                    item {
+                        AnimatedVisibility(
+                            visible = (state.hasFinishedItems || state.queue.any { it.status == QueueStatus.FAILED }) && !state.isConverting,
+                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                            exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+                        ) {
+                            FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                if(state.hasFinishedItems) TextButton(onClick = vm::clearFinished) { Text("清除成功项") }
+                                if(state.queue.any { it.status == QueueStatus.FAILED }) TextButton(onClick = vm::retryFailed) { Text("重试失败项") }
+                            }
                         }
                     }
-                    items(state.queue, key = { it.id }) { item ->
-                        QueueRow(item, onRemove = { vm.removeItem(item.id) }, onRetry = { vm.retryItem(item.id) }, onOpen = { item.historyId?.let(onOpenDetail) })
+                    // 待处理（含转换中）在前，已完成（成功/跳过/失败）在后：新导入的只会
+                    // 出现在"待处理"组里，一眼可辨；状态变化时行平滑跨组移动（key 不变）。
+                    val pending = state.queue.filter {
+                        it.status != QueueStatus.DONE && it.status != QueueStatus.SKIPPED && it.status != QueueStatus.FAILED
                     }
-                    if(state.queue.isEmpty()) item {
-                        Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                            GuideStep("01", "选择原图", "支持 JPEG / HEIC / AVIF", Modifier.weight(1f))
-                            GuideStep("02", "比较结果", "先试转，再决定批量保存", Modifier.weight(1f))
+                    val finished = state.queue.filter {
+                        it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED || it.status == QueueStatus.FAILED
+                    }
+                    if (pending.isNotEmpty()) item(key = "hdr-pending") {
+                        Text("待处理 · ${pending.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                    }
+                    items(pending, key = { it.id }) { item ->
+                        QueueRow(item, onRemove = { vm.removeItem(item.id) }, onRetry = { vm.retryItem(item.id) }, onOpen = { item.historyId?.let(onOpenDetail) },
+                            modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast)))
+                    }
+                    if (finished.isNotEmpty()) item(key = "hdr-finished") {
+                        Text("已完成 · ${finished.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                    }
+                    items(finished, key = { it.id }) { item ->
+                        QueueRow(item, onRemove = { vm.removeItem(item.id) }, onRetry = { vm.retryItem(item.id) }, onOpen = { item.historyId?.let(onOpenDetail) },
+                            modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast)))
+                    }
+                    item {
+                        AnimatedVisibility(
+                            visible = state.queue.isEmpty(),
+                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                            exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+                        ) {
+                            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
+                                GuideStep("01", "选择原图", "支持 JPEG / HEIC / AVIF", Modifier.weight(1f))
+                                GuideStep("02", "比较结果", "先试转，再决定批量保存", Modifier.weight(1f))
+                            }
                         }
                     }
                 }
-                if(wide && !state.isConverting) Column(Modifier.width(360.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                    Text("本次参数", style = MaterialTheme.typography.titleLarge)
-                    ConversionOptionsPanel(state.defaults, callbacks)
+                // 参数列常驻（转换中仅锁定并提示），不再随转换启停整列消失。
+                AnimatedVisibility(
+                    visible = wide,
+                    enter = expandHorizontally(Motion.emphasized()) + fadeIn(Motion.emphasized()),
+                    exit = shrinkHorizontally(Motion.exit(Motion.Emphasized)) + fadeOut(Motion.exit(Motion.Emphasized)),
+                ) {
+                    Column(Modifier.width(360.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(16.dp)) {
+                        AnimatedVisibility(
+                            visible = state.isConverting,
+                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                            exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+                        ) {
+                            Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest, modifier = Modifier.fillMaxWidth()) {
+                                Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    Icon(Icons.Rounded.Lock, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("转换中 · 参数已锁定", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        }
+                        Text("本次参数", style = MaterialTheme.typography.titleLarge)
+                        ConversionOptionsPanel(state.defaults, callbacks, enabled = !state.isConverting)
+                    }
                 }
             }
         }
     }
-    if(editOptions && !state.isConverting) ModalBottomSheet(onDismissRequest = { editOptions = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
+    if(editOptions) ModalBottomSheet(onDismissRequest = { editOptions = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
         Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
             Text("调整输出方案", style = MaterialTheme.typography.headlineSmall)
             Text("仅应用于本次任务", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -178,7 +323,40 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             Button(onClick = { editOptions = false }, modifier = Modifier.fillMaxWidth()) { Text("完成") }
         }
     }
+    if(showAlbums) ModalBottomSheet(onDismissRequest = { showAlbums = false }) {
+        Column(Modifier.padding(20.dp)) {
+            Text("从相册批量导入", style = MaterialTheme.typography.headlineSmall)
+            Text("选择一个图集，里面的照片整批加入处理列表（单次最多 1000 张）", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
+            if(loadingAlbums) {
+                Box(Modifier.fillMaxWidth().heightIn(min = 120.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(28.dp)) }
+            } else if(albums.isEmpty()) {
+                Box(Modifier.fillMaxWidth().heightIn(min = 120.dp), contentAlignment = Alignment.Center) {
+                    Text("没有读到任何相册，请检查照片权限", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            } else {
+                LazyColumn(Modifier.heightIn(max = 460.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    items(albums, key = { it.id }) { album ->
+                        Row(
+                            Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium).clickable { showAlbums = false; vm.importAlbum(album) }.padding(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            UltraAsyncImage(album.coverUri, null, ContentScale.Crop, Modifier.size(52.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceContainer), maxDim = 112)
+                            Column(Modifier.weight(1f)) {
+                                Text(album.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text("${album.count} 张", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                            Icon(Icons.Rounded.ChevronRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                    }
+                }
+            }
+            Spacer(Modifier.height(12.dp))
+        }
+    }
 }
+
+private enum class HomeAction { Stopping, Converting, Ready, Done }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -253,29 +431,48 @@ private fun QueueCard(
                     Text(if(item.probe != null) "${item.probe.width} × ${item.probe.height}  ·  ${formatBytes(item.sizeBytes)}" else formatBytes(item.sizeBytes), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     FormatBadge(item.probe, item.status)
                 }
-                if(item.status == QueueStatus.CONVERTING) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-                else {
-                    var menu by remember { mutableStateOf(false) }
-                    Box {
-                        IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "照片操作") }
-                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                            if(item.status == QueueStatus.SKIPPED || item.status == QueueStatus.FAILED) DropdownMenuItem(text = { Text("重新转换") }, onClick = { menu = false; onRetry() })
-                            DropdownMenuItem(text = { Text("从列表移除") }, onClick = { menu = false; onRemove() })
+                AnimatedContent(
+                    targetState = item.status == QueueStatus.CONVERTING,
+                    transitionSpec = { fadeIn(Motion.fast()) togetherWith fadeOut(Motion.exit(Motion.Fast)) },
+                    label = "queueTrailing",
+                ) { converting ->
+                    if (converting) CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
+                    else {
+                        var menu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { menu = true }) { Icon(Icons.Rounded.MoreVert, "照片操作") }
+                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                if(item.status == QueueStatus.SKIPPED || item.status == QueueStatus.FAILED) DropdownMenuItem(text = { Text("重新转换") }, onClick = { menu = false; onRetry() })
+                                DropdownMenuItem(text = { Text("从列表移除") }, onClick = { menu = false; onRemove() })
+                            }
                         }
                     }
                 }
             }
-            if(item.status == QueueStatus.DONE || item.status == QueueStatus.SKIPPED || item.status == QueueStatus.FAILED) {
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f))
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(when(item.status) { QueueStatus.DONE -> Icons.Rounded.CheckCircle; QueueStatus.FAILED -> Icons.Rounded.ErrorOutline; else -> Icons.Rounded.Info }, null, Modifier.size(18.dp), tint = if(item.status == QueueStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-                    Column(Modifier.weight(1f)) {
-                        Text(when(item.status) { QueueStatus.DONE -> item.result?.let { "${formatBytes(it.inputBytes)} → ${formatBytes(it.outputBytes)}" } ?: "转换完成"; QueueStatus.SKIPPED -> "保留原图"; else -> "转换未完成" }, style = MaterialTheme.typography.labelLarge)
-                        if(!item.error.isNullOrBlank()) Text(item.error.orEmpty(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            AnimatedVisibility(
+                visible = item.status == QueueStatus.CONVERTING,
+                enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+            ) {
+                LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+            AnimatedVisibility(
+                visible = item.status == QueueStatus.DONE || item.status == QueueStatus.SKIPPED || item.status == QueueStatus.FAILED,
+                enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+            ) {
+                Column {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .5f))
+                    Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Icon(when(item.status) { QueueStatus.DONE -> Icons.Rounded.CheckCircle; QueueStatus.FAILED -> Icons.Rounded.ErrorOutline; else -> Icons.Rounded.Info }, null, Modifier.size(18.dp), tint = if(item.status == QueueStatus.FAILED) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
+                        Column(Modifier.weight(1f)) {
+                            Text(when(item.status) { QueueStatus.DONE -> item.result?.let { "${formatBytes(it.inputBytes)} → ${formatBytes(it.outputBytes)}" } ?: "转换完成"; QueueStatus.SKIPPED -> "保留原图"; else -> "转换未完成" }, style = MaterialTheme.typography.labelLarge)
+                            if(!item.error.isNullOrBlank()) Text(item.error.orEmpty(), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        }
+                        if(item.status == QueueStatus.DONE) { StatusChip(item); Icon(Icons.Rounded.ChevronRight, "查看结果", Modifier.size(18.dp)) }
                     }
-                    if(item.status == QueueStatus.DONE) { StatusChip(item); Icon(Icons.Rounded.ChevronRight, "查看结果", Modifier.size(18.dp)) }
                 }
-            } else if(item.status == QueueStatus.CONVERTING) LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
         }
     }
 }
@@ -298,7 +495,7 @@ private fun GuideStep(number: String, title: String, hint: String, modifier: Mod
 }
 
 @Composable
-private fun ImportHero(empty: Boolean, onPick: () -> Unit, onScan: () -> Unit, scanning: Boolean) {
+private fun ImportHero(empty: Boolean, onPick: () -> Unit, onAlbums: () -> Unit, onScan: () -> Unit, scanning: Boolean) {
     val ink = Color(0xFF173C2F)
     val accent = Color(0xFFD9ECA3)
     if(!empty) {
@@ -329,6 +526,7 @@ private fun ImportHero(empty: Boolean, onPick: () -> Unit, onScan: () -> Unit, s
                 Button(onClick = onPick, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), shape = MaterialTheme.shapes.medium, colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = ink)) {
                     Icon(Icons.Rounded.AddPhotoAlternate, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("选择照片", fontWeight = FontWeight.Bold)
                 }
+                TextButton(onClick = onAlbums, modifier = Modifier.align(Alignment.CenterHorizontally), colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFD0DFD4))) { Text("从相册批量导入") }
                 TextButton(onClick = onScan, enabled = !scanning, modifier = Modifier.align(Alignment.CenterHorizontally), colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFD0DFD4))) { Text("从最近 500 张照片中查找 HDR") }
             }
         }
