@@ -230,22 +230,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     /** 把整个相册的照片加入处理列表（自动去重；单次上限 1000 张）。 */
     fun importAlbum(album: AlbumBucket) {
         viewModelScope.launch {
-            val uris = withContext(Dispatchers.IO) {
-                val list = mutableListOf<Uri>()
-                app.contentResolver.query(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                    arrayOf(MediaStore.Images.Media._ID),
-                    "${MediaStore.Images.Media.BUCKET_ID} = ?",
-                    arrayOf(album.id),
-                    "${MediaStore.Images.Media.DATE_MODIFIED} DESC",
-                )?.use { cursor ->
-                    val idCol = cursor.getColumnIndexOrThrow(MediaStore.Images.Media._ID)
-                    while (cursor.moveToNext()) {
-                        list += ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cursor.getLong(idCol))
-                    }
-                }
-                list
-            }
+            val uris = withContext(Dispatchers.IO) { queryImages(album.id) }
             if (uris.isEmpty()) { _events.emit(HomeEvent.Info("这个相册没有照片")); return@launch }
             val capped = if (uris.size > 1000) {
                 _events.emit(HomeEvent.Info("相册共 ${uris.size} 张，单次最多导入 1000 张"))
@@ -298,21 +283,29 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     /**
-     * Scans recent MediaStore images (skipping our own Pictures/UltraSlim output),
-     * probes each for a gain map, and queues the HDR ones.
+     * 逐张检测指定范围的增益图，只把 HDR 照片加入队列（带进度、可停止）。
+     * 相册批量导入的"仅 HDR"模式和整库扫描共用这条路径。
      */
-    fun scanAlbum() {
+    fun scanLibraryForHdr() = startHdrScan("整个图库") { queryImages(null) }
+
+    fun scanAlbumForHdr(album: AlbumBucket) = startHdrScan("相册「${album.name}」") { queryImages(album.id) }
+
+    private fun startHdrScan(scopeLabel: String, query: () -> List<Uri>) {
         if (_scanning.value) return
         scanJob = viewModelScope.launch {
             _scanning.value = true
-            _scanProgress.value = "检查最近 500 张可访问图片…"
+            _scanProgress.value = "正在检查$scopeLabel…"
             try {
-                val hdrUris = withContext(Dispatchers.IO) { findHdrImages() }
+                val candidates = withContext(Dispatchers.IO) {
+                    val queued = repo.queue.value.mapTo(mutableSetOf()) { it.uri }
+                    query().filter { it.toString() !in queued }
+                }
+                val hdrUris = if (candidates.isEmpty()) emptyList() else filterHdr(candidates)
                 val added = if (hdrUris.isEmpty()) 0 else addItemsInternal(hdrUris)
                 when {
-                    hdrUris.isEmpty() -> _events.emit(HomeEvent.Info("最近 500 张可访问图片中没有找到 HDR；这不代表整个相册"))
+                    hdrUris.isEmpty() -> _events.emit(HomeEvent.Info("$scopeLabel 中没有找到 HDR 照片"))
                     added == 0 -> _events.emit(HomeEvent.Info("发现的 HDR 图片已在队列中"))
-                    else -> _events.emit(HomeEvent.Info("相册中发现 $added 张 HDR 图片，已加入队列"))
+                    else -> _events.emit(HomeEvent.Info("发现 $added 张 HDR 图片，已加入队列"))
                 }
             } catch (e: CancellationException) {
                 _events.tryEmit(HomeEvent.Info("已停止扫描"))
@@ -324,10 +317,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         }
     }
 
-    private suspend fun findHdrImages(): List<Uri> {
-        val queued = repo.queue.value.mapTo(mutableSetOf()) { it.uri }
-        val candidates = queryRecentImages().filter { it.toString() !in queued }
-        if (candidates.isEmpty()) return emptyList()
+    private suspend fun filterHdr(candidates: List<Uri>): List<Uri> {
         val found = mutableListOf<Uri>()
         candidates.forEachIndexed { index, uri ->
             coroutineContext.ensureActive()
@@ -337,41 +327,46 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         return found
     }
 
-    private fun queryRecentImages(): List<Uri> {
+    /** 可访问图片，按最新在前；bucketId 非空时只取该相册。跳过我们自己的输出目录，无数量上限。 */
+    private fun queryImages(bucketId: String? = null): List<Uri> {
         val uris = mutableListOf<Uri>()
+        val selection = buildString {
+            append("${MediaStore.Images.Media.MIME_TYPE} IN (?,?,?,?,?)")
+            if (bucketId != null) append(" AND ${MediaStore.Images.Media.BUCKET_ID} = ?")
+        }
+        val args = buildList {
+            addAll(arrayOf("image/jpeg", "image/jpg", "image/heic", "image/heif", "image/avif"))
+            if (bucketId != null) add(bucketId)
+        }
         val projection = buildList {
             add(MediaStore.Images.Media._ID)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 add(MediaStore.Images.Media.RELATIVE_PATH)
             }
         }.toTypedArray()
-        run {
-            app.contentResolver.query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                projection,
-                "${MediaStore.Images.Media.MIME_TYPE} IN (?,?,?,?,?)",
-                arrayOf("image/jpeg", "image/jpg", "image/heic", "image/heif", "image/avif"),
-                "${MediaStore.Images.Media.DATE_ADDED} DESC",
-            )?.use { cursor ->
-                val idIndex = cursor.getColumnIndex(MediaStore.Images.Media._ID)
-                val pathIndex = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
-                } else {
-                    -1
+        app.contentResolver.query(
+            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            projection,
+            selection,
+            args.toTypedArray(),
+            "${MediaStore.Images.Media.DATE_ADDED} DESC",
+        )?.use { cursor ->
+            val idIndex = cursor.getColumnIndex(MediaStore.Images.Media._ID)
+            val pathIndex = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
+            } else {
+                -1
+            }
+            while (cursor.moveToNext()) {
+                if (pathIndex >= 0) {
+                    val path = cursor.getString(pathIndex)
+                    if (path?.contains("UltraSlim", ignoreCase = true) == true) continue
                 }
-                var scanned = 0
-                while (cursor.moveToNext() && scanned < MAX_SCAN_RESULTS) {
-                    if (pathIndex >= 0) {
-                        val path = cursor.getString(pathIndex)
-                        if (path?.contains("UltraSlim", ignoreCase = true) == true) continue
-                    }
-                    scanned++
-                    if (idIndex >= 0) {
-                        uris += ContentUris.withAppendedId(
-                            MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                            cursor.getLong(idIndex),
-                        )
-                    }
+                if (idIndex >= 0) {
+                    uris += ContentUris.withAppendedId(
+                        MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                        cursor.getLong(idIndex),
+                    )
                 }
             }
         }
@@ -566,7 +561,6 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     companion object {
-        private const val MAX_SCAN_RESULTS = 500
         private const val SCAN_PARALLELISM = 2
     }
 }

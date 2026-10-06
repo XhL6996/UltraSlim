@@ -70,26 +70,18 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     var editOptions by remember { mutableStateOf(false) }
     var showAlbums by remember { mutableStateOf(false) }
-    var pendingAlbums by remember { mutableStateOf(false) }
+    var hdrOnly by remember { mutableStateOf(false) }
     val albums by vm.albums.collectAsStateWithLifecycle()
     val loadingAlbums by vm.loadingAlbums.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { vm.addItems(it) }
     val pick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { vm.startConversion() }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
-        if (grants.values.any { it }) {
-            if (pendingAlbums) { vm.loadAlbums(); showAlbums = true }
-            else vm.scanAlbum()
-        } else vm.permissionDenied()
+        if (grants.values.any { it }) { vm.loadAlbums(); showAlbums = true }
+        else vm.permissionDenied()
     }
     val imagesPermission = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.READ_MEDIA_IMAGES else Manifest.permission.READ_EXTERNAL_STORAGE
-    val scan = {
-        pendingAlbums = false
-        if (ContextCompat.checkSelfPermission(context, imagesPermission) == PackageManager.PERMISSION_GRANTED) vm.scanAlbum()
-        else permission.launch(if (Build.VERSION.SDK_INT >= 34) arrayOf(imagesPermission, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) else arrayOf(imagesPermission))
-    }
     val openAlbums = {
-        pendingAlbums = true
         if (ContextCompat.checkSelfPermission(context, imagesPermission) == PackageManager.PERMISSION_GRANTED) { vm.loadAlbums(); showAlbums = true }
         else permission.launch(if (Build.VERSION.SDK_INT >= 34) arrayOf(imagesPermission, Manifest.permission.READ_MEDIA_VISUAL_USER_SELECTED) else arrayOf(imagesPermission))
     }
@@ -200,7 +192,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             transitionSpec = { fadeIn(Motion.standard()) togetherWith fadeOut(Motion.exit()) },
                             label = "importHero",
                         ) { empty ->
-                            ImportHero(empty, pick, openAlbums, scan, scanning)
+                            ImportHero(empty, pick, openAlbums)
                         }
                     }
                     item {
@@ -330,8 +322,33 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     }
     if(showAlbums) ModalBottomSheet(onDismissRequest = { showAlbums = false }) {
         Column(Modifier.padding(20.dp)) {
-            Text("从相册批量导入", style = MaterialTheme.typography.headlineSmall)
-            Text("选择一个图集，里面的照片整批加入处理列表（单次最多 1000 张）", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
+            Text("从相册导入", style = MaterialTheme.typography.headlineSmall)
+            Text("选择一个图集整批加入处理列表（单次最多 1000 张）", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+            Row(
+                Modifier.fillMaxWidth().padding(top = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text("只导入 HDR 照片", style = MaterialTheme.typography.titleSmall)
+                    Text("逐张检测增益图，较慢；只把 HDR 照片加入列表", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(checked = hdrOnly, onCheckedChange = { hdrOnly = it })
+            }
+            Row(
+                Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium).clickable { showAlbums = false; vm.scanLibraryForHdr() }.padding(horizontal = 8.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = RoundedCornerShape(12.dp)) {
+                    Icon(Icons.Rounded.TravelExplore, null, Modifier.padding(10.dp).size(22.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                }
+                Column(Modifier.weight(1f)) {
+                    Text("扫描整个图库", style = MaterialTheme.typography.titleSmall)
+                    Text("不限数量，逐张查找 HDR 照片", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Icon(Icons.Rounded.ChevronRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f), modifier = Modifier.padding(vertical = 8.dp))
             if(loadingAlbums) {
                 Box(Modifier.fillMaxWidth().heightIn(min = 120.dp), contentAlignment = Alignment.Center) { CircularProgressIndicator(Modifier.size(28.dp)) }
             } else if(albums.isEmpty()) {
@@ -339,17 +356,18 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                     Text("没有读到任何相册，请检查照片权限", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             } else {
-                LazyColumn(Modifier.heightIn(max = 460.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                LazyColumn(Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     items(albums, key = { it.id }) { album ->
+                        val action = { showAlbums = false; if (hdrOnly) vm.scanAlbumForHdr(album) else vm.importAlbum(album) }
                         Row(
-                            Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium).clickable { showAlbums = false; vm.importAlbum(album) }.padding(8.dp),
+                            Modifier.fillMaxWidth().clip(MaterialTheme.shapes.medium).clickable(onClick = action).padding(8.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             UltraAsyncImage(album.coverUri, null, ContentScale.Crop, Modifier.size(52.dp).clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surfaceContainer), maxDim = 112)
                             Column(Modifier.weight(1f)) {
                                 Text(album.name, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                Text("${album.count} 张", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                Text(if (hdrOnly) "${album.count} 张 · 只导入 HDR" else "${album.count} 张", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                             }
                             Icon(Icons.Rounded.ChevronRight, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
@@ -510,7 +528,7 @@ private fun GuideStep(number: String, title: String, hint: String, modifier: Mod
 }
 
 @Composable
-private fun ImportHero(empty: Boolean, onPick: () -> Unit, onAlbums: () -> Unit, onScan: () -> Unit, scanning: Boolean) {
+private fun ImportHero(empty: Boolean, onPick: () -> Unit, onAlbums: () -> Unit) {
     val ink = Color(0xFF173C2F)
     val accent = Color(0xFFD9ECA3)
     if(!empty) {
@@ -541,8 +559,7 @@ private fun ImportHero(empty: Boolean, onPick: () -> Unit, onAlbums: () -> Unit,
                 Button(onClick = onPick, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), shape = MaterialTheme.shapes.medium, colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = ink)) {
                     Icon(Icons.Rounded.AddPhotoAlternate, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("选择照片", fontWeight = FontWeight.Bold)
                 }
-                TextButton(onClick = onAlbums, modifier = Modifier.align(Alignment.CenterHorizontally), colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFD0DFD4))) { Text("从相册批量导入") }
-                TextButton(onClick = onScan, enabled = !scanning, modifier = Modifier.align(Alignment.CenterHorizontally), colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFD0DFD4))) { Text("从最近 500 张照片中查找 HDR") }
+                TextButton(onClick = onAlbums, modifier = Modifier.align(Alignment.CenterHorizontally), colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFD0DFD4))) { Text("从相册批量导入（可选只导 HDR）") }
             }
         }
     }
