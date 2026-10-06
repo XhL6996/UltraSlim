@@ -578,6 +578,17 @@ void yuvPixel(const uint8_t* p, uint8_t& y, uint8_t& u, uint8_t& v) {
   v = static_cast<uint8_t>(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
 }
 
+// BT.709 limited-range. The nclx matrix tag written next to the coded planes
+// must match the coefficient set used here: decoders assume the 709 basis for
+// 709/P3-tagged content, so coding in 601 while tagging 709 shifts saturated
+// colors.
+void yuvPixel709(const uint8_t* p, uint8_t& y, uint8_t& u, uint8_t& v) {
+  const int r = p[0], g = p[1], b = p[2];
+  y = static_cast<uint8_t>(((47 * r + 157 * g + 16 * b + 128) >> 8) + 16);
+  u = static_cast<uint8_t>(((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128);
+  v = static_cast<uint8_t>(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+}
+
 #if defined(__ARM_NEON)
 void storeY8(uint8_t* dst, const uint8_t* rgba) {
   const uint8x8x4_t p = vld4_u8(rgba);
@@ -590,11 +601,24 @@ void storeY8(uint8_t* dst, const uint8_t* rgba) {
   acc = vaddq_u16(acc, vdupq_n_u16(128));
   vst1_u8(dst, vadd_u8(vmovn_u16(vshrq_n_u16(acc, 8)), vdup_n_u8(16)));
 }
+
+void storeY8_709(uint8_t* dst, const uint8_t* rgba) {
+  const uint8x8x4_t p = vld4_u8(rgba);
+  const uint16x8_t r = vmovl_u8(p.val[0]);
+  const uint16x8_t g = vmovl_u8(p.val[1]);
+  const uint16x8_t b = vmovl_u8(p.val[2]);
+  uint16x8_t acc = vmulq_n_u16(r, 47);
+  acc = vmlaq_n_u16(acc, g, 157);
+  acc = vmlaq_n_u16(acc, b, 16);
+  acc = vaddq_u16(acc, vdupq_n_u16(128));
+  vst1_u8(dst, vadd_u8(vmovn_u16(vshrq_n_u16(acc, 8)), vdup_n_u8(16)));
+}
 #endif
 
-// Converts RGBA8888 to BT.601 limited-range YUV420 (the standard layout for SDR HEIF/AVIF).
+// Converts RGBA8888 to limited-range YUV420. bt709 selects the coefficient set;
+// it must agree with the matrix_coefficients tag written for the coded image.
 void rgbaToYuv420(const SdrImage& img, std::vector<uint8_t>& yPlane, std::vector<uint8_t>& uPlane,
-                  std::vector<uint8_t>& vPlane) {
+                  std::vector<uint8_t>& vPlane, bool bt709) {
   const int w = img.width, h = img.height;
   const int cw = (w + 1) / 2, ch = (h + 1) / 2;
   yPlane.resize(static_cast<size_t>(w) * h);
@@ -606,11 +630,13 @@ void rgbaToYuv420(const SdrImage& img, std::vector<uint8_t>& yPlane, std::vector
     const uint8_t* src = rgba + static_cast<size_t>(y) * w * 4;
     int x = 0;
 #if defined(__ARM_NEON)
-    for (; x + 8 <= w; x += 8) storeY8(yRow + x, src + x * 4);
+    if (bt709) { for (; x + 8 <= w; x += 8) storeY8_709(yRow + x, src + x * 4); }
+    else { for (; x + 8 <= w; x += 8) storeY8(yRow + x, src + x * 4); }
 #endif
     for (; x < w; x++) {
       uint8_t yy, uu, vv;
-      yuvPixel(src + x * 4, yy, uu, vv);
+      if (bt709) yuvPixel709(src + x * 4, yy, uu, vv);
+      else yuvPixel(src + x * 4, yy, uu, vv);
       yRow[x] = yy;
     }
     // Even heights are fully covered by the preceding even row. An odd last row is not.
@@ -633,7 +659,8 @@ void rgbaToYuv420(const SdrImage& img, std::vector<uint8_t>& yPlane, std::vector
       r /= 4;
       g /= 4;
       b /= 4;
-      uRow[cx] = static_cast<uint8_t>(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+      if (bt709) uRow[cx] = static_cast<uint8_t>(((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128);
+      else uRow[cx] = static_cast<uint8_t>(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
       vRow[cx] = static_cast<uint8_t>(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
     }
   }
@@ -759,8 +786,12 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
 // gainmap, when set, is attached without rebuilding it from an HDR decode.
 int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool keepExif, int outFd,
                          int speedLevel, int threads, const GainMapPayload* gainmap, std::string& err) {
+  // SDR 内容的行业惯例是 709 编码矩阵（解码器对 709/P3 内容统一按 709 还原）；
+  // 只有源明确标了 601 才沿用 601，标签与系数必须一致，否则饱和色偏移。
+  const bool src601 = img.hasProfile &&
+      img.profile.matrix_coefficients == heif_matrix_coefficients_ITU_R_BT_601_6;
   std::vector<uint8_t> yPlane, uPlane, vPlane;
-  rgbaToYuv420(img, yPlane, uPlane, vPlane);
+  rgbaToYuv420(img, yPlane, uPlane, vPlane, /*bt709=*/!src601);
 
   heif_context* ctx = heif_context_alloc();
   heif_encoder* encoder = nullptr;
@@ -814,7 +845,7 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
   nclx.version = 1;
   nclx.color_primaries = img.hasProfile ? img.profile.color_primaries : !img.icc.empty() ? heif_color_primaries_unspecified : heif_color_primaries_ITU_R_BT_709_5;
   nclx.transfer_characteristics = img.hasProfile ? img.profile.transfer_characteristics : !img.icc.empty() ? heif_transfer_characteristic_unspecified : heif_transfer_characteristic_IEC_61966_2_1;
-  nclx.matrix_coefficients = heif_matrix_coefficients_ITU_R_BT_601_6;
+  nclx.matrix_coefficients = src601 ? heif_matrix_coefficients_ITU_R_BT_601_6 : heif_matrix_coefficients_ITU_R_BT_709_5;
   nclx.full_range_flag = 0;
   heif_image_set_nclx_color_profile(himg, &nclx);
 

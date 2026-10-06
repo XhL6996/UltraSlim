@@ -57,7 +57,7 @@ JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeTransco
 
 JNIEXPORT jstring JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeVersion(JNIEnv* env,
                                                                                  jclass /*unused*/) {
-  return env->NewStringUTF("libultrahdr 2.0.2 / libheif / x265 / SVT-AV1 / aom / libde265 / libjpeg-turbo");
+  return env->NewStringUTF("libultrahdr 2.0.2 · libheif 4a3f74bc · x265 4.1 · SVT-AV1 3.0.0 · dav1d 1.5.1 · libde265 1.0.16 · libjpeg-turbo 3.1.1 · aom 3.12.1（无损增益图）");
 }
 
 JNIEXPORT jbyteArray JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeDecodePreview(
