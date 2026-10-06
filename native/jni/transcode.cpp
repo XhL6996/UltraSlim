@@ -408,7 +408,9 @@ SdrImage resizeRgba(const SdrImage& src, int newW, int newH) {
   std::vector<int> x0s(static_cast<size_t>(newW)), x1s(static_cast<size_t>(newW)),
       wxs(static_cast<size_t>(newW));
   for (int x = 0; x < newW; x++) {
-    const int64_t fx = (static_cast<int64_t>(x) * 2 + 1) * sw * 32768 / newW - 32768;
+    // Pixel-center mapping: u = (x + 0.5) * sw / newW - 0.5 in 1/32768 fixed-point units.
+    // fx = ((2*x + 1) * sw * 32768) / (2 * newW) - 16384.
+    const int64_t fx = (static_cast<int64_t>(x) * 2 + 1) * sw * 32768 / (2 * newW) - 16384;
     int x0 = 0, x1 = 0, wx = 0;
     if (fx > 0) {
       x0 = static_cast<int>(fx >> 15);
@@ -428,7 +430,7 @@ SdrImage resizeRgba(const SdrImage& src, int newW, int newH) {
   const uint8_t* s = src.rgba.data();
   uint8_t* d = out.rgba.data();
   for (int y = 0; y < newH; y++) {
-    const int64_t fy = (static_cast<int64_t>(y) * 2 + 1) * sh * 32768 / newH - 32768;
+    const int64_t fy = (static_cast<int64_t>(y) * 2 + 1) * sh * 32768 / (2 * newH) - 16384;
     int y0 = 0, y1 = 0, wy = 0;
     if (fy > 0) {
       y0 = static_cast<int>(fy >> 15);
@@ -1207,20 +1209,21 @@ static TranscodeResult transcodeUnchecked(int inFd, int outFd, const TranscodeOp
     const int srcH = r.height;
     const int srcGmW = r.gainmapWidth;
     const int srcGmH = r.gainmapHeight;
-    // Recompress the base and keep the original gain map when the request allows it.
-    // Preservation only applies when the requested map matches the source sampling
-    // factor; any scale change is recomputed properly by the rebuild path.
-    const int srcFactor = (srcGmW > 0 && srcW % srcGmW == 0) ? srcW / srcGmW : 0;
-    const bool canPreserve = options.preserveGainMap && srcFactor > 0 &&
-                             (options.gainmapScale <= 0 || options.gainmapScale == srcFactor);
+    // Recompress the base and keep the original gain map. Downsampling a fine map
+    // destroys highlight boost, so legacy scale/quality options must not degrade
+    // it: the map is carried over whenever the output format can hold it, and
+    // unsupported cases fail explicitly instead of silently rebuilding.
+    const bool canPreserve = options.preserveGainMap;
     bool preserved = false;
     if (canPreserve) {
       preserved = tryReuseGainMap(data, container, dec.get(), options, outFd, r) == 0;
       if (!preserved) {
-        // Preservation is a best-effort optimization: fall back to rebuilding the
-        // gain map from the decoded HDR intent instead of failing the conversion.
+        // Preserve-or-refuse: leave nothing half-written and surface the reason
+        // (unsupported preservation is error 31) instead of rebuilding a degraded map.
         if (lseek(outFd, 0, SEEK_SET) >= 0) ftruncate(outFd, 0);
-        r.error.clear();
+        if (r.error.empty()) r.error = "无法原样保留此 Gain Map，请保留原图";
+        r.errorCode = 31;
+        return r;
       }
     }
     if (preserved) {

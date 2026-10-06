@@ -39,7 +39,7 @@ internal object PreviewCache {
                 context.contentResolver.openFileDescriptor(uri, "r")?.use { "${it.statSize}:$modified" } ?: return null
             } else { val source = File(uriString); if(!source.isFile) return null; "${source.length()}:${source.lastModified()}" }
         }.getOrNull() ?: return null
-        val key = cacheKey("$uriString:$version:v3", maxDim)
+        val key = cacheKey("$uriString:$version:v4", maxDim)
         memory.get(key)?.let { return it }
         val dir = File(context.cacheDir, "previews")
         val file = File(dir, "$key.jpg")
