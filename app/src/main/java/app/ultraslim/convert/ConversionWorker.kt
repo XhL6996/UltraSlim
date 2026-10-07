@@ -1,5 +1,6 @@
 package app.ultraslim.convert
 
+import app.ultraslim.model.OutputFormat
 import app.ultraslim.util.outputName
 import android.Manifest
 import android.app.PendingIntent
@@ -116,6 +117,22 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                         result = transcode(quality)
                         if (!result.isSuccess) { file.delete(); error(result.error) }
                     }
+                    // 检测原图是否包含实况照片 (Motion Photo / Live Photo)
+                    val motionInfo = withContext(Dispatchers.IO) {
+                        MotionPhotoHelper.detect(app, source)
+                    }
+                    var liveAttached = false
+                    if (motionInfo != null) {
+                        if (options.format == OutputFormat.JPEG || options.format == OutputFormat.HEIC) {
+                            liveAttached = withContext(Dispatchers.IO) {
+                                MotionPhotoHelper.attachMotionPhoto(app, source, file, options.format, motionInfo)
+                            }
+                            if (liveAttached) {
+                                result = result.copy(outputBytes = file.length())
+                            }
+                        }
+                    }
+
                     val verified = withContext(Dispatchers.IO) {
                         ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use {
                             UltraHdrBridge.nativeProbe(it.fd)
@@ -129,13 +146,17 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                         continue
                     }
                     val name = outputName(item.displayName, options.format.extension, id, item.createdAt)
+                    val liveSummary = if (motionInfo != null) {
+                        if (liveAttached) " · 实况已保留(无损直通)" else " · 原图实况(导出静止HDR)"
+                    } else ""
+                    val summary = options.summary() + liveSummary
                     // Commit the durable private output first. Saving can be retried without encoding again.
                     var entity = HistoryEntity(displayName = name, inputUri = item.uri, outputUri = file.path,
                         inputBytes = result.inputBytes, outputBytes = result.outputBytes, width = verified.width, height = verified.height,
                         gainmapWidth = verified.gainmapWidth, gainmapHeight = verified.gainmapHeight, hadGainMap = verified.hasGainMap,
                         format = options.format.label, inputFormat = probe.containerLabel, durationMs = result.durationMs,
                         maxContentBoost = verified.maxContentBoost, createdAt = if (item.createdAt > 0L) item.createdAt else System.currentTimeMillis(), status = HistoryEntity.STATUS_DONE,
-                        taskId = id, batchId = batchId, saveState = "PENDING", settingsSummary = options.summary(), hasExif = verified.hasExif)
+                        taskId = id, batchId = batchId, saveState = "PENDING", settingsSummary = summary, hasExif = verified.hasExif)
                     val historyId = withContext(NonCancellable) { app.database.historyDao().insert(entity) }
                     entity = entity.copy(id = historyId)
                     if (options.autoSave && app.database.taskDao().batch(batchId)?.cancelled == false) {

@@ -1094,7 +1094,7 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
     // produces >7MB frames that exceed Android MediaCodec/dav1d's 4.94MB buffer limits
     // and crash hardware decoders, dropping the gain map completely. High-quality lossy
     // produces ~1.5-2MB payloads with <1% linear luminance difference.
-    e = heif_encoder_set_lossy_quality(mapEncoder, gm.quality > 0 ? gm.quality : 85);
+    e = heif_encoder_set_lossy_quality(mapEncoder, ultrahdr::remapQualityForLibheif(gm.quality > 0 ? gm.quality : 85));
   }
   if (e.code != heif_error_Ok) { err = e.message; return 24; }
   heif_encoder_set_parameter(mapEncoder, "chroma", "444");
@@ -1208,7 +1208,7 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
     heif_context_free(ctx);
     return 20;
   }
-  heif_encoder_set_lossy_quality(encoder, quality);
+  heif_encoder_set_lossy_quality(encoder, ultrahdr::remapQualityForLibheif(quality));
   heif_encoder_set_parameter(encoder, "chroma", "420");
   configureEncoder(encoder, outCodec, speedLevel, threads);
 

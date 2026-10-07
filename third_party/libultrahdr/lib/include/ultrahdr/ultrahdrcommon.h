@@ -676,6 +676,33 @@ struct GlobalTonemapOutputs {
  */
 GlobalTonemapOutputs globalTonemap(const std::array<float, 3>& rgb_in, float headroom,
                                    bool is_normalized);
+
+/*
+ * Calibrates user-facing quality scale [1, 100] to libheif's quality parameter.
+ * libheif translates quality directly to x265 CRF = (100 - quality) / 2.0 and
+ * SVT-AV1 CQP = ((100 - quality) * 63 + 50) / 100.
+ * Naive qualities (e.g. 88, 92) map to CRF 6 and CRF 4 (near-lossless uncompressed video bitrates),
+ * creating files up to 2-3x larger than JPEG.
+ * This remapping maps photographic quality to proper CRF ranges:
+ *   q = 78 (Extreme)   -> libheif 54 (x265 CRF 23.0, SVT CQP 29)
+ *   q = 88 (Balanced)  -> libheif 63 (x265 CRF 18.5, SVT CQP 23) [iPhone HEIC equivalent]
+ *   q = 92 (Quality)   -> libheif 68 (x265 CRF 16.0, SVT CQP 20) [visually transparent]
+ *   q = 100            -> libheif 84 (x265 CRF 8.0, SVT CQP 10)
+ */
+inline int remapQualityForLibheif(int q) {
+  q = std::max(1, std::min(100, q));
+  if (q < 50) {
+    return std::max(1, 1 + (q - 1) * 39 / 49);
+  }
+  if (q <= 80) {
+    return 40 + (q - 50) * 16 / 30;
+  }
+  if (q <= 90) {
+    return 56 + (q - 80) * 9 / 10;
+  }
+  return 65 + (q - 90) * 19 / 10;
+}
+
 }  // namespace ultrahdr
 
 #endif  // ULTRAHDR_ULTRAHDRCOMMON_H

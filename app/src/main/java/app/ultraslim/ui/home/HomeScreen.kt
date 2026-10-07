@@ -541,9 +541,13 @@ private fun QueueCard(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 UltraAsyncImage(item.uri, null, ContentScale.Crop, Modifier.size(76.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surfaceContainer), maxDim = 384)
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(item.displayName, style = MaterialTheme.typography.titleSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(if(item.probe != null) "${item.probe.width} × ${item.probe.height}  ·  ${formatBytes(item.sizeBytes)}" else formatBytes(item.sizeBytes), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    FormatBadge(item.probe, item.status)
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        FormatBadge(item.probe, item.status)
+                        if (item.displayName.startsWith("MVIMG_", ignoreCase = true) || item.displayName.contains("MotionPhoto", ignoreCase = true)) {
+                            BadgeChip("实况", MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.colorScheme.onTertiaryContainer)
+                        }
+                    }
                 }
                 AnimatedContent(
                     targetState = item.status == QueueStatus.CONVERTING,

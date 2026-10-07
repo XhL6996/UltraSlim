@@ -16,7 +16,6 @@ import app.ultraslim.model.OutputFormat
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
-import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -214,26 +213,6 @@ private fun DetailContent(
     context: Context,
     modifier: Modifier = Modifier,
 ) {
-    var backProgress by remember { mutableFloatStateOf(0f) }
-    val scope = rememberCoroutineScope()
-    var backSettle by remember { mutableStateOf<Job?>(null) }
-    PredictiveBackHandler { progress ->
-        try {
-            progress.collect { backEvent ->
-                backSettle?.cancel()
-                backSettle = null
-                backProgress = backEvent.progress
-            }
-            // 提交：保留缩小形变，直接进入 pop 过渡，不再先弹回原状。
-            onBack()
-        } catch (e: CancellationException) {
-            // 取消：弹簧回弹，而不是瞬间跳回。
-            backSettle = scope.launch {
-                animate(backProgress, 0f, animationSpec = Motion.settleBack()) { v, _ -> backProgress = v }
-            }
-        }
-    }
-
     val saved = entity.outputUri.startsWith("content://")
 
     Column(
@@ -255,11 +234,7 @@ private fun DetailContent(
         }
         SectionHeader("看看细节", "拖动分界线对比，双指放大查看")
         Text("此页为 SDR 预览；HDR 亮度请在兼容相册中查看。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        HeroCompareCard(
-            entity = entity,
-            scale = 1f - 0.08f * backProgress,
-            corner = lerp(28.dp, 48.dp, backProgress),
-        )
+        HeroCompareCard(entity = entity)
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             if (!saved && android.os.Build.VERSION.SDK_INT >= 29) {
@@ -312,7 +287,7 @@ private fun DetailContent(
 }
 
 @Composable
-private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
+private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier) {
     var compareMode by remember { mutableIntStateOf(0) } // 0: 卷帘, 1: 按住
     var isHoldingOriginal by remember { mutableStateOf(false) }
     var fraction by remember { mutableFloatStateOf(0.5f) }
@@ -351,19 +326,14 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
         )
     }
     Card(
-        shape = RoundedCornerShape(corner),
-        modifier = Modifier
-            .fillMaxWidth()
-            .graphicsLayer {
-                scaleX = scale
-                scaleY = scale
-            },
+        shape = RoundedCornerShape(24.dp),
+        modifier = modifier.fillMaxWidth(),
     ) {
         BoxWithConstraints(
             modifier = Modifier
                 .fillMaxWidth()
                 .height(previewHeight)
-                .clip(RoundedCornerShape(corner))
+                .clip(RoundedCornerShape(24.dp))
                 .onSizeChanged {
                     viewSize = IntSize(it.width.coerceAtLeast(1), it.height.coerceAtLeast(1))
                 }

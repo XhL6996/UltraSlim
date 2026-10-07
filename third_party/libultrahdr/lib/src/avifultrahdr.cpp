@@ -430,7 +430,7 @@ uhdr_error_info_t AvifUltraHdr::encodeAvifUltraHdr(uhdr_raw_image_t* sdr_intent,
   }
 
   // set the encoder parameters
-  HEIF_ERR_CHECK(heif_encoder_set_lossy_quality(encoder, quality));
+  HEIF_ERR_CHECK(heif_encoder_set_lossy_quality(encoder, remapQualityForLibheif(quality)));
 
   // encode the primary image
   enum heif_chroma heif_img_fmt;
@@ -553,7 +553,7 @@ uhdr_error_info_t AvifUltraHdr::encodeAvifUltraHdr(uhdr_raw_image_t* sdr_intent,
       hdrNclx, map_matrix.find(gainmap_img->cg)->second));
   hdrNclx->full_range_flag = gainmap_img->range == UHDR_CR_FULL_RANGE ? true : false;
   (void)alternateIcc;
-  HEIF_ERR_CHECK(heif_encoder_set_lossy_quality(encoder, mMapCompressQuality));
+  HEIF_ERR_CHECK(heif_encoder_set_lossy_quality(encoder, remapQualityForLibheif(mMapCompressQuality)));
   HEIF_ERR_CHECK(heif_context_encode_gain_map_image(ctx, baseHandle, encoder, secondaryImage,
                                                     options, iso_data.data(), iso_data.size(),
                                                     hdrNclx, &secondaryHandle));

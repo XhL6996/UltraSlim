@@ -333,10 +333,10 @@ fun ConversionOptionsPanel(
                 }
             }
             val formatTip = when (defaults.format) {
-                OutputFormat.AVIF -> "AVIF：现代 AV1 编码，体积超小，高动态范围与暗部细节优秀"
-                OutputFormat.HEIC -> "HEIC：高效 HEVC 编码，与 iOS 及 Android 系统相册兼容性最佳"
-                OutputFormat.JXL -> "JXL：JPEG XL 现代格式，超强微观纹理保真度与无损增益图"
-                OutputFormat.JPEG -> "JPEG：经典兼容格式，直接复用原图增益图，体积缩减相对有限"
+                OutputFormat.AVIF -> "AVIF：现代 AV1 编码，体积超小；实况照片将导出为静止 HDR"
+                OutputFormat.HEIC -> "HEIC：高效 HEVC 编码，相册兼容性最佳，完美保留实况动态"
+                OutputFormat.JXL -> "JXL：JPEG XL 现代格式，极致纹理保真；实况照片将导出为静止 HDR"
+                OutputFormat.JPEG -> "JPEG：经典兼容格式，体积缩减相对有限，完美保留实况动态"
             }
             Text(formatTip, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
