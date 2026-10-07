@@ -95,6 +95,9 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     val mem = ActivityManager.MemoryInfo().also { app.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }
                     val pixels = probe.width.toLong() * probe.height
                     check(pixels > 0 && pixels * (if (probe.hasGainMap) 40 else 16) < mem.availMem * 3 / 5) { "当前可用内存不足，请关闭其他应用后重试" }
+                    val motionInfo = withContext(Dispatchers.IO) { MotionPhotoHelper.detect(app, source) }
+                    val motionXmp = if (motionInfo != null && options.format == OutputFormat.HEIC)
+                        MotionPhotoContainer.xmp(motionInfo, options.format.mimeType) else null
                     val file = File(app.filesDir, "outputs/$id.${options.format.extension}").apply { parentFile?.mkdirs() }
                     suspend fun transcode(quality: Int) = withContext(Dispatchers.IO) {
                         app.contentResolver.openFileDescriptor(source, "r")!!.use { input ->
@@ -102,7 +105,7 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                                 UltraHdrBridge.nativeTranscode(input.fd, output.fd, options.format.codecId, quality,
                                     options.gainmapQuality, options.gainmapScale, options.multiChannelGainmap, options.keepExif,
                                     options.allowSdr, options.speedLevel, options.resizePercent,
-                                    Runtime.getRuntime().availableProcessors().coerceIn(2, 8), options.keepLocation)
+                                    Runtime.getRuntime().availableProcessors().coerceIn(2, 8), options.keepLocation, motionXmp)
                             }
                         }
                     }
@@ -116,10 +119,6 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                         steps++
                         result = transcode(quality)
                         if (!result.isSuccess) { file.delete(); error(result.error) }
-                    }
-                    // 检测原图是否包含实况照片 (Motion Photo / Live Photo)
-                    val motionInfo = withContext(Dispatchers.IO) {
-                        MotionPhotoHelper.detect(app, source)
                     }
                     var liveAttached = false
                     if (motionInfo != null) {
@@ -145,7 +144,7 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                         repo.update(id) { it.copy(status = QueueStatus.SKIPPED, result = result, error = why) }
                         continue
                     }
-                    val name = outputName(item.displayName, options.format.extension, id, item.createdAt)
+                    val name = outputName(item.displayName, options.format.extension, id, item.createdAt, motionPhoto = liveAttached)
                     val liveSummary = if (motionInfo != null) {
                         if (liveAttached) " · 实况已保留(无损直通)" else " · 原图实况(导出静止HDR)"
                     } else ""
@@ -167,6 +166,9 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                         error = if (entity.saveState == "FAILED") "转换完成，保存失败；可在详情重试保存" else if (entity.saveState != "SAVED") "待保存，可直接分享" else null) }
                     done++; saved += result.inputBytes - result.outputBytes
                 } catch (e: CancellationException) { throw e } catch (e: Exception) {
+                    if (app.database.historyDao().byTask(id) == null) {
+                        withContext(Dispatchers.IO) { File(app.filesDir, "outputs/$id.${options.format.extension}").delete() }
+                    }
                     repo.update(id) { it.copy(status = QueueStatus.FAILED, error = e.message ?: "转换失败") }
                 } finally { withContext(NonCancellable) { repo.flush() } }
             }

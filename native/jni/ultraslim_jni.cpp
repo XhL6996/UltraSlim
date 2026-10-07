@@ -1,3 +1,4 @@
+#include <stdexcept>
 #include <jni.h>
 #include <exception>
 #include <algorithm>
@@ -39,9 +40,16 @@ JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeProbe(J
 JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeTranscode(
     JNIEnv* env, jclass /*unused*/, jint inFd, jint outFd, jint outCodec, jint quality,
     jint gainmapQuality, jint gainmapScale, jboolean multiChannelGainmap, jboolean keepExif,
-    jboolean allowSdrTranscode, jint speedLevel, jint resizePercent, jint codecThreads, jboolean keepLocation) {
+    jboolean allowSdrTranscode, jint speedLevel, jint resizePercent, jint codecThreads, jboolean keepLocation, jbyteArray xmp) {
   try {
     ultraslim::TranscodeOptions o;
+    if (xmp) {
+      const auto size = env->GetArrayLength(xmp);
+      if (size > 1024 * 1024) throw std::runtime_error("XMP 超过容量限制");
+      o.xmp.resize(size);
+      env->GetByteArrayRegion(xmp, 0, size, reinterpret_cast<jbyte*>(o.xmp.data()));
+      if (env->ExceptionCheck()) return nullptr;
+    }
     o.outCodec = outCodec;
     o.quality = quality;
     o.gainmapQuality = gainmapQuality;
@@ -82,6 +90,17 @@ JNIEXPORT jbyteArray JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeDeco
   env->SetByteArrayRegion(arr, 0, static_cast<jsize>(jpeg.size()),
                           reinterpret_cast<const jbyte*>(jpeg.data()));
   return arr;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeReadHeifXmp(
+    JNIEnv* env, jclass, jint fd) {
+  try {
+    auto bytes = ultraslim::readHeifXmp(fd);
+    if (bytes.empty()) return nullptr;
+    auto result = env->NewByteArray(static_cast<jsize>(bytes.size()));
+    if (result) env->SetByteArrayRegion(result, 0, static_cast<jsize>(bytes.size()), reinterpret_cast<const jbyte*>(bytes.data()));
+    return result;
+  } catch (...) { return nullptr; }
 }
 
 // Debug aid: raw Y plane of the primary image, packed as [w32][h32][pixels...].

@@ -404,21 +404,16 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     fun cancelScan() { scanJob?.cancel() }
 
     fun removeItem(id: String) {
-        val item = repo.find(id) ?: return
-        InputStore.deletePersisted(app, Uri.parse(item.uri))
         repo.remove(id)
     }
 
     fun removeBatch(itemIds: List<String>) {
-        itemIds.forEach { id ->
-            repo.find(id)?.let { InputStore.deletePersisted(app, Uri.parse(it.uri)) }
-        }
         repo.removeIds(itemIds)
     }
 
     fun clearFinished() {
-        val doomed = repo.queue.value.filter { it.status == QueueStatus.DONE }
-        doomed.forEach { InputStore.deletePersisted(app, Uri.parse(it.uri)) }
+        // History may still reference the imported source. App startup garbage collection
+        // removes private inputs only after both history and queue release them.
         repo.clearFinished()
     }
 
@@ -426,14 +421,12 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         val doomed = repo.queue.value.filter {
             it.status == QueueStatus.PENDING || it.status == QueueStatus.PROBING || it.status == QueueStatus.READY
         }
-        doomed.forEach { InputStore.deletePersisted(app, Uri.parse(it.uri)) }
         repo.clearPending()
         viewModelScope.launch { _events.emit(HomeEvent.Info("已移除 ${doomed.size} 张待处理照片")) }
     }
 
     fun clearAll() {
         val doomed = repo.queue.value.filter { it.status != QueueStatus.CONVERTING }
-        doomed.forEach { InputStore.deletePersisted(app, Uri.parse(it.uri)) }
         repo.clearAll()
         viewModelScope.launch { _events.emit(HomeEvent.Info("处理列表已清空（${doomed.size} 张）")) }
     }

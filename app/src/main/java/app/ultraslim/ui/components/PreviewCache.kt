@@ -9,6 +9,7 @@ import android.util.LruCache
 import app.ultraslim.bridge.UltraHdrBridge
 import java.io.File
 import java.security.MessageDigest
+import kotlinx.coroutines.sync.withLock
 
 /**
  * JPEG bytes from [UltraHdrBridge.nativeDecodePreview], kept in memory (~32MB)
@@ -23,12 +24,14 @@ internal object PreviewCache {
     }
 
     private val diskLock = Any()
-    private val requestLocks = Array(32) { Any() }
-    private val decodeSlots = java.util.concurrent.Semaphore(1)
+    private val requestLocks = Array(32) { kotlinx.coroutines.sync.Mutex() }
+    private val decodeSlots = kotlinx.coroutines.sync.Semaphore(1)
+    private val resolutions = listOf(128, 384, 512, 1600, 4096)
 
-    fun load(context: Context, uriString: String, maxDim: Int): Bitmap? {
+    suspend fun load(context: Context, uriString: String, requestedDim: Int): Bitmap? {
+        val maxDim = resolutions.firstOrNull { it >= requestedDim } ?: 4096
         val version = getVersion(context, uriString) ?: return null
-        val key = cacheKey("$uriString:$version:v4", maxDim)
+        val key = cacheKey("$uriString:$version:v5", maxDim)
 
         // 1. Fast-path: In-memory cache hit (no locks, no semaphore)
         memory.get(key)?.let { return it }
@@ -38,26 +41,28 @@ internal object PreviewCache {
         val file = File(dir, "$key.jpg")
         synchronized(diskLock) {
             memory.get(key)?.let { return it }
-            if (file.isFile && file.length() > 0L) {
-                val cached = BitmapFactory.decodeFile(file.absolutePath)
-                if (cached != null) {
-                    file.setLastModified(System.currentTimeMillis())
-                    memory.put(key, cached)
-                    return cached
-                }
-                file.delete()
+            readCached(file, key)?.let { return it }
+            // Detail previews can supply list thumbnails without decoding the original again.
+            for (dimension in resolutions.filter { it > maxDim }) {
+                val largerKey = cacheKey("$uriString:$version:v5", dimension)
+                val larger = memory.get(largerKey) ?: readCached(File(dir, "$largerKey.jpg"), largerKey) ?: continue
+                val edge = maxOf(larger.width, larger.height)
+                val bitmap = if (edge <= maxDim) larger else Bitmap.createScaledBitmap(larger,
+                    (larger.width.toLong() * maxDim / edge).toInt().coerceAtLeast(1),
+                    (larger.height.toLong() * maxDim / edge).toInt().coerceAtLeast(1), true)
+                memory.put(key, bitmap)
+                return bitmap
             }
         }
 
         // 3. Heavy native decode: serialized via per-URI requestLocks and global decodeSlots
-        return synchronized(requestLocks[(uriString.hashCode() and Int.MAX_VALUE) % requestLocks.size]) {
-            memory.get(key)?.let { return@synchronized it }
+        return requestLocks[(uriString.hashCode() and Int.MAX_VALUE) % requestLocks.size].withLock {
+            memory.get(key)?.let { return@withLock it }
             decodeSlots.acquire()
             try {
-                val bytes = decode(context, uriString, maxDim) ?: return@synchronized null
-                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@synchronized null
+                val bytes = decode(context, uriString, maxDim) ?: return@withLock null
+                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@withLock null
                 synchronized(diskLock) {
-                    memory.get(key)?.let { return@synchronized it }
                     dir.mkdirs()
                     runCatching { file.writeBytes(bytes) }
                     trim(dir)
@@ -68,6 +73,17 @@ internal object PreviewCache {
                 decodeSlots.release()
             }
         }
+    }
+
+    // Caller holds diskLock. Corrupt entries are removed and decoded again on demand.
+    private fun readCached(file: File, key: String): Bitmap? {
+        if (!file.isFile || file.length() == 0L) return null
+        val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+        if (bitmap == null) file.delete() else {
+            file.setLastModified(System.currentTimeMillis())
+            memory.put(key, bitmap)
+        }
+        return bitmap
     }
 
     private fun getVersion(context: Context, uriString: String): String? = runCatching {

@@ -30,12 +30,4 @@ object InputStore {
         } catch(e: Exception) { file.delete(); throw e }
     }
 
-    /** 删除曾为无持久授权的 URI 落盘的副本；其他 uri（picker 持久授权 / 媒体库）没有副本。 */
-    fun deletePersisted(context: Context, uri: Uri) {
-        val authority = uri.authority ?: return
-        if (!authority.endsWith(".files")) return
-        val path = uri.path ?: return
-        if (!path.startsWith("/inputs/") || path.contains("..")) return
-        File(context.filesDir, path).delete()
-    }
 }

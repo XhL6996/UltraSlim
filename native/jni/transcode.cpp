@@ -167,6 +167,7 @@ struct SdrImage {
   std::vector<uint8_t> icc;
   heif_color_profile_nclx profile {};
   bool hasProfile = false;
+  int colorChannels = 3;
   std::vector<uint8_t> exif;  // JPEG APP1 payload starting with "Exif\0\0" (may be empty)
 };
 
@@ -635,6 +636,7 @@ bool decodeJxlToSdr(const std::vector<uint8_t>& data, SdrImage& out,
         err = "获取 JXL 基本信息失败";
         break;
       }
+      out.colorChannels = info.num_color_channels;
       out.width = info.xsize;
       out.height = info.ysize;
     } else if (status == JXL_DEC_COLOR_ENCODING) {
@@ -1061,7 +1063,6 @@ struct GainMapPayload {
   SdrImage image;
   std::vector<uint8_t> iso;
   int codec = 1;
-  int quality = 85;
   bool multiChannel = true;
   // Not owned. Null selects a BT.2100 HLG profile for the derived rendition.
   const heif_color_profile_nclx* derivedNclx = nullptr;
@@ -1086,16 +1087,7 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
   std::unique_ptr<heif_encoder, decltype(&heif_encoder_release)> mapOwner(mapEncoder, heif_encoder_release);
   configureEncoder(mapEncoder, gm.codec, 1, ultraslim_codec_threads);
   if (avif) heif_encoder_set_parameter_integer(mapEncoder, "speed", 6);
-  const size_t pixelCount = static_cast<size_t>(gm.image.width) * gm.image.height;
-  if (pixelCount <= 500000) {
-    e = heif_encoder_set_lossless(mapEncoder, 1);
-  } else {
-    // Large gain maps (e.g. 6.5MP camera photos) cannot use unbounded lossless: lossless AV1
-    // produces >7MB frames that exceed Android MediaCodec/dav1d's 4.94MB buffer limits
-    // and crash hardware decoders, dropping the gain map completely. High-quality lossy
-    // produces ~1.5-2MB payloads with <1% linear luminance difference.
-    e = heif_encoder_set_lossy_quality(mapEncoder, ultrahdr::remapQualityForLibheif(gm.quality > 0 ? gm.quality : 85));
-  }
+  e = heif_encoder_set_lossless(mapEncoder, 1);
   if (e.code != heif_error_Ok) { err = e.message; return 24; }
   heif_encoder_set_parameter(mapEncoder, "chroma", "444");
   heif_image* image = nullptr;
@@ -1120,9 +1112,10 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
         const int r = gm.image.rgba[idx];
         const int g = gm.image.rgba[idx + 1];
         const int b = gm.image.rgba[idx + 2];
-        yDst[y * yStride + x] = static_cast<uint8_t>((77 * r + 150 * g + 29 * b + 128) >> 8);
-        uDst[y * uStride + x] = static_cast<uint8_t>(((-43 * r - 85 * g + 128 * b + 128) >> 8) + 128);
-        vDst[y * vStride + x] = static_cast<uint8_t>(((128 * r - 107 * g - 21 * b + 128) >> 8) + 128);
+        // Identity matrix: store G/B/R without rounding or color conversion.
+        yDst[y * yStride + x] = g;
+        uDst[y * uStride + x] = b;
+        vDst[y * vStride + x] = r;
       }
     }
   } else {
@@ -1141,7 +1134,7 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
   nclx.version = 1;
   nclx.color_primaries = heif_color_primaries_unspecified;
   nclx.transfer_characteristics = heif_transfer_characteristic_unspecified;
-  nclx.matrix_coefficients = heif_matrix_coefficients_ITU_R_BT_601_6;
+  nclx.matrix_coefficients = heif_matrix_coefficients_RGB_GBR;
   nclx.full_range_flag = 1;
   heif_image_set_nclx_color_profile(image, &nclx);
 
@@ -1180,7 +1173,8 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
 // Encodes an SDR RGBA8888 image to HEIC/AVIF directly with libheif.
 // gainmap, when set, is attached without rebuilding it from an HDR decode.
 int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool keepExif, int outFd,
-                         int speedLevel, int threads, const GainMapPayload* gainmap, std::string& err) {
+                         int speedLevel, int threads, const GainMapPayload* gainmap, std::string& err,
+                         const std::vector<uint8_t>* xmp = nullptr) {
   uhdr_color_gamut_t gamut = UHDR_CG_UNSPECIFIED;
   if (img.hasProfile) {
     if (img.profile.color_primaries == heif_color_primaries_SMPTE_EG_432_1) gamut = UHDR_CG_DISPLAY_P3;
@@ -1279,6 +1273,14 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
       if(exifError.code!=heif_error_Ok) { err="EXIF 写入失败"; heif_image_handle_release(outHandle); heif_image_release(himg); heif_encoder_release(encoder); heif_context_free(ctx); return 28; }
     }
   }
+  if (xmp && !xmp->empty()) {
+    const auto xmpError = heif_context_add_XMP_metadata(ctx, outHandle, xmp->data(), static_cast<int>(xmp->size()));
+    if (xmpError.code != heif_error_Ok) {
+      err = "实况 XMP 写入失败";
+      heif_image_handle_release(outHandle); heif_image_release(himg);
+      heif_encoder_release(encoder); heif_context_free(ctx); return 28;
+    }
+  }
   if (gainmap != nullptr && outHandle != nullptr) {
     const int gmErr = attachGainMap(ctx, outHandle, encoder, *gainmap, err);
     if (gmErr != 0) {
@@ -1333,6 +1335,7 @@ int encodeJxl(const SdrImage& base, int quality, bool keepExif, int outFd,
     gm_info.exponent_bits_per_sample = 0;
     gm_info.num_color_channels = gainmap->multiChannel ? 3 : 1;
     gm_info.alpha_bits = 0;
+    gm_info.uses_original_profile = JXL_TRUE;
     if (JxlEncoderSetBasicInfo(gm_enc, &gm_info) != JXL_ENC_SUCCESS) {
       err = "设置 Gain Map 基本信息失败";
       JxlEncoderDestroy(gm_enc);
@@ -1349,11 +1352,11 @@ int encodeJxl(const SdrImage& base, int quality, bool keepExif, int outFd,
     JxlEncoderFrameSettingsSetOption(gm_settings, JXL_ENC_FRAME_SETTING_EFFORT, gm_effort);
 
     const size_t pixelCount = static_cast<size_t>(gainmap->image.width) * gainmap->image.height;
-    if (pixelCount <= 500000) {
-      JxlEncoderSetFrameLossless(gm_settings, JXL_TRUE);
-    } else {
-      float d = JxlEncoderDistanceFromQuality(gainmap->quality > 0 ? gainmap->quality : 85.0f);
-      JxlEncoderSetFrameDistance(gm_settings, d);
+    if (JxlEncoderSetFrameLossless(gm_settings, JXL_TRUE) != JXL_ENC_SUCCESS) {
+      err = "无法无损编码 Gain Map";
+      JxlEncoderDestroy(gm_enc);
+      if (gm_runner) JxlThreadParallelRunnerDestroy(gm_runner);
+      return 24;
     }
 
     if (gainmap->multiChannel) {
@@ -1697,7 +1700,7 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
       r.error = "解码 JXL 增益图失败: " + err;
       return -1;
     }
-    multiChannel = true;
+    multiChannel = gm.colorChannels > 1;
     derived = heif_nclx_color_profile_alloc();
     if (derived) {
       heif_nclx_color_profile_set_color_primaries(derived, heif_color_primaries_ITU_R_BT_2020_2_and_2100_0);
@@ -1798,7 +1801,6 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
     payload.image = std::move(gm);
     payload.iso = std::move(iso);
     payload.codec = opt.outCodec;
-    payload.quality = std::max(80, std::min(95, opt.gainmapQuality > 0 ? opt.gainmapQuality : 85));
     payload.multiChannel = multiChannel;
     payload.derivedNclx = derived;
     rc = encodeJxl(base, opt.quality, opt.keepExif, outFd, opt.speedLevel,
@@ -1808,11 +1810,10 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
     payload.image = std::move(gm);
     payload.iso = std::move(iso);
     payload.codec = opt.outCodec;
-    payload.quality = std::max(80, std::min(95, opt.gainmapQuality > 0 ? opt.gainmapQuality : 85));
     payload.multiChannel = multiChannel;
     payload.derivedNclx = derived;
     rc = encodeSdrWithLibheif(base, opt.outCodec, opt.quality, opt.keepExif, outFd, opt.speedLevel,
-                              ultraslim_codec_threads, &payload, err) == 0
+                              ultraslim_codec_threads, &payload, err, &opt.xmp) == 0
              ? 0
              : -1;
   }
@@ -1865,6 +1866,29 @@ ProbeResult probeImageMemory(const std::vector<uint8_t>& data) {
     return r;
   }
   return r;
+}
+
+// Read the primary item XMP for motion-photo detection.
+std::vector<uint8_t> readHeifXmp(int fd) {
+  auto data = readAll(fd);
+  std::unique_ptr<heif_context, decltype(&heif_context_free)> ctx(heif_context_alloc(), heif_context_free);
+  if (!ctx || heif_context_read_from_memory_without_copy(ctx.get(), data.data(), data.size(), nullptr).code != heif_error_Ok) return {};
+  heif_image_handle* raw = nullptr;
+  if (heif_context_get_primary_image_handle(ctx.get(), &raw).code != heif_error_Ok) return {};
+  std::unique_ptr<heif_image_handle, decltype(&heif_image_handle_release)> handle(raw, heif_image_handle_release);
+  const int count = heif_image_handle_get_number_of_metadata_blocks(raw, "mime");
+  if (count <= 0 || count > 1024) return {};
+  std::vector<heif_item_id> ids(count);
+  const int got = heif_image_handle_get_list_of_metadata_block_IDs(raw, "mime", ids.data(), count);
+  for (int i = 0; i < got; ++i) {
+    const char* type = heif_image_handle_get_metadata_content_type(raw, ids[i]);
+    if (!type || strcmp(type, "application/rdf+xml") != 0) continue;
+    const size_t size = heif_image_handle_get_metadata_size(raw, ids[i]);
+    if (size == 0 || size > 1024 * 1024) return {};
+    std::vector<uint8_t> bytes(size);
+    if (heif_image_handle_get_metadata(raw, ids[i], bytes.data()).code == heif_error_Ok) return bytes;
+  }
+  return {};
 }
 
 ProbeResult probeImage(int fd) {
@@ -2128,7 +2152,7 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, int outFd, 
                          options.speedLevel, ultraslim_codec_threads, nullptr, err);
     } else {
       encErr = encodeSdrWithLibheif(sdr, options.outCodec, options.quality, options.keepExif, outFd,
-                                    options.speedLevel, ultraslim_codec_threads, nullptr, err);
+                                    options.speedLevel, ultraslim_codec_threads, nullptr, err, &options.xmp);
     }
     if (encErr != 0) {
       r.errorCode = encErr;
@@ -2161,7 +2185,7 @@ TranscodeResult transcodeImage(int inFd, int outFd, const TranscodeOptions& opti
     if (p.errorCode || p.width <= 0 || p.height <= 0 || static_cast<int64_t>(p.width) * p.height > 100000000) {
       TranscodeResult r; r.errorCode = 26; r.error = p.errorCode ? p.error : "图片超过安全解码限制（1 亿像素）"; return r;
     }
-    if(options.outCodec<0||options.outCodec>3||options.quality<1||options.quality>100||options.gainmapQuality<1||options.gainmapQuality>100||options.gainmapScale<1||options.gainmapScale>128||options.resizePercent<1||options.resizePercent>100||options.speedLevel<0||options.speedLevel>2) {
+    if(options.xmp.size()>1024*1024||options.outCodec<0||options.outCodec>3||options.quality<1||options.quality>100||options.gainmapQuality<1||options.gainmapQuality>100||options.gainmapScale<1||options.gainmapScale>128||options.resizePercent<1||options.resizePercent>100||options.speedLevel<0||options.speedLevel>2) {
       TranscodeResult r;r.errorCode=30;r.error="转码参数超出范围";return r;
     }
     return transcodeUnchecked(std::move(data), outFd, options);

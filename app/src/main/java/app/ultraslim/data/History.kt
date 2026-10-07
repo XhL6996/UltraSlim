@@ -108,11 +108,8 @@ interface TaskDao {
     @Query("SELECT * FROM tasks ORDER BY createdAt") suspend fun all(): List<QueueItem>
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun put(items: List<QueueItem>)
     @Query("DELETE FROM tasks WHERE id IN (:ids)") suspend fun removeIds(ids: List<String>)
-    @Transaction suspend fun snapshot(items: List<QueueItem>) {
-        val previous = all().associateBy { it.id }
-        val ids = items.mapTo(HashSet()) { it.id }
-        previous.keys.filter { it !in ids }.chunked(500).forEach { removeIds(it) }
-        val changed = items.filter { previous[it.id] != it }
+    @Transaction suspend fun applyChanges(changed: List<QueueItem>, removed: List<String>) {
+        removed.chunked(500).forEach { removeIds(it) }
         if (changed.isNotEmpty()) put(changed)
     }
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun putBatch(batch: BatchEntity)

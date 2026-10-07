@@ -33,6 +33,7 @@ struct TranscodeOptions {
   int speedLevel = 1;             // 0 = 画质优先, 1 = 平衡, 2 = 速度优先
   int resizePercent = 100;        // 25..100, output resolution as % of source
   // Threads for one encoder instance. 0 = half the machine, so two parallel jobs fit.
+  std::vector<uint8_t> xmp;  // Optional HEIF motion metadata, authored before video append.
   int codecThreads = 0;
 };
 
@@ -50,6 +51,7 @@ struct TranscodeResult {
 };
 
 ProbeResult probeImage(int fd);
+std::vector<uint8_t> readHeifXmp(int fd);
 TranscodeResult transcodeImage(int inFd, int outFd, const TranscodeOptions& options);
 
 /**

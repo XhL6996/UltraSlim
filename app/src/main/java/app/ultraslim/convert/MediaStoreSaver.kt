@@ -82,7 +82,7 @@ object MediaStoreSaver {
 
         val resolver = context.contentResolver
         // Stable name enables recovery if the process died after MediaStore publication.
-        val desired = if (taskId != null && !displayName.matches(Regex(".*_Slim_[0-9a-f]{8}\\.[^.]+"))) {
+        val desired = if (taskId != null && !displayName.matches(Regex(".*_Slim_[0-9a-f]{8}(?:MP)?\\.[^.]+"))) {
             // Recover records created by earlier app versions with their original stable name.
             displayName.substringBeforeLast('.') + "_" + taskId + "." + format.extension
         } else displayName

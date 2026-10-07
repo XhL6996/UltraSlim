@@ -45,16 +45,25 @@ data class QueueItem(
  */
 class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
     private val ready = CompletableDeferred<Unit>()
-    private val writes = Channel<Pair<List<QueueItem>, CompletableDeferred<Unit>>>(Channel.UNLIMITED)
+    // One wakeup and one current snapshot, regardless of batch size. flush() is a revision barrier.
+    private val writes = Channel<Unit>(Channel.CONFLATED)
+    private var revision = 0L
+    private var persistedRevision = 0L
+    private val barriers = mutableListOf<Pair<Long, CompletableDeferred<Unit>>>()
     suspend fun awaitReady() = ready.await()
     suspend fun flush() {
         ready.await()
         val ack = CompletableDeferred<Unit>()
-        synchronized(this) { writes.trySend(_queue.value to ack).getOrThrow() }
+        synchronized(this) {
+            if (persistedRevision >= revision) ack.complete(Unit)
+            else {
+                barriers += revision to ack
+                writes.trySend(Unit).getOrThrow()
+            }
+        }
         ack.await()
     }
-    private fun persist() { writes.trySend(_queue.value to CompletableDeferred()) }
-
+    private fun persist() { revision++; writes.trySend(Unit).getOrThrow() }
 
     private val _queue = MutableStateFlow<List<QueueItem>>(emptyList())
     val queue: StateFlow<List<QueueItem>> = _queue.asStateFlow()
@@ -65,12 +74,45 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
     init {
         scope.launch {
             try {
-                _queue.value = dao.all().map { if (it.status == QueueStatus.PROBING || it.status == QueueStatus.CONVERTING) it.copy(status = QueueStatus.READY) else it }
-                ready.complete(Unit)
-                for ((items, ack) in writes) {
-                    try { dao.snapshot(items); ack.complete(Unit) } catch (e: Exception) { ack.completeExceptionally(e) }
+                var persisted = dao.all().associateBy { it.id }
+                synchronized(this@ConversionRepository) {
+                    _queue.value = persisted.values.map {
+                        if (it.status == QueueStatus.PROBING || it.status == QueueStatus.CONVERTING) it.copy(status = QueueStatus.READY) else it
+                    }
+                    if (_queue.value.any { persisted[it.id] != it }) persist()
                 }
-            } catch (e: Exception) { ready.completeExceptionally(e) }
+                ready.complete(Unit)
+                for (ignored in writes) {
+                    val (items, target) = synchronized(this@ConversionRepository) { _queue.value to revision }
+                    val next = items.associateBy { it.id }
+                    val changed = items.filter { persisted[it.id] != it }
+                    val removed = persisted.keys.filter { it !in next }
+                    var failure: Exception? = null
+                    try {
+                        dao.applyChanges(changed, removed)
+                        persisted = next
+                    } catch (e: Exception) {
+                        if (e is kotlinx.coroutines.CancellationException) throw e
+                        failure = e
+                    }
+                    synchronized(this@ConversionRepository) {
+                        if (failure == null) persistedRevision = target
+                        val completed = barriers.filter { it.first <= target }
+                        barriers.removeAll(completed.toSet())
+                        completed.forEach { (_, ack) ->
+                            if (failure == null) ack.complete(Unit) else ack.completeExceptionally(failure)
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                ready.completeExceptionally(e)
+                synchronized(this@ConversionRepository) {
+                    writes.close(e)
+                    barriers.forEach { it.second.completeExceptionally(e) }
+                    barriers.clear()
+                }
+                if (e is kotlinx.coroutines.CancellationException) throw e
+            }
         }
     }
 

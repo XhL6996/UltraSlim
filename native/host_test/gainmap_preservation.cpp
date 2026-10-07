@@ -48,8 +48,8 @@ static std::vector<uint8_t> jpeg(int w,int h,bool multi,int orientation) {
  while(c.next_scanline<c.image_height){for(int x=0;x<w;x++)for(int ch=0;ch<c.input_components;ch++)row[x*c.input_components+ch]=(x*7+c.next_scanline*11+ch*73)%256;JSAMPROW r=row.data();jpeg_write_scanlines(&c,&r,1);}
  jpeg_finish_compress(&c);std::vector<uint8_t> out(mem,mem+len);free(mem);jpeg_destroy_compress(&c);return out;
 }
-static void fixture(const std::string& path,bool multi,int orientation){
- auto b=jpeg(163,99,true,orientation),g=jpeg(41,25,multi,0);auto*e=uhdr_create_encoder();uhdr_compressed_image_t base{},gm{};base.data=b.data();base.data_sz=base.capacity=b.size();base.cg=UHDR_CG_BT_709;base.ct=UHDR_CT_SRGB;base.range=UHDR_CR_FULL_RANGE;gm=base;gm.data=g.data();gm.data_sz=gm.capacity=g.size();
+static void fixture(const std::string& path,bool multi,int orientation,int gw=41,int gh=25){
+ auto b=jpeg(163,99,true,orientation),g=jpeg(gw,gh,multi,0);auto*e=uhdr_create_encoder();uhdr_compressed_image_t base{},gm{};base.data=b.data();base.data_sz=base.capacity=b.size();base.cg=UHDR_CG_BT_709;base.ct=UHDR_CT_SRGB;base.range=UHDR_CR_FULL_RANGE;gm=base;gm.data=g.data();gm.data_sz=gm.capacity=g.size();
  uhdr_gainmap_metadata_t m{};for(int i=0;i<3;i++){m.min_content_boost[i]=1;m.max_content_boost[i]=4+i;m.gamma[i]=1;m.offset_sdr[i]=m.offset_hdr[i]=1.0f/64;}m.hdr_capacity_min=1;m.hdr_capacity_max=8;m.use_base_cg=1;
  check(uhdr_enc_set_compressed_image(e,&base,UHDR_BASE_IMG).error_code==UHDR_CODEC_OK,"set base");check(uhdr_enc_set_gainmap_image(e,&gm,&m).error_code==UHDR_CODEC_OK,"set gain map");check(uhdr_encode(e).error_code==UHDR_CODEC_OK,"mux fixture");auto*r=uhdr_get_encoded_stream(e);FILE*f=fopen(path.c_str(),"wb");fwrite(r->data,1,r->data_sz,f);fclose(f);uhdr_release_encoder(e);
 }
@@ -66,7 +66,7 @@ static void equal(const Map&a,const Map&b,int orientation=1){
   int dx=x,dy=y;switch(orientation){case 2:dx=a.w-1-x;break;case 3:dx=a.w-1-x;dy=a.h-1-y;break;case 4:dy=a.h-1-y;break;case 5:dx=y;dy=x;break;case 6:dx=a.h-1-y;dy=x;break;case 7:dx=a.h-1-y;dy=a.w-1-x;break;case 8:dx=y;dy=a.w-1-x;break;}
   for(int c=0;c<3;c++){
    int diff = std::abs((int)a.rgb[(y*a.w+x)*3+c] - (int)b.rgb[(dy*w+dx)*3+c]);
-   int maxDiff = a.multi ? 1 : 0;
+   int maxDiff = 0;
    if(diff > maxDiff){fprintf(stderr,"pixel %d,%d channel %d: %d -> %d\n",x,y,c,a.rgb[(y*a.w+x)*3+c],b.rgb[(dy*w+dx)*3+c]);check(false,"gain map pixel-exact preservation");}
   }
  }
@@ -121,6 +121,22 @@ int main(int argc,char**argv){
    auto dst=src+"-"+std::to_string(codec);convert(src,dst,codec);auto first=map(dst,false);equal(original,first,orientation);
    auto round=dst+"-round";convert(dst,round,codec==1?2:1,50);auto second=map(round,false);equal(first,second);check(first.iso==second.iso,"ISO metadata preserved byte-for-byte between containers");
   }
+ }
+ // A camera-size map must take the same strictly lossless path as a thumbnail.
+ for(bool multi:{false,true}) {
+  auto src=root+"/large-"+std::to_string(multi)+".jpg";fixture(src,multi,1,801,625);auto original=map(src,true);
+  for(int codec:{1,2}) {
+   auto dst=src+"-"+std::to_string(codec);convert(src,dst,codec);equal(original,map(dst,false));
+   const std::string packet="<x:xmpmeta xmlns:x=\"adobe:ns:meta/\">motion-test</x:xmpmeta>";
+   std::vector<uint8_t> xmp(packet.begin(),packet.end());
+   int a=open(src.c_str(),O_RDONLY),b=open((dst+"-xmp").c_str(),O_RDWR|O_CREAT|O_TRUNC,0600);
+   ultraslim::TranscodeOptions o;o.outCodec=codec;o.codecThreads=2;o.xmp=xmp;
+   check(ultraslim::transcodeImage(a,b,o).errorCode==0,"encode with XMP");
+   check(ultraslim::readHeifXmp(b)==xmp,"XMP roundtrip");close(a);close(b);
+   equal(original,map(dst+"-xmp",false));
+  }
+  const auto jxl=src+".jxl",round=jxl+".heic";
+  convert(src,jxl,3);convert(jxl,round,1);equal(original,map(round,false));
  }
  puts("PASS: mono/RGB maps, all 8 orientations, HEIC/AVIF cross-codec roundtrip, main resize, exact JPEG map bytes, exact map pixels and HDR metadata");
 }

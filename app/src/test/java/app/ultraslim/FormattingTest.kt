@@ -21,6 +21,7 @@ class FormattingTest {
         val first = outputName("IMG_20261006.jpg", "AVIF", "task-1", 0)
         assertTrue(first.matches(Regex("IMG_20261006_Slim_[0-9a-f]{8}\\.avif")))
         assertEquals(first, outputName("IMG_20261006.jpg", "avif", "task-1", 0))
+        assertTrue(outputName("photo.jpg", "heic", "motion", 0, motionPhoto = true).endsWith("MP.heic"))
         assertNotEquals(first, outputName("IMG_20261006.jpg", "avif", "task-2", 0))
         assertTrue(outputName("81_1_1_5767931.jpg", "heic", "task-3", 0).startsWith("Photo_"))
         assertFalse(outputName("../a/b.jpg", "avif", "task", 0).contains('/'))

@@ -78,6 +78,7 @@ object UltraHdrBridge {
         resizePercent: Int,
         codecThreads: Int,
         keepLocation: Boolean = true,
+        motionXmp: ByteArray? = null,
     ): TranscodeResult
 
     @JvmStatic
@@ -90,6 +91,9 @@ object UltraHdrBridge {
      */
     @JvmStatic
     external fun nativeDecodePreview(fd: Int, maxDim: Int): ByteArray?
+
+    @JvmStatic
+    external fun nativeReadHeifXmp(fd: Int): ByteArray?
 
     /** Debug: raw Y plane of the primary image, [w32][h32][pixels...]. */
     @JvmStatic
