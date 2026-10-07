@@ -90,6 +90,12 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
         _queue.update { list -> list.filterNot { it.id == id && it.status != QueueStatus.CONVERTING } }; persist()
     }
 
+    @Synchronized fun removeIds(ids: Collection<String>) {
+        val set = ids.toSet()
+        _queue.update { list -> list.filterNot { it.id in set && it.status != QueueStatus.CONVERTING } }
+        persist()
+    }
+
     @Synchronized fun update(id: String, transform: (QueueItem) -> QueueItem) {
         _queue.update { list -> list.map { if (it.id == id) transform(it) else it } }; persist()
     }

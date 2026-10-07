@@ -65,6 +65,20 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     val finishedItems = remember(state.queue) {
         state.queue.filter { it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED || it.status == QueueStatus.FAILED }
     }
+    val pendingGroups = remember(pendingItems) {
+        groupByTimeSession(
+            items = pendingItems,
+            timestampSelector = { it.createdAt },
+            batchIdSelector = { it.batchId },
+        )
+    }
+    val finishedGroups = remember(finishedItems) {
+        groupByTimeSession(
+            items = finishedItems,
+            timestampSelector = { it.createdAt },
+            batchIdSelector = { it.batchId },
+        )
+    }
     var confirmClear by remember { mutableStateOf<String?>(null) }  // "pending" | "all"
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
@@ -257,21 +271,94 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             }
                         }
                     }
-                    // 待处理（含转换中）在前，已完成（成功/跳过/失败）在后：新导入的只会
-                    // 出现在"待处理"组里，一眼可辨；状态变化时行平滑跨组移动（key 不变）。
-                    if (pendingItems.isNotEmpty()) item(key = "hdr-pending") {
-                        Text("待处理 · ${pendingItems.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                    // 待处理（含转换中）在前，按导入时间戳分组显示
+                    if (pendingGroups.isNotEmpty()) {
+                        item(key = "hdr-pending") {
+                            Text("待处理 · ${pendingItems.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                        }
+                        pendingGroups.forEach { group ->
+                            if (pendingGroups.size > 1) {
+                                item(key = "group-pending-${group.key}") {
+                                    BatchGroupHeader(
+                                        title = "${group.title} 导入",
+                                        count = group.items.size,
+                                        statusSummary = "待处理",
+                                        action = {
+                                            IconButton(
+                                                onClick = { vm.removeBatch(group.items.map { it.id }) },
+                                                modifier = Modifier.size(32.dp),
+                                            ) {
+                                                Icon(Icons.Rounded.Close, "移除此批", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                            }
+                                        }
+                                    )
+                                }
+                            }
+                            items(group.items, key = { it.id }) { item ->
+                                QueueRow(
+                                    item,
+                                    onRemove = { vm.removeItem(item.id) },
+                                    onRetry = { vm.retryItem(item.id) },
+                                    onOpen = { item.historyId?.let(onOpenDetail) },
+                                    modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast))
+                                )
+                            }
+                        }
                     }
-                    items(pendingItems, key = { it.id }) { item ->
-                        QueueRow(item, onRemove = { vm.removeItem(item.id) }, onRetry = { vm.retryItem(item.id) }, onOpen = { item.historyId?.let(onOpenDetail) },
-                            modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast)))
-                    }
-                    if (finishedItems.isNotEmpty()) item(key = "hdr-finished") {
-                        Text("已完成 · ${finishedItems.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
-                    }
-                    items(finishedItems, key = { it.id }) { item ->
-                        QueueRow(item, onRemove = { vm.removeItem(item.id) }, onRetry = { vm.retryItem(item.id) }, onOpen = { item.historyId?.let(onOpenDetail) },
-                            modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast)))
+
+                    // 已完成（成功/跳过/失败）在后，按导入与转换时间戳清晰分组
+                    if (finishedGroups.isNotEmpty()) {
+                        item(key = "hdr-finished") {
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 10.dp),
+                                horizontalArrangement = Arrangement.SpaceBetween,
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Text("已完成 · ${finishedItems.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                if (state.hasFinishedItems) {
+                                    TextButton(onClick = vm::clearFinished) {
+                                        Text("清除成功项")
+                                    }
+                                }
+                            }
+                        }
+                        finishedGroups.forEach { group ->
+                            val groupSaved = group.items.sumOf { (it.result?.inputBytes ?: it.sizeBytes) - (it.result?.outputBytes ?: it.sizeBytes) }
+                            val failedCount = group.items.count { it.status == QueueStatus.FAILED }
+                            val skippedCount = group.items.count { it.status == QueueStatus.SKIPPED }
+                            val doneCount = group.items.count { it.status == QueueStatus.DONE }
+                            item(key = "group-finished-${group.key}") {
+                                BatchGroupHeader(
+                                    title = group.title,
+                                    count = group.items.size,
+                                    savedBytes = groupSaved,
+                                    statusSummary = when {
+                                        failedCount > 0 && doneCount > 0 -> "$doneCount 成功 · $failedCount 失败"
+                                        failedCount > 0 -> "$failedCount 项失败"
+                                        skippedCount > 0 && doneCount > 0 -> "$doneCount 成功 · $skippedCount 保留原图"
+                                        skippedCount > 0 -> "$skippedCount 项保留原图"
+                                        else -> "全部成功"
+                                    },
+                                    action = {
+                                        IconButton(
+                                            onClick = { vm.removeBatch(group.items.map { it.id }) },
+                                            modifier = Modifier.size(32.dp),
+                                        ) {
+                                            Icon(Icons.Rounded.Close, "清除此批", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                                        }
+                                    }
+                                )
+                            }
+                            items(group.items, key = { it.id }) { item ->
+                                QueueRow(
+                                    item,
+                                    onRemove = { vm.removeItem(item.id) },
+                                    onRetry = { vm.retryItem(item.id) },
+                                    onOpen = { item.historyId?.let(onOpenDetail) },
+                                    modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast))
+                                )
+                            }
+                        }
                     }
                     item {
                         AnimatedVisibility(

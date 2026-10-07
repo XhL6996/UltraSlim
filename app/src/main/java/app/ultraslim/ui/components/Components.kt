@@ -23,8 +23,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BrokenImage
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -552,3 +554,63 @@ private fun ImageFallbackPlaceholder() {
         )
     }
 }
+
+/**
+ * 批次时间戳分组头部：清晰展示本次导入/转换的时间（今天 17:01 / 刚刚 / 昨天等）、张数与省下体积，并支持批次级快捷操作。
+ */
+@Composable
+fun BatchGroupHeader(
+    title: String,
+    count: Int,
+    modifier: Modifier = Modifier,
+    savedBytes: Long? = null,
+    statusSummary: String? = null,
+    action: @Composable (() -> Unit)? = null,
+) {
+    Row(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(top = 10.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.weight(1f, fill = false),
+        ) {
+            Surface(
+                color = MaterialTheme.colorScheme.secondaryContainer,
+                shape = RoundedCornerShape(8.dp),
+            ) {
+                Icon(
+                    Icons.Rounded.Schedule,
+                    contentDescription = null,
+                    modifier = Modifier.padding(6.dp).size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+            }
+            Column {
+                Text(title, style = MaterialTheme.typography.titleSmall)
+                val sub = buildString {
+                    append("$count 张照片")
+                    if (savedBytes != null && savedBytes > 0) {
+                        append(" · 省下 ${formatBytes(savedBytes)}")
+                    }
+                    if (!statusSummary.isNullOrBlank()) {
+                        append(" · $statusSummary")
+                    }
+                }
+                Text(
+                    sub,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (action != null) {
+            action()
+        }
+    }
+}
+

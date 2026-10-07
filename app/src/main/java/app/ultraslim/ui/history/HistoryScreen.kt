@@ -48,6 +48,13 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
     var selecting by remember { mutableStateOf(false) }
     LaunchedEffect(vm) { vm.events.collect { snackbar.showSnackbar(it) } }
     val visible = state.items.filter { when(filter) { "待保存" -> it.saveState != "SAVED"; "已保存" -> it.saveState == "SAVED"; "保存失败" -> it.saveState == "FAILED"; else -> true } }
+    val historyGroups = remember(visible) {
+        groupByTimeSession(
+            items = visible,
+            timestampSelector = { it.createdAt },
+            batchIdSelector = { it.batchId },
+        )
+    }
     val railMode = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width / androidx.compose.ui.platform.LocalDensity.current.density >= 840
     Scaffold(topBar = { TopAppBar(title = { Column { Text("成品库", style = MaterialTheme.typography.titleLarge); Text("每一次减负，都看得见", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) } }, actions = {
             TextButton(onClick = { selecting = !selecting; if(!selecting) selected=emptySet() }) { Text(if(selecting) "完成" else "选择") }
@@ -98,9 +105,30 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                     EmptyState(Icons.Rounded.History,"暂无此类记录","完成的成品和保存状态会显示在这里")
                 }
             }
-            visible.groupBy {it.batchId.ifBlank {"legacy"}}.forEach { (batch, records) ->
-                item(key="batch-$batch") { Text(if(batch=="legacy") "以前的转换" else "批次 · ${formatRelativeTime(records.first().createdAt)} · ${records.size} 张",style=MaterialTheme.typography.titleSmall) }
-                items(records,key={it.id}) { entity ->
+            historyGroups.forEach { group ->
+                val groupSavedBytes = group.items.sumOf { it.inputBytes - it.outputBytes }
+                item(key = "hdr-${group.key}") {
+                    BatchGroupHeader(
+                        title = group.title,
+                        count = group.items.size,
+                        savedBytes = groupSavedBytes,
+                        action = if (selecting) {
+                            {
+                                val allSelected = group.items.all { it.id in selected }
+                                TextButton(
+                                    onClick = {
+                                        val groupIds = group.items.map { it.id }.toSet()
+                                        selected = if (allSelected) selected - groupIds else selected + groupIds
+                                    },
+                                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                ) {
+                                    Text(if (allSelected) "取消此批" else "全选此批")
+                                }
+                            }
+                        } else null
+                    )
+                }
+                items(group.items, key = { it.id }) { entity ->
                     Card(onClick={if(selecting) selected=if(entity.id in selected) selected-entity.id else selected+entity.id else onOpenDetail(entity.id)},modifier=Modifier.fillMaxWidth().animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast)), colors=CardDefaults.cardColors(containerColor=MaterialTheme.colorScheme.surfaceContainerLow)) {
                         Row(Modifier.padding(12.dp),verticalAlignment=Alignment.CenterVertically) {
                             AnimatedVisibility(

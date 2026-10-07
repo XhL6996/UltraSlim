@@ -134,7 +134,7 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                         inputBytes = result.inputBytes, outputBytes = result.outputBytes, width = verified.width, height = verified.height,
                         gainmapWidth = verified.gainmapWidth, gainmapHeight = verified.gainmapHeight, hadGainMap = verified.hasGainMap,
                         format = options.format.label, inputFormat = probe.containerLabel, durationMs = result.durationMs,
-                        maxContentBoost = verified.maxContentBoost, createdAt = System.currentTimeMillis(), status = HistoryEntity.STATUS_DONE,
+                        maxContentBoost = verified.maxContentBoost, createdAt = if (item.createdAt > 0L) item.createdAt else System.currentTimeMillis(), status = HistoryEntity.STATUS_DONE,
                         taskId = id, batchId = batchId, saveState = "PENDING", settingsSummary = options.summary(), hasExif = verified.hasExif)
                     val historyId = withContext(NonCancellable) { app.database.historyDao().insert(entity) }
                     entity = entity.copy(id = historyId)

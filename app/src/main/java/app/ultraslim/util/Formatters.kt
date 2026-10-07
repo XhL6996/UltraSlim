@@ -1,6 +1,7 @@
 package app.ultraslim.util
 
 import java.text.SimpleDateFormat
+import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -64,3 +65,116 @@ fun formatRelativeTime(timeMs: Long, nowMs: Long = System.currentTimeMillis()): 
 }
 
 fun formatByteDelta(bytes: Long): String = (if (bytes > 0) "+" else if (bytes < 0) "−" else "") + formatBytes(kotlin.math.abs(bytes))
+
+/** 表示一个时间戳或批次归类的分组集合 */
+data class TimeGroup<T>(
+    val key: String,
+    val timestamp: Long,
+    val title: String,
+    val items: List<T>,
+)
+
+/**
+ * 格式化分组时间戳头部：
+ * - 今天 HH:mm（若在 60 分钟以内附带相对时间标签，如 "刚刚"、"5 分钟前"）
+ * - 昨天 HH:mm
+ * - M月d日 HH:mm
+ * - yyyy年M月d日 HH:mm
+ */
+fun formatGroupHeader(timeMs: Long, nowMs: Long = System.currentTimeMillis()): String {
+    if (timeMs <= 0L) return "历史批次"
+    val date = Date(timeMs)
+    val now = Date(nowMs)
+    val calItem = Calendar.getInstance().apply { time = date }
+    val calNow = Calendar.getInstance().apply { time = now }
+
+    val isSameDay = calItem.get(Calendar.YEAR) == calNow.get(Calendar.YEAR) &&
+        calItem.get(Calendar.DAY_OF_YEAR) == calNow.get(Calendar.DAY_OF_YEAR)
+
+    val timeStr = SimpleDateFormat("HH:mm", Locale.getDefault()).format(date)
+
+    if (isSameDay) {
+        val diff = (nowMs - timeMs).coerceAtLeast(0L)
+        val rel = when {
+            diff < 60_000L -> "刚刚"
+            diff < 60 * 60_000L -> "${diff / 60_000L} 分钟前"
+            else -> null
+        }
+        return if (rel != null) "今天 $timeStr · $rel" else "今天 $timeStr"
+    }
+
+    calNow.add(Calendar.DAY_OF_YEAR, -1)
+    val isYesterday = calItem.get(Calendar.YEAR) == calNow.get(Calendar.YEAR) &&
+        calItem.get(Calendar.DAY_OF_YEAR) == calNow.get(Calendar.DAY_OF_YEAR)
+    if (isYesterday) {
+        return "昨天 $timeStr"
+    }
+
+    return if (calItem.get(Calendar.YEAR) == Calendar.getInstance().get(Calendar.YEAR)) {
+        SimpleDateFormat("M月d日 HH:mm", Locale.getDefault()).format(date)
+    } else {
+        SimpleDateFormat("yyyy年M月d日 HH:mm", Locale.getDefault()).format(date)
+    }
+}
+
+/**
+ * 将列表按时间戳邻近性（以及批次 ID）聚类分组，时间倒序排列。
+ * - 连续相邻条目的时间戳间隔在 [maxGapMs]（默认 2.5 分钟）以内归入同一组（覆盖单次导入动作或连续转换）；
+ * - 若有显式非空 batchId 且相同，强制归入同一组；若有显式不同 batchId，则开辟新组。
+ */
+fun <T> groupByTimeSession(
+    items: List<T>,
+    timestampSelector: (T) -> Long,
+    batchIdSelector: (T) -> String = { "" },
+    maxGapMs: Long = 150_000L,
+): List<TimeGroup<T>> {
+    if (items.isEmpty()) return emptyList()
+    val sorted = items.sortedByDescending { timestampSelector(it) }
+    val groups = mutableListOf<MutableList<T>>()
+    var currentGroup = mutableListOf<T>()
+    var lastTimestamp = -1L
+    var lastBatchId = ""
+
+    for (item in sorted) {
+        val t = timestampSelector(item)
+        val b = batchIdSelector(item)
+        val hasBatch = b.isNotBlank()
+        val lastHasBatch = lastBatchId.isNotBlank()
+
+        val belongsToSameGroup = if (currentGroup.isEmpty()) {
+            true
+        } else if (hasBatch && lastHasBatch && b == lastBatchId) {
+            true
+        } else if (hasBatch && lastHasBatch && b != lastBatchId) {
+            false
+        } else {
+            lastTimestamp > 0L && kotlin.math.abs(lastTimestamp - t) <= maxGapMs
+        }
+
+        if (belongsToSameGroup) {
+            currentGroup.add(item)
+            lastTimestamp = t
+            if (hasBatch) lastBatchId = b
+        } else {
+            groups.add(currentGroup)
+            currentGroup = mutableListOf(item)
+            lastTimestamp = t
+            lastBatchId = b
+        }
+    }
+    if (currentGroup.isNotEmpty()) {
+        groups.add(currentGroup)
+    }
+
+    return groups.mapIndexed { idx, groupItems ->
+        val groupTime = timestampSelector(groupItems.first())
+        val firstBatch = groupItems.firstOrNull { batchIdSelector(it).isNotBlank() }?.let(batchIdSelector)
+        val key = if (!firstBatch.isNullOrBlank()) "batch-$firstBatch" else "time-$groupTime-$idx"
+        TimeGroup(
+            key = key,
+            timestamp = groupTime,
+            title = formatGroupHeader(groupTime),
+            items = groupItems,
+        )
+    }
+}

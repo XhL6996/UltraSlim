@@ -26,4 +26,43 @@ class FormattingTest {
         assertFalse(outputName("../a/b.jpg", "avif", "task", 0).contains('/'))
     }
 
+    @Test fun testGroupByTimeSessionClustersCloseTimestamps() {
+        data class MockItem(val id: String, val timestamp: Long, val batchId: String = "")
+        val t0 = 1700000000000L
+        val items = listOf(
+            MockItem("1", t0),
+            MockItem("2", t0 + 1000L),
+            MockItem("3", t0 + 2000L),
+            MockItem("4", t0 + 10 * 60 * 1000L),
+            MockItem("5", t0 + 10 * 60 * 1000L + 500L),
+        )
+
+        val groups = groupByTimeSession(
+            items = items,
+            timestampSelector = { it.timestamp },
+            batchIdSelector = { it.batchId },
+        )
+
+        assertEquals(2, groups.size)
+        // Group 1 (newest first): items 5 then 4
+        assertEquals(listOf("5", "4"), groups[0].items.map { it.id })
+        // Group 2 (newest first): items 3, 2, 1
+        assertEquals(listOf("3", "2", "1"), groups[1].items.map { it.id })
+    }
+
+    @Test fun testGroupByTimeSessionHonorsBatchId() {
+        data class MockItem(val id: String, val timestamp: Long, val batchId: String = "")
+        val t0 = 1700000000000L
+        val items = listOf(
+            MockItem("1", t0, "batch-A"),
+            MockItem("2", t0 + 500L, "batch-B"),
+        )
+        val groups = groupByTimeSession(
+            items = items,
+            timestampSelector = { it.timestamp },
+            batchIdSelector = { it.batchId },
+        )
+        assertEquals(2, groups.size)
+    }
+
 }

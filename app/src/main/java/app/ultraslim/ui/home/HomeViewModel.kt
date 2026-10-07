@@ -252,6 +252,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         _importing.value = true
         try {
             var index = 0
+            val importTime = System.currentTimeMillis()
             for (uriString in fresh) {
                 index++
                 if (fresh.size > 9) _importProgress.value = "正在导入 ${index}/${fresh.size}…"
@@ -260,7 +261,13 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
                     val (name, size) = withContext(Dispatchers.IO) { resolveMeta(uri) }
                     val id = UUID.randomUUID().toString()
                     val durable = withContext(Dispatchers.IO) { InputStore.persist(app, uri, id) }
-                    items += QueueItem(id = id, uri = durable.toString(), displayName = name, sizeBytes = size)
+                    items += QueueItem(
+                        id = id,
+                        uri = durable.toString(),
+                        displayName = name,
+                        sizeBytes = size,
+                        createdAt = importTime,
+                    )
                 } catch (e: CancellationException) { throw e }
                 catch (e: Exception) { _events.emit(HomeEvent.Info("导入失败：${e.message}")) }
             }
@@ -400,6 +407,13 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         val item = repo.find(id) ?: return
         InputStore.deletePersisted(app, Uri.parse(item.uri))
         repo.remove(id)
+    }
+
+    fun removeBatch(itemIds: List<String>) {
+        itemIds.forEach { id ->
+            repo.find(id)?.let { InputStore.deletePersisted(app, Uri.parse(it.uri)) }
+        }
+        repo.removeIds(itemIds)
     }
 
     fun clearFinished() {
