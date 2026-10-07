@@ -9,8 +9,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.expandHorizontally
 import androidx.compose.animation.expandVertically
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkHorizontally
@@ -22,6 +24,7 @@ import androidx.compose.foundation.*
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
@@ -41,6 +44,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.ultraslim.bridge.ProbeResult
 import app.ultraslim.convert.*
+import app.ultraslim.data.ConversionDefaults
 import app.ultraslim.data.summary
 import app.ultraslim.ui.appViewModelFactory
 import app.ultraslim.ui.components.*
@@ -82,7 +86,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     var confirmClear by remember { mutableStateOf<String?>(null) }  // "pending" | "all"
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
-    var editOptions by remember { mutableStateOf(false) }
+    var optionsExpanded by remember { mutableStateOf(false) }
     var showAlbums by remember { mutableStateOf(false) }
     var hdrOnly by remember { mutableStateOf(false) }
     val albums by vm.albums.collectAsStateWithLifecycle()
@@ -106,8 +110,6 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     }
     LaunchedEffect(vm) {
         vm.events.collect { event ->
-            // 参数弹窗遮在 Snackbar 之上：弹窗开着时把通知挂起到关闭后再展示。
-            if (editOptions) snapshotFlow { editOptions }.first { !it }
             when(event) {
                 is HomeEvent.Info -> snackbar.showSnackbar(event.message)
                 is HomeEvent.Finished -> {
@@ -118,18 +120,28 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             }
         }
     }
-    // 转换一旦开始就收起参数弹窗并复位标记，避免运行结束后弹窗自己再次出现。
-    LaunchedEffect(state.isConverting) { if (state.isConverting) editOptions = false }
+    // 转换一旦开始就收起参数折叠面板，避免遮挡照片列表。
+    LaunchedEffect(state.isConverting) { if (state.isConverting) optionsExpanded = false }
     val callbacks = remember(vm) { OptionsCallbacks(vm::setFormat, vm::setQuality, vm::setGainmapQuality,
         vm::setGainmapScale, vm::setMultiChannel, vm::setKeepExif, vm::setAllowSdr, vm::setAutoSave,
         vm::applyPreset, vm::setSpeedLevel, vm::setResizePercent, vm::setOnlySmaller, vm::setKeepLocation) }
     Scaffold(
-        topBar = { TopAppBar(title = { Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Surface(color = MaterialTheme.colorScheme.primary, shape = RoundedCornerShape(12.dp)) {
-                Icon(Icons.Rounded.Layers, null, Modifier.padding(8.dp).size(22.dp), tint = MaterialTheme.colorScheme.onPrimary)
-            }
-            Column { Text("UltraSlim", style = MaterialTheme.typography.titleLarge); Text("PHOTO COMPRESSOR", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant) }
-        } }, actions = { IconButton(onClick = onOpenSettings) { Icon(Icons.Rounded.Settings, "设置") } }) },
+        topBar = {
+            TopAppBar(
+                title = {
+                    Text(
+                        "UltraSlim",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                },
+                actions = {
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Rounded.Settings, contentDescription = "设置")
+                    }
+                },
+            )
+        },
         snackbarHost = { SnackbarHost(snackbar) },
         contentWindowInsets = WindowInsets(0,0,0,0),
         bottomBar = {
@@ -138,8 +150,19 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                 enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.standard()),
                 exit = slideOutVertically(Motion.exit()) { it } + fadeOut(Motion.exit()),
             ) {
-                Surface(color = MaterialTheme.colorScheme.surfaceContainerLow, shadowElevation = 8.dp) {
-                    Column(Modifier.fillMaxWidth().then(if (railLayout) Modifier.navigationBarsPadding() else Modifier).padding(horizontal = 20.dp, vertical = 12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    tonalElevation = 3.dp,
+                    shadowElevation = 8.dp,
+                    shape = RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp),
+                ) {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .then(if (railLayout) Modifier.navigationBarsPadding() else Modifier)
+                            .padding(horizontal = 20.dp, vertical = 12.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
                         Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                             OutlinedIconButton(onClick = pick, enabled = !state.isConverting, modifier = Modifier.size(52.dp), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.AddPhotoAlternate, "添加图片") }
                             OutlinedIconButton(onClick = openAlbums, enabled = !state.isConverting, modifier = Modifier.size(52.dp), shape = MaterialTheme.shapes.medium) { Icon(Icons.Rounded.PhotoLibrary, "从相册批量导入") }
@@ -167,21 +190,12 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                 }
                             }
                         }
-                        val secondary = when {
-                            !state.isConverting && state.convertibleCount > 1 -> "try"
-                            stopping -> "waiting"
-                            else -> "hint"
-                        }
-                        AnimatedContent(
-                            targetState = secondary,
-                            transitionSpec = { fadeIn(Motion.fast()) togetherWith fadeOut(Motion.exit(Motion.Fast)) },
-                            label = "secondaryAction",
-                            modifier = Modifier.align(Alignment.CenterHorizontally),
-                        ) { s ->
-                            when (s) {
-                                "try" -> TextButton(onClick = vm::tryOne) { Text("先试转一张，比较效果与体积") }
-                                "waiting" -> Text("等待当前编码结束", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                else -> Text("原图始终保留 · 全程在设备上处理", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        if (!state.isConverting && state.convertibleCount > 1) {
+                            TextButton(
+                                onClick = vm::tryOne,
+                                modifier = Modifier.align(Alignment.CenterHorizontally),
+                            ) {
+                                Text("先试转一张，比较效果与体积")
                             }
                         }
                     }
@@ -200,13 +214,13 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                         bottom = 20.dp + if (railLayout && state.queue.isEmpty()) WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp,
                     ),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    item {
-                        AnimatedContent(
-                            targetState = state.queue.isEmpty(),
-                            transitionSpec = { fadeIn(Motion.standard()) togetherWith fadeOut(Motion.exit()) },
-                            label = "importHero",
-                        ) { empty ->
-                            ImportHero(empty, pick, openAlbums)
+                    item(key = "import-hero") {
+                        AnimatedVisibility(
+                            visible = state.queue.isEmpty(),
+                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                            exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+                        ) {
+                            ImportHero(onPick = pick, onAlbums = openAlbums)
                         }
                     }
                     item {
@@ -215,32 +229,32 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
                             exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
                         ) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                CircularProgressIndicator(Modifier.size(20.dp)); Spacer(Modifier.width(12.dp))
-                                Text(if (scanning) scanProgress else importProgress, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall)
-                                if (scanning) TextButton(onClick = vm::cancelScan) { Text("停止") }
+                            Surface(
+                                shape = RoundedCornerShape(16.dp),
+                                color = MaterialTheme.colorScheme.surfaceContainer,
+                                modifier = Modifier.fillMaxWidth(),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                                ) {
+                                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                                    Spacer(Modifier.width(12.dp))
+                                    Text(if (scanning) scanProgress else importProgress, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
+                                    if (scanning) TextButton(onClick = vm::cancelScan) { Text("停止") }
+                                }
                             }
                         }
                     }
-                    item {
-                        Card(onClick = { if(!state.isConverting) editOptions = true }, modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)) {
-                            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Column(Modifier.weight(1f)) {
-                                        Text("输出方案", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                        val matchedPreset = CompressionPreset.entries.firstOrNull { it.matches(state.defaults) }
-                                        Text("${state.defaults.format.label} · " + (matchedPreset?.label ?: "画质 ${state.defaults.quality}"), style = MaterialTheme.typography.titleMedium)
-                                    }
-                                    Icon(Icons.Rounded.Tune, "调整本次参数", tint = MaterialTheme.colorScheme.primary)
-                                }
-                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = .6f))
-                                FlowRow(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    FeatureLabel(Icons.Rounded.Layers, "原始 Gain Map")
-                                    FeatureLabel(Icons.Rounded.AspectRatio, if(state.defaults.resizePercent == 100) "原始尺寸" else "尺寸 ${state.defaults.resizePercent}%")
-                                    FeatureLabel(Icons.Rounded.Verified, if(state.defaults.onlySmaller) "保证更小" else "不限制体积（可能更大）")
-                                }
-                                if(state.defaults.quality >= 95) Text("高画质档：压不过原图的照片会自动保留原图，不会输出更大的文件。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                            }
+                    if (!wide) {
+                        item(key = "output-scheme-card") {
+                            OutputSchemeCard(
+                                defaults = state.defaults,
+                                callbacks = callbacks,
+                                expanded = optionsExpanded,
+                                onToggleExpand = { if (!state.isConverting) optionsExpanded = !optionsExpanded },
+                                enabled = !state.isConverting,
+                            )
                         }
                     }
                     item {
@@ -360,18 +374,6 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             }
                         }
                     }
-                    item {
-                        AnimatedVisibility(
-                            visible = state.queue.isEmpty(),
-                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
-                            exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
-                        ) {
-                            Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                                GuideStep("01", "选择原图", "支持 JPEG / HEIC / AVIF", Modifier.weight(1f))
-                                GuideStep("02", "比较结果", "先试转，再决定批量保存", Modifier.weight(1f))
-                            }
-                        }
-                    }
                 }
                 // 参数列常驻（转换中仅锁定并提示），不再随转换启停整列消失。
                 AnimatedVisibility(
@@ -397,14 +399,6 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                     }
                 }
             }
-        }
-    }
-    if(editOptions) ModalBottomSheet(onDismissRequest = { editOptions = false }, sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)) {
-        Column(Modifier.verticalScroll(rememberScrollState()).padding(20.dp)) {
-            Text("调整输出方案", style = MaterialTheme.typography.headlineSmall)
-            Text("仅应用于本次任务", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            ConversionOptionsPanel(state.defaults, callbacks)
-            Button(onClick = { editOptions = false }, modifier = Modifier.fillMaxWidth()) { Text("完成") }
         }
     }
     if(showAlbums) ModalBottomSheet(onDismissRequest = { showAlbums = false }) {
@@ -599,95 +593,220 @@ private fun QueueCard(
 
 @Composable
 private fun FeatureLabel(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-        Icon(icon, null, Modifier.size(15.dp), tint = MaterialTheme.colorScheme.primary)
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        Icon(icon, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
         Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
     }
 }
 
 @Composable
-private fun GuideStep(number: String, title: String, hint: String, modifier: Modifier) {
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(5.dp)) {
-        Text(number, style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.primary.copy(alpha = .55f))
-        Text(title, style = MaterialTheme.typography.titleSmall)
-        Text(hint, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun ImportHero(
+    onPick: () -> Unit,
+    onAlbums: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
+    ) {
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(16.dp),
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    modifier = Modifier.size(52.dp),
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Icon(
+                            Icons.Rounded.FilterHdr,
+                            contentDescription = null,
+                            modifier = Modifier.size(28.dp),
+                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(
+                        "Ultra HDR 照片瘦身",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        "无损保留增益图 · 显著压缩体积",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Button(
+                    onClick = onPick,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp),
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    Icon(Icons.Rounded.AddPhotoAlternate, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("选择照片")
+                }
+                FilledTonalButton(
+                    onClick = onAlbums,
+                    modifier = Modifier
+                        .weight(1f)
+                        .heightIn(min = 48.dp),
+                    shape = MaterialTheme.shapes.medium,
+                ) {
+                    Icon(Icons.Rounded.PhotoLibrary, null, Modifier.size(20.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("相册导入")
+                }
+            }
+
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                FeatureLabel(Icons.Rounded.AutoAwesome, "ISO 21496-1")
+                FeatureLabel(Icons.Rounded.Speed, "NEON 加速")
+                FeatureLabel(Icons.Rounded.Security, "离线处理")
+            }
+        }
     }
 }
 
 @Composable
-private fun ImportHero(empty: Boolean, onPick: () -> Unit, onAlbums: () -> Unit) {
-    val ink = Color(0xFF173C2F)
-    val accent = Color(0xFFD9ECA3)
-    if(!empty) {
-        Surface(color = ink, contentColor = Color.White, shape = MaterialTheme.shapes.large, modifier = Modifier.fillMaxWidth()) {
-            Row(Modifier.padding(18.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                Icon(Icons.Rounded.FilterHdr, null, Modifier.size(32.dp), tint = accent)
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("好照片，轻装保存。", style = MaterialTheme.typography.titleMedium)
-                    Text("保留原图 · 保留原始增益图", style = MaterialTheme.typography.bodySmall, color = Color(0xFFD0DFD4))
-                }
-            }
-        }
-        return
+private fun OutputSchemeCard(
+    defaults: ConversionDefaults,
+    callbacks: OptionsCallbacks,
+    expanded: Boolean,
+    onToggleExpand: () -> Unit,
+    enabled: Boolean,
+    modifier: Modifier = Modifier,
+) {
+    val chevronRotation by animateFloatAsState(
+        targetValue = if (expanded) 180f else 0f,
+        animationSpec = Motion.standard(),
+        label = "optionsChevron",
+    )
+    val activePreset = remember(defaults) {
+        CompressionPreset.entries.firstOrNull { it.matches(defaults) }
     }
-    Surface(color = ink, contentColor = Color.White, shape = MaterialTheme.shapes.extraLarge, modifier = Modifier.fillMaxWidth()) {
-        Column(Modifier.padding(24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text("少一点体积，多一点空间", color = accent, style = MaterialTheme.typography.labelMedium)
-                    Text(if(empty) "为照片减负。\n留下光与细节。" else "好照片，轻装保存。", style = if(empty) MaterialTheme.typography.headlineLarge else MaterialTheme.typography.headlineSmall)
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+    ) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(enabled = enabled, onClick = onToggleExpand)
+                    .padding(vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        Text(
+                            text = "输出方案",
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.SemiBold,
+                        )
+                        if (!enabled) {
+                            Surface(
+                                shape = CircleShape,
+                                color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                ) {
+                                    Icon(
+                                        Icons.Rounded.Lock,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(12.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text(
+                                        "转换中已锁定",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        BadgeChip(
+                            text = defaults.format.label,
+                            containerColor = MaterialTheme.colorScheme.primaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                        BadgeChip(
+                            text = activePreset?.label ?: "质量 ${defaults.quality}",
+                            containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                            contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (defaults.resizePercent != 100) {
+                            BadgeChip(
+                                text = "${defaults.resizePercent}%",
+                                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
                 }
-                if(empty) Box(Modifier.size(72.dp).border(1.dp, accent.copy(alpha=.4f), RoundedCornerShape(22.dp)), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Rounded.FilterHdr, null, Modifier.size(44.dp), tint = accent)
+                IconButton(
+                    onClick = onToggleExpand,
+                    enabled = enabled,
+                    modifier = Modifier.graphicsLayer { rotationZ = chevronRotation },
+                ) {
+                    Icon(
+                        Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = if (expanded) "收起配置" else "展开配置",
+                    )
                 }
             }
-            Text("主图高效压缩 · Gain Map 跟随原图", style = MaterialTheme.typography.bodySmall, color = Color(0xFFD0DFD4))
-            if(empty) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
-                ) {
-                    Button(
-                        onClick = onPick,
-                        modifier = Modifier.weight(1f).heightIn(min = 50.dp),
-                        shape = MaterialTheme.shapes.medium,
-                        colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = ink)
-                    ) {
-                        Icon(Icons.Rounded.AddPhotoAlternate, null, Modifier.size(20.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("选择照片", fontWeight = FontWeight.Bold)
-                    }
-                    FilledTonalButton(
-                        onClick = onAlbums,
-                        modifier = Modifier.weight(1f).heightIn(min = 50.dp),
-                        shape = MaterialTheme.shapes.medium,
-                        colors = ButtonDefaults.filledTonalButtonColors(
-                            containerColor = Color.White.copy(alpha = 0.16f),
-                            contentColor = Color.White
-                        )
-                    ) {
-                        Icon(Icons.Rounded.PhotoLibrary, null, Modifier.size(20.dp))
-                        Spacer(Modifier.width(8.dp))
-                        Text("相册批量导入")
-                    }
-                }
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Icon(Icons.Rounded.Verified, null, Modifier.size(13.dp), tint = accent)
-                        Text("无损 Gain Map", style = MaterialTheme.typography.labelSmall, color = Color(0xFFD0DFD4))
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Icon(Icons.Rounded.Compress, null, Modifier.size(13.dp), tint = accent)
-                        Text("画质体积双保底", style = MaterialTheme.typography.labelSmall, color = Color(0xFFD0DFD4))
-                    }
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        Icon(Icons.Rounded.Lock, null, Modifier.size(13.dp), tint = accent)
-                        Text("本地离线安全", style = MaterialTheme.typography.labelSmall, color = Color(0xFFD0DFD4))
-                    }
+
+            AnimatedVisibility(
+                visible = expanded,
+                enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
+            ) {
+                Column(Modifier.padding(top = 12.dp)) {
+                    HorizontalDivider(
+                        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        modifier = Modifier.padding(bottom = 12.dp),
+                    )
+                    ConversionOptionsPanel(
+                        defaults = defaults,
+                        callbacks = callbacks,
+                        enabled = enabled,
+                    )
                 }
             }
         }

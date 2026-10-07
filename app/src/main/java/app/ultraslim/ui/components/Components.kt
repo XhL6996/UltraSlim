@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -324,8 +325,10 @@ fun ConversionOptionsPanel(
                         onClick = { callbacks.onFormatChange(format) },
                         enabled = enabled,
                         shape = SegmentedButtonDefaults.itemShape(index = index, count = formats.size),
+                        icon = {},
+                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
                     ) {
-                        Text(format.label)
+                        Text(format.label, maxLines = 1, style = MaterialTheme.typography.labelMedium)
                     }
                 }
             }
