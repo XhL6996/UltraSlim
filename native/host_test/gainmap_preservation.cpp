@@ -40,16 +40,16 @@ static Map map(const std::string& path, bool jpeg) {
  }
  uhdr_release_decoder(d);return r;
 }
-static std::vector<uint8_t> jpeg(int w,int h,bool multi,int orientation) {
+static std::vector<uint8_t> jpeg(int w,int h,bool multi,int orientation,bool rowBands=false) {
  jpeg_compress_struct c{};jpeg_error_mgr e{};c.err=jpeg_std_error(&e);jpeg_create_compress(&c);unsigned char*mem=nullptr;unsigned long len=0;jpeg_mem_dest(&c,&mem,&len);
  c.image_width=w;c.image_height=h;c.input_components=multi?3:1;c.in_color_space=multi?JCS_RGB:JCS_GRAYSCALE;jpeg_set_defaults(&c);jpeg_set_quality(&c,85,TRUE);jpeg_start_compress(&c,TRUE);
  if(orientation){unsigned char exif[]={'E','x','i','f',0,0,'I','I',42,0,8,0,0,0,1,0,0x12,1,3,0,1,0,0,0,(uint8_t)orientation,0,0,0,0,0,0,0};jpeg_write_marker(&c,JPEG_APP0+1,exif,sizeof(exif));}
  std::vector<uint8_t> row(w*c.input_components);
- while(c.next_scanline<c.image_height){for(int x=0;x<w;x++)for(int ch=0;ch<c.input_components;ch++)row[x*c.input_components+ch]=(x*7+c.next_scanline*11+ch*73)%256;JSAMPROW r=row.data();jpeg_write_scanlines(&c,&r,1);}
+ while(c.next_scanline<c.image_height){for(int x=0;x<w;x++)for(int ch=0;ch<c.input_components;ch++)row[x*c.input_components+ch]=rowBands ? ((c.next_scanline*17)%192+x%16+ch*16)%256 : (x*7+c.next_scanline*11+ch*73)%256;JSAMPROW r=row.data();jpeg_write_scanlines(&c,&r,1);}
  jpeg_finish_compress(&c);std::vector<uint8_t> out(mem,mem+len);free(mem);jpeg_destroy_compress(&c);return out;
 }
-static void fixture(const std::string& path,bool multi,int orientation,int gw=41,int gh=25){
- auto b=jpeg(163,99,true,orientation),g=jpeg(gw,gh,multi,0);auto*e=uhdr_create_encoder();uhdr_compressed_image_t base{},gm{};base.data=b.data();base.data_sz=base.capacity=b.size();base.cg=UHDR_CG_BT_709;base.ct=UHDR_CT_SRGB;base.range=UHDR_CR_FULL_RANGE;gm=base;gm.data=g.data();gm.data_sz=gm.capacity=g.size();
+static void fixture(const std::string& path,bool multi,int orientation,int gw=41,int gh=25,int bw=163,int bh=99,bool rowBands=false){
+ auto b=jpeg(bw,bh,true,orientation,rowBands),g=jpeg(gw,gh,multi,0);auto*e=uhdr_create_encoder();uhdr_compressed_image_t base{},gm{};base.data=b.data();base.data_sz=base.capacity=b.size();base.cg=UHDR_CG_BT_709;base.ct=UHDR_CT_SRGB;base.range=UHDR_CR_FULL_RANGE;gm=base;gm.data=g.data();gm.data_sz=gm.capacity=g.size();
  uhdr_gainmap_metadata_t m{};for(int i=0;i<3;i++){m.min_content_boost[i]=1;m.max_content_boost[i]=4+i;m.gamma[i]=1;m.offset_sdr[i]=m.offset_hdr[i]=1.0f/64;}m.hdr_capacity_min=1;m.hdr_capacity_max=8;m.use_base_cg=1;
  check(uhdr_enc_set_compressed_image(e,&base,UHDR_BASE_IMG).error_code==UHDR_CODEC_OK,"set base");check(uhdr_enc_set_gainmap_image(e,&gm,&m).error_code==UHDR_CODEC_OK,"set gain map");check(uhdr_encode(e).error_code==UHDR_CODEC_OK,"mux fixture");auto*r=uhdr_get_encoded_stream(e);FILE*f=fopen(path.c_str(),"wb");fwrite(r->data,1,r->data_sz,f);fclose(f);uhdr_release_encoder(e);
 }
@@ -72,8 +72,8 @@ static void equal(const Map&a,const Map&b,int orientation=1){
  }
  sameMetadata(a,b);
 }
-static void convert(const std::string& src,const std::string& dst,int codec,int resize=100){
- int a=open(src.c_str(),O_RDONLY),b=open(dst.c_str(),O_RDWR|O_CREAT|O_TRUNC,0600);ultraslim::TranscodeOptions o;o.outCodec=codec;o.codecThreads=2;o.resizePercent=resize;
+static void convert(const std::string& src,const std::string& dst,int codec,int resize=100,int speed=1,bool retry=false,int quality=90){
+ int a=open(src.c_str(),O_RDONLY),b=open(dst.c_str(),O_RDWR|O_CREAT|O_TRUNC,0600);ultraslim::TranscodeOptions o;o.outCodec=codec;o.codecThreads=2;o.resizePercent=resize;o.speedLevel=speed;o.retrySmaller=retry;o.quality=quality;
  // Deliberately incompatible legacy settings must have no effect on preservation.
  o.gainmapScale=128;o.gainmapQuality=1;o.multiChannelGainmap=false;
  auto r=ultraslim::transcodeImage(a,b,o);close(a);close(b);if(r.errorCode)fprintf(stderr,"%s\n",r.error.c_str());check(r.errorCode==0,"preserving transcode");
@@ -95,6 +95,8 @@ static void highBitDepthFixture(const std::string& path,const std::vector<uint8_
  if(g)heif_image_handle_release(g);heif_image_handle_release(b);heif_image_release(gm);heif_image_release(base);heif_encoder_release(e);heif_context_free(ctx);
 }
 int main(int argc,char**argv){
+ if(argc==3 && std::string(argv[1])=="--preview-fixture") {fixture(argv[2],true,1,1025,769,4096,3072,true);return 0;}
+ if(argc==3 && std::string(argv[1])=="--benchmark-fixture") {fixture(argv[2],true,1,1025,769,4096,3072);return 0;}
  if(argc==4 && std::string(argv[1])=="--compare") {
   auto bytes=readFile(argv[2]);const bool jpegIn=bytes[0]==0xff&&bytes[1]==0xd8;auto out=readFile(argv[3]);const bool jpegOut=out[0]==0xff&&out[1]==0xd8;
   int orientation=1;
@@ -137,6 +139,22 @@ int main(int argc,char**argv){
   }
   const auto jxl=src+".jxl",round=jxl+".heic";
   convert(src,jxl,3);convert(jxl,round,1);equal(original,map(round,false));
+ }
+ // Speed presets and quality retry must preserve every gain-map sample.
+ for (bool multi : {false, true}) {
+  const auto src = root + "/large-" + std::to_string(multi) + ".jpg";
+  const auto original = map(src, true);
+  for (int codec : {1, 2, 3}) {
+   const auto dst = src + "-retry-" + std::to_string(codec);
+   convert(src, dst + "-first", codec, 100, 2, false, 90);
+   check(readFile(dst + "-first").size() >= readFile(src).size(), "fixture triggers retry");
+   convert(src, dst, codec, 100, 2, true, 90);
+   convert(src, dst + "-expected", codec, 100, 2, false, 85);
+   check(readFile(dst) == readFile(dst + "-expected"), "cached retry equals independent lower-quality encoding");
+   if (codec == 3) {
+    convert(dst, dst + "-heic", 1); equal(original, map(dst + "-heic", false));
+   } else equal(original, map(dst, false));
+  }
  }
  puts("PASS: mono/RGB maps, all 8 orientations, HEIC/AVIF cross-codec roundtrip, main resize, exact JPEG map bytes, exact map pixels and HDR metadata");
 }

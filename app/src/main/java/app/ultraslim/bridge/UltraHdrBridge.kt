@@ -79,6 +79,7 @@ object UltraHdrBridge {
         codecThreads: Int,
         keepLocation: Boolean = true,
         motionXmp: ByteArray? = null,
+        retrySmaller: Boolean = false,
     ): TranscodeResult
 
     @JvmStatic

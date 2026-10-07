@@ -15,6 +15,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -38,8 +39,39 @@
 thread_local int ultraslim_codec_speed_level = 1;
 thread_local int ultraslim_codec_threads = 0;
 
+extern "C" void ultraslim_heif_gainmap_retry_cache(int enabled);
+
 namespace ultraslim {
 namespace {
+
+struct GainMapRetryScope {
+  explicit GainMapRetryScope(bool enabled) { ultraslim_heif_gainmap_retry_cache(enabled); }
+  ~GainMapRetryScope() { ultraslim_heif_gainmap_retry_cache(0); }
+};
+
+template<class Encode>
+int encodeWithRetry(int fd, long inputBytes, int quality, bool retry, Encode encode) {
+  int rc = encode(quality);
+  struct stat st {};
+  if (rc == 0 && retry && quality > 80 && fstat(fd, &st) == 0 && st.st_size >= inputBytes) {
+    if (ftruncate(fd, 0) != 0 || lseek(fd, 0, SEEK_SET) < 0) return 23;
+    rc = encode(std::max(80, quality - 5));
+  }
+  return rc;
+}
+
+// Bound pixel preprocessing parallelism; encoders run after these workers finish.
+template<class Work>
+void parallelRows(int height, size_t pixels, Work work) {
+  const int count = pixels < 1024 * 1024 ? 1 : std::min(4, std::max(1, ultraslim_codec_threads));
+  std::vector<std::future<void>> tasks;
+  for (int i = 1; i < count; ++i) {
+    const int begin = height * i / count, end = height * (i + 1) / count;
+    tasks.emplace_back(std::async(std::launch::async, [=, &work] { work(begin, end); }));
+  }
+  work(0, height / count);
+  for (auto& task : tasks) task.get();
+}
 
 void storeBE16(uint16_t v, uint8_t* p) {
   p[0] = static_cast<uint8_t>(v >> 8);
@@ -407,6 +439,39 @@ bool decodeHeifHandle(heif_image_handle* handle, SdrImage& out, std::string& err
   return true;
 }
 
+// Reuse native mono/identity-GBR gain map planes without another codec decode.
+// Other matrices retain libheif's established color-conversion path.
+bool copyNativeGainMap(heif_image* image, SdrImage& out) {
+  const bool mono = heif_image_get_chroma_format(image) == heif_chroma_monochrome;
+  heif_color_profile_nclx* profile = nullptr;
+  heif_image_get_nclx_color_profile(image, &profile);
+  const bool fullRange = profile && profile->full_range_flag;
+  const bool identity = profile && profile->matrix_coefficients == heif_matrix_coefficients_RGB_GBR && profile->full_range_flag;
+  if (profile) heif_nclx_color_profile_free(profile);
+  if (mono && !fullRange) return false;
+  if (!mono && !(identity && heif_image_get_chroma_format(image) == heif_chroma_444)) return false;
+  out.width = heif_image_get_primary_width(image);
+  out.height = heif_image_get_primary_height(image);
+  if (out.width <= 0 || out.height <= 0 || int64_t(out.width) * out.height > 100000000) return false;
+  int ys = 0, us = 0, vs = 0;
+  const auto* y = heif_image_get_plane_readonly(image, heif_channel_Y, &ys);
+  const auto* u = mono ? y : heif_image_get_plane_readonly(image, heif_channel_Cb, &us);
+  const auto* v = mono ? y : heif_image_get_plane_readonly(image, heif_channel_Cr, &vs);
+  if (!y || !u || !v) return false;
+  if (mono) us = vs = ys;
+  out.rgba.resize(size_t(out.width) * out.height * 4);
+  parallelRows(out.height, size_t(out.width) * out.height, [&](int begin, int end) {
+    for (int row = begin; row < end; ++row) {
+      auto* dst = out.rgba.data() + size_t(row) * out.width * 4;
+      for (int x = 0; x < out.width; ++x) {
+        dst[4*x] = v[row*vs+x]; dst[4*x+1] = y[row*ys+x];
+        dst[4*x+2] = u[row*us+x]; dst[4*x+3] = 255;
+      }
+    }
+  });
+  return true;
+}
+
 bool probeHeifDims(const std::vector<uint8_t>& data, int& w, int& h, bool& hasExif) {
   heif_context* ctx = heif_context_alloc();
   heif_error e = heif_context_read_from_memory_without_copy(ctx, data.data(), data.size(), nullptr);
@@ -755,42 +820,44 @@ SdrImage resizeRgba(const SdrImage& src, int newW, int newH) {
 
   const uint8_t* s = src.rgba.data();
   uint8_t* d = out.rgba.data();
-  for (int y = 0; y < newH; y++) {
-    const int64_t fy = (static_cast<int64_t>(y) * 2 + 1) * sh * 32768 / (2 * newH) - 16384;
-    int y0 = 0, y1 = 0, wy = 0;
-    if (fy > 0) {
-      y0 = static_cast<int>(fy >> 15);
-      wy = static_cast<int>(fy & 32767);
-      if (y0 >= sh - 1) {
-        y0 = y1 = sh - 1;
-        wy = 0;
-      } else {
-        y1 = y0 + 1;
+  parallelRows(newH, size_t(newW) * newH, [&](int begin, int end) {
+    for (int y = begin; y < end; y++) {
+      const int64_t fy = (static_cast<int64_t>(y) * 2 + 1) * sh * 32768 / (2 * newH) - 16384;
+      int y0 = 0, y1 = 0, wy = 0;
+      if (fy > 0) {
+        y0 = static_cast<int>(fy >> 15);
+        wy = static_cast<int>(fy & 32767);
+        if (y0 >= sh - 1) {
+          y0 = y1 = sh - 1;
+          wy = 0;
+        } else {
+          y1 = y0 + 1;
+        }
+      }
+      const int wy0 = 32768 - wy;
+      const uint8_t* row0 = s + static_cast<size_t>(y0) * static_cast<size_t>(sw) * 4;
+      const uint8_t* row1 = s + static_cast<size_t>(y1) * static_cast<size_t>(sw) * 4;
+      uint8_t* dst = d + static_cast<size_t>(y) * static_cast<size_t>(newW) * 4;
+      for (int x = 0; x < newW; x++) {
+        const int x0 = x0s[static_cast<size_t>(x)];
+        const int x1 = x1s[static_cast<size_t>(x)];
+        const int wx = wxs[static_cast<size_t>(x)];
+        const int wx0 = 32768 - wx;
+        const uint8_t* p00 = row0 + static_cast<size_t>(x0) * 4;
+        const uint8_t* p01 = row0 + static_cast<size_t>(x1) * 4;
+        const uint8_t* p10 = row1 + static_cast<size_t>(x0) * 4;
+        const uint8_t* p11 = row1 + static_cast<size_t>(x1) * 4;
+        for (int c = 0; c < 4; c++) {
+          const int64_t v = static_cast<int64_t>(p00[c]) * wx0 * wy0 +
+                            static_cast<int64_t>(p01[c]) * wx * wy0 +
+                            static_cast<int64_t>(p10[c]) * wx0 * wy +
+                            static_cast<int64_t>(p11[c]) * wx * wy;
+          dst[c] = static_cast<uint8_t>((v + (1 << 29)) >> 30);
+        }
+        dst += 4;
       }
     }
-    const int wy0 = 32768 - wy;
-    const uint8_t* row0 = s + static_cast<size_t>(y0) * static_cast<size_t>(sw) * 4;
-    const uint8_t* row1 = s + static_cast<size_t>(y1) * static_cast<size_t>(sw) * 4;
-    uint8_t* dst = d + static_cast<size_t>(y) * static_cast<size_t>(newW) * 4;
-    for (int x = 0; x < newW; x++) {
-      const int x0 = x0s[static_cast<size_t>(x)];
-      const int x1 = x1s[static_cast<size_t>(x)];
-      const int wx = wxs[static_cast<size_t>(x)];
-      const int wx0 = 32768 - wx;
-      const uint8_t* p00 = row0 + static_cast<size_t>(x0) * 4;
-      const uint8_t* p01 = row0 + static_cast<size_t>(x1) * 4;
-      const uint8_t* p10 = row1 + static_cast<size_t>(x0) * 4;
-      const uint8_t* p11 = row1 + static_cast<size_t>(x1) * 4;
-      for (int c = 0; c < 4; c++) {
-        const int64_t v = static_cast<int64_t>(p00[c]) * wx0 * wy0 +
-                          static_cast<int64_t>(p01[c]) * wx * wy0 +
-                          static_cast<int64_t>(p10[c]) * wx0 * wy +
-                          static_cast<int64_t>(p11[c]) * wx * wy;
-        dst[c] = static_cast<uint8_t>((v + (1 << 29)) >> 30);
-      }
-      dst += 4;
-    }
-  }
+  });
   return out;
 }
 
@@ -968,49 +1035,51 @@ void rgbaToYuv420Direct(const SdrImage& img,
   const int w = img.width, h = img.height;
   const int cw = (w + 1) / 2, ch = (h + 1) / 2;
   const uint8_t* rgba = img.rgba.data();
-  for (int y = 0; y < h; y++) {
-    uint8_t* yRow = yDst + static_cast<size_t>(y) * yStride;
-    const uint8_t* src = rgba + static_cast<size_t>(y) * w * 4;
-    int x = 0;
-#if defined(__ARM_NEON)
-    if (bt709) { for (; x + 8 <= w; x += 8) storeY8_709(yRow + x, src + x * 4); }
-    else { for (; x + 8 <= w; x += 8) storeY8(yRow + x, src + x * 4); }
-#endif
-    for (; x < w; x++) {
-      uint8_t yy, uu, vv;
-      if (bt709) yuvPixel709(src + x * 4, yy, uu, vv);
-      else yuvPixel(src + x * 4, yy, uu, vv);
-      yRow[x] = yy;
-    }
-    // Even heights are fully covered by the preceding even row. An odd last row is not.
-    const bool uncoveredLastRow = (y == h - 1) && ((h & 1) != 0);
-    if ((y & 1) != 0 && !uncoveredLastRow) continue;
-    const int y2 = std::min(y + 1, h - 1);
-    const uint8_t* src2 = rgba + static_cast<size_t>(y2) * w * 4;
-    uint8_t* uRow = uDst + static_cast<size_t>(y / 2) * uStride;
-    uint8_t* vRow = vDst + static_cast<size_t>(y / 2) * vStride;
-    for (int cx = 0; cx < cw; cx++) {
-      const int x0 = std::min(cx * 2, w - 1);
-      const int x1 = std::min(x0 + 1, w - 1);
-      int r = 0, g = 0, b = 0;
-      const uint8_t* samples[4] = {src + x0 * 4, src + x1 * 4, src2 + x0 * 4, src2 + x1 * 4};
-      for (const uint8_t* q : samples) {
-        r += q[0];
-        g += q[1];
-        b += q[2];
+  parallelRows(h, size_t(w) * h, [&](int begin, int end) {
+    for (int y = begin; y < end; y++) {
+      uint8_t* yRow = yDst + static_cast<size_t>(y) * yStride;
+      const uint8_t* src = rgba + static_cast<size_t>(y) * w * 4;
+      int x = 0;
+  #if defined(__ARM_NEON)
+      if (bt709) { for (; x + 8 <= w; x += 8) storeY8_709(yRow + x, src + x * 4); }
+      else { for (; x + 8 <= w; x += 8) storeY8(yRow + x, src + x * 4); }
+  #endif
+      for (; x < w; x++) {
+        uint8_t yy, uu, vv;
+        if (bt709) yuvPixel709(src + x * 4, yy, uu, vv);
+        else yuvPixel(src + x * 4, yy, uu, vv);
+        yRow[x] = yy;
       }
-      r /= 4;
-      g /= 4;
-      b /= 4;
-      if (bt709) {
-        uRow[cx] = static_cast<uint8_t>(((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128);
-        vRow[cx] = static_cast<uint8_t>(((112 * r - 102 * g - 10 * b + 128) >> 8) + 128);
-      } else {
-        uRow[cx] = static_cast<uint8_t>(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
-        vRow[cx] = static_cast<uint8_t>(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+      // Even heights are fully covered by the preceding even row. An odd last row is not.
+      const bool uncoveredLastRow = (y == h - 1) && ((h & 1) != 0);
+      if ((y & 1) != 0 && !uncoveredLastRow) continue;
+      const int y2 = std::min(y + 1, h - 1);
+      const uint8_t* src2 = rgba + static_cast<size_t>(y2) * w * 4;
+      uint8_t* uRow = uDst + static_cast<size_t>(y / 2) * uStride;
+      uint8_t* vRow = vDst + static_cast<size_t>(y / 2) * vStride;
+      for (int cx = 0; cx < cw; cx++) {
+        const int x0 = std::min(cx * 2, w - 1);
+        const int x1 = std::min(x0 + 1, w - 1);
+        int r = 0, g = 0, b = 0;
+        const uint8_t* samples[4] = {src + x0 * 4, src + x1 * 4, src2 + x0 * 4, src2 + x1 * 4};
+        for (const uint8_t* q : samples) {
+          r += q[0];
+          g += q[1];
+          b += q[2];
+        }
+        r /= 4;
+        g /= 4;
+        b /= 4;
+        if (bt709) {
+          uRow[cx] = static_cast<uint8_t>(((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128);
+          vRow[cx] = static_cast<uint8_t>(((112 * r - 102 * g - 10 * b + 128) >> 8) + 128);
+        } else {
+          uRow[cx] = static_cast<uint8_t>(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+          vRow[cx] = static_cast<uint8_t>(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+        }
       }
     }
-  }
+  });
 }
 
 // Converts RGBA8888 to limited-range YUV420. bt709 selects the coefficient set;
@@ -1060,6 +1129,8 @@ void configureEncoder(heif_encoder* encoder, int outCodec, int speedLevel, int t
 }
 
 struct GainMapPayload {
+  mutable std::vector<uint8_t> encodedJxl;
+  bool cacheForRetry = false;
   SdrImage image;
   std::vector<uint8_t> iso;
   int codec = 1;
@@ -1085,8 +1156,11 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
   heif_error e = heif_context_get_encoder(ctx, descriptor, &mapEncoder);
   if (e.code != heif_error_Ok) { err = e.message; return 24; }
   std::unique_ptr<heif_encoder, decltype(&heif_encoder_release)> mapOwner(mapEncoder, heif_encoder_release);
-  configureEncoder(mapEncoder, gm.codec, 1, ultraslim_codec_threads);
-  if (avif) heif_encoder_set_parameter_integer(mapEncoder, "speed", 6);
+  configureEncoder(mapEncoder, gm.codec, ultraslim_codec_speed_level, ultraslim_codec_threads);
+  if (avif) {
+    const int speeds[] = {4, 6, 8};
+    heif_encoder_set_parameter_integer(mapEncoder, "speed", speeds[ultraslim_codec_speed_level]);
+  }
   e = heif_encoder_set_lossless(mapEncoder, 1);
   if (e.code != heif_error_Ok) { err = e.message; return 24; }
   heif_encoder_set_parameter(mapEncoder, "chroma", "444");
@@ -1107,7 +1181,16 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
     uint8_t* uDst = heif_image_get_plane(image, heif_channel_Cb, &uStride);
     uint8_t* vDst = heif_image_get_plane(image, heif_channel_Cr, &vStride);
     for (int y = 0; y < gm.image.height; ++y) {
-      for (int x = 0; x < gm.image.width; ++x) {
+      int x = 0;
+#if defined(__ARM_NEON)
+      for (; x + 16 <= gm.image.width; x += 16) {
+        auto rgba = vld4q_u8(gm.image.rgba.data() + (size_t(y) * gm.image.width + x) * 4);
+        vst1q_u8(yDst + y * yStride + x, rgba.val[1]);
+        vst1q_u8(uDst + y * uStride + x, rgba.val[2]);
+        vst1q_u8(vDst + y * vStride + x, rgba.val[0]);
+      }
+#endif
+      for (; x < gm.image.width; ++x) {
         const size_t idx = (size_t(y) * gm.image.width + x) * 4;
         const int r = gm.image.rgba[idx];
         const int g = gm.image.rgba[idx + 1];
@@ -1124,10 +1207,8 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
     int stride = 0;
     uint8_t* dst = heif_image_get_plane(image, heif_channel_Y, &stride);
     for (int y = 0; y < gm.image.height; ++y) {
-      for (int x = 0; x < gm.image.width; ++x) {
-        const size_t idx = (size_t(y) * gm.image.width + x) * 4;
-        dst[y * stride + x] = gm.image.rgba[idx];
-      }
+      rgbaToGrayFast(gm.image.rgba.data() + size_t(y) * gm.image.width * 4,
+                     dst + y * stride, gm.image.width);
     }
   }
   heif_color_profile_nclx nclx {};
@@ -1314,8 +1395,8 @@ int encodeJxl(const SdrImage& base, int quality, bool keepExif, int outFd,
               int speedLevel, int threads, const GainMapPayload* gainmap, std::string& err) {
   const int th = threads > 0 ? threads : resolveCodecThreads(threads);
 
-  std::vector<uint8_t> jhgm;
-  if (gainmap != nullptr) {
+  std::vector<uint8_t> jhgm = gainmap ? gainmap->encodedJxl : std::vector<uint8_t>{};
+  if (gainmap != nullptr && jhgm.empty()) {
     if (gainmap->iso.empty() || gainmap->image.width <= 0 || gainmap->image.height <= 0) {
       err = "gain map 数据不完整";
       return 24;
@@ -1410,6 +1491,7 @@ int encodeJxl(const SdrImage& base, int quality, bool keepExif, int outFd,
     storeBE32(0, jhgm.data() + cursor); // no alt ICC
     cursor += 4;
     memcpy(jhgm.data() + cursor, gm_codestream.data(), gm_codestream.size());
+    if (gainmap->cacheForRetry) gainmap->encodedJxl = jhgm;
   }
 
   // Primary image
@@ -1638,7 +1720,9 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
     originalMapJpeg = gmBytes;
     const int targetLong =
         opt.resizePercent >= 100 ? 0 : std::max(2, std::max(srcW, srcH) * opt.resizePercent / 100);
-    if (!decodeJpegSdr(baseBytes, base, err, targetLong) || !decodeJpegSdr(gmBytes, gm, err)) {
+    gm.width = gmW; gm.height = gmH;
+    if (!decodeJpegSdr(baseBytes, base, err, targetLong) ||
+        (opt.outCodec != 0 && !decodeJpegSdr(gmBytes, gm, err))) {
       r.error="读取原始 Gain Map 失败："+err;return -1;
     }
     ultrahdr::JpegDecoderHelper mapParser;
@@ -1724,16 +1808,36 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
     }
     bool decoded = false;
     if (e.code == heif_error_Ok && handle != nullptr && gmHandle != nullptr) {
-      heif_image* nativeMap=nullptr;
-      const auto mapError=heif_decode_image(gmHandle,&nativeMap,heif_colorspace_undefined,heif_chroma_undefined,nullptr);
-      const bool isMulti=nativeMap && heif_image_get_chroma_format(nativeMap)!=heif_chroma_monochrome;
-      bool highBitDepth = false;
-      if (nativeMap) for (auto channel : {heif_channel_Y, heif_channel_Cb, heif_channel_Cr, heif_channel_R, heif_channel_G, heif_channel_B})
-        if (heif_image_has_channel(nativeMap, channel)) highBitDepth |= heif_image_get_bits_per_pixel_range(nativeMap, channel) > 8;
-      if(nativeMap) heif_image_release(nativeMap);
-      multiChannel = isMulti;
-      if (highBitDepth) r.error = "此增益图超过 8 位，当前编码器无法原样保留，已保留原图";
-      if(mapError.code!=heif_error_Ok || highBitDepth){heif_image_handle_release(gmHandle);heif_image_handle_release(handle);heif_context_free(ctx);return -1;}
+      const int lumaDepth = heif_image_handle_get_luma_bits_per_pixel(gmHandle);
+      const int chromaDepth = heif_image_handle_get_chroma_bits_per_pixel(gmHandle);
+      heif_colorspace sourceSpace = heif_colorspace_undefined;
+      heif_chroma sourceChroma = heif_chroma_undefined;
+      const auto layout = heif_image_handle_get_preferred_decoding_colorspace(gmHandle, &sourceSpace, &sourceChroma);
+      bool reusedMap = false;
+      bool highBitDepth = lumaDepth > 8 || chromaDepth > 8;
+      const bool knownLayout = layout.code == heif_error_Ok && sourceChroma != heif_chroma_undefined &&
+          lumaDepth > 0 && (sourceChroma == heif_chroma_monochrome || chromaDepth > 0);
+      if (knownLayout) {
+        // Header inspection is sufficient: the pixels only need decoding once below.
+        multiChannel = sourceChroma != heif_chroma_monochrome;
+      } else {
+        heif_image* nativeMap = nullptr;
+        const auto mapError = heif_decode_image(gmHandle, &nativeMap, heif_colorspace_undefined, heif_chroma_undefined, nullptr);
+        if (nativeMap) {
+          multiChannel = heif_image_get_chroma_format(nativeMap) != heif_chroma_monochrome;
+          for (auto channel : {heif_channel_Y, heif_channel_Cb, heif_channel_Cr, heif_channel_R, heif_channel_G, heif_channel_B})
+            if (heif_image_has_channel(nativeMap, channel)) highBitDepth |= heif_image_get_bits_per_pixel_range(nativeMap, channel) > 8;
+          reusedMap = !highBitDepth && mapError.code == heif_error_Ok && copyNativeGainMap(nativeMap, gm);
+          heif_image_release(nativeMap);
+        }
+        if (mapError.code != heif_error_Ok) {
+          heif_image_handle_release(gmHandle); heif_image_handle_release(handle); heif_context_free(ctx); return -1;
+        }
+      }
+      if (highBitDepth) {
+        r.error = "此增益图超过 8 位，当前编码器无法原样保留，已保留原图";
+        heif_image_handle_release(gmHandle); heif_image_handle_release(handle); heif_context_free(ctx); return -1;
+      }
       const size_t metaSize = heif_image_handle_get_gain_map_metadata_size(handle);
       if (metaSize > 0) {
         iso.resize(metaSize);
@@ -1748,7 +1852,7 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
       } else {
         derived = got;
       }
-      decoded = decodeHeifHandle(handle, base, err, true) && decodeHeifHandle(gmHandle, gm, err, false);
+      decoded = decodeHeifHandle(handle, base, err, true) && (reusedMap || decodeHeifHandle(gmHandle, gm, err, false));
     }
     if (gmHandle) heif_image_handle_release(gmHandle);
     if (handle) heif_image_handle_release(handle);
@@ -1785,6 +1889,7 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
   }
   const int outW = base.width, outH = base.height, outGmW = gm.width, outGmH = gm.height;
 
+  GainMapRetryScope mapCache(opt.retrySmaller);
   int rc = -1;
   if (opt.outCodec == 0) {
     if (originalMapJpeg.empty()) {
@@ -1793,29 +1898,34 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
       return -1;
     }
     if(!prepareJpegProfile(base)) { r.error="无法保留 JPEG 色彩配置";if (derived) heif_nclx_color_profile_free(derived); return -1; }
-    const std::vector<uint8_t> baseJpeg = encodeJpegToMem(base, opt.quality, !base.exif.empty());
-    const auto& gmJpeg = originalMapJpeg;
-    if (!baseJpeg.empty() && !gmJpeg.empty()) rc = muxJpegUltraHdr(baseJpeg, gmJpeg, meta, outFd, base.exif, err);
+    rc = encodeWithRetry(outFd, r.inputBytes, opt.quality, opt.retrySmaller, [&](int quality) {
+      const auto baseJpeg = encodeJpegToMem(base, quality, !base.exif.empty());
+      return baseJpeg.empty() ? -1 : muxJpegUltraHdr(baseJpeg, originalMapJpeg, meta, outFd, base.exif, err);
+    });
   } else if (opt.outCodec == 3) {
     GainMapPayload payload;
+    payload.cacheForRetry = opt.retrySmaller;
     payload.image = std::move(gm);
     payload.iso = std::move(iso);
     payload.codec = opt.outCodec;
     payload.multiChannel = multiChannel;
     payload.derivedNclx = derived;
-    rc = encodeJxl(base, opt.quality, opt.keepExif, outFd, opt.speedLevel,
-                   ultraslim_codec_threads, &payload, err) == 0 ? 0 : -1;
+    rc = encodeWithRetry(outFd, r.inputBytes, opt.quality, opt.retrySmaller, [&](int quality) {
+      return encodeJxl(base, quality, opt.keepExif, outFd, opt.speedLevel,
+                       ultraslim_codec_threads, &payload, err);
+    });
   } else {
     GainMapPayload payload;
+    payload.cacheForRetry = opt.retrySmaller;
     payload.image = std::move(gm);
     payload.iso = std::move(iso);
     payload.codec = opt.outCodec;
     payload.multiChannel = multiChannel;
     payload.derivedNclx = derived;
-    rc = encodeSdrWithLibheif(base, opt.outCodec, opt.quality, opt.keepExif, outFd, opt.speedLevel,
-                              ultraslim_codec_threads, &payload, err, &opt.xmp) == 0
-             ? 0
-             : -1;
+    rc = encodeWithRetry(outFd, r.inputBytes, opt.quality, opt.retrySmaller, [&](int quality) {
+      return encodeSdrWithLibheif(base, opt.outCodec, quality, opt.keepExif, outFd, opt.speedLevel,
+                                ultraslim_codec_threads, &payload, err, &opt.xmp);
+    });
   }
   if (derived) heif_nclx_color_profile_free(derived);
   if (rc != 0) { if (!err.empty()) r.error = "无法保留 Gain Map：" + err; return -1; }
@@ -2143,17 +2253,20 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, int outFd, 
     r.width = sdr.width;
     r.height = sdr.height;
     if (!options.keepExif) sdr.exif.clear();
-    int encErr;
-    if (options.outCodec == 0) {
-      if(!prepareJpegProfile(sdr)) { r.errorCode=29; r.error="此色彩配置无法安全转换为 JPEG，请使用 HEIC/AVIF/JXL"; return r; }
-      encErr = encodeJpegSdr(sdr, options.quality, options.keepExif, outFd, err);
-    } else if (options.outCodec == 3) {
-      encErr = encodeJxl(sdr, options.quality, options.keepExif, outFd,
-                         options.speedLevel, ultraslim_codec_threads, nullptr, err);
-    } else {
-      encErr = encodeSdrWithLibheif(sdr, options.outCodec, options.quality, options.keepExif, outFd,
-                                    options.speedLevel, ultraslim_codec_threads, nullptr, err, &options.xmp);
-    }
+    int encErr = encodeWithRetry(outFd, r.inputBytes, options.quality, options.retrySmaller, [&](int quality) {
+      int code;
+      if (options.outCodec == 0) {
+        if(!prepareJpegProfile(sdr)) { err="此色彩配置无法安全转换为 JPEG，请使用 HEIC/AVIF/JXL"; return 29; }
+        code = encodeJpegSdr(sdr, quality, options.keepExif, outFd, err);
+      } else if (options.outCodec == 3) {
+        code = encodeJxl(sdr, quality, options.keepExif, outFd,
+                           options.speedLevel, ultraslim_codec_threads, nullptr, err);
+      } else {
+        code = encodeSdrWithLibheif(sdr, options.outCodec, quality, options.keepExif, outFd,
+                                      options.speedLevel, ultraslim_codec_threads, nullptr, err, &options.xmp);
+      }
+      return code;
+    });
     if (encErr != 0) {
       r.errorCode = encErr;
       r.error = err;

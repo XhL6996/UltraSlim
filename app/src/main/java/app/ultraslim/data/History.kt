@@ -77,6 +77,9 @@ interface HistoryDao {
     @Query("SELECT * FROM history")
     suspend fun all(): List<HistoryEntity>
 
+    @Query("SELECT * FROM history WHERE createdAt >= :start AND createdAt < :end ORDER BY createdAt DESC")
+    suspend fun inDateRange(start: Long, end: Long): List<HistoryEntity>
+
     @Query("SELECT * FROM history WHERE id = :id")
     fun flowById(id: Long): Flow<HistoryEntity?>
 

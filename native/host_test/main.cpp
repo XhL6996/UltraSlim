@@ -102,6 +102,8 @@ int main(int argc, char** argv) {
   if (argc > 8) o.preserveGainMap = atoi(argv[8]) != 0;
   if (argc > 9) o.codecThreads = atoi(argv[9]);
 
+  if (argc > 10) o.retrySmaller = atoi(argv[10]) != 0;
+
   int outFd = open(output, O_RDWR | O_CREAT | O_TRUNC, 0644);
   if (outFd < 0) {
     fprintf(stderr, "cannot open %s: %s\n", output, strerror(errno));

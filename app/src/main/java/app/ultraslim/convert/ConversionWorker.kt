@@ -105,21 +105,13 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                                 UltraHdrBridge.nativeTranscode(input.fd, output.fd, options.format.codecId, quality,
                                     options.gainmapQuality, options.gainmapScale, options.multiChannelGainmap, options.keepExif,
                                     options.allowSdr, options.speedLevel, options.resizePercent,
-                                    Runtime.getRuntime().availableProcessors().coerceIn(2, 8), options.keepLocation, motionXmp)
+                                    Runtime.getRuntime().availableProcessors().coerceIn(2, 8), options.keepLocation, motionXmp, options.onlySmaller)
                             }
                         }
                     }
-                    // "仅保留更小"开启时：如果结果不比原图小，在严守画质不劣化的底线前提下微调重试（最多微降 1 次 5 点且绝不低于 80 保底）
-                    var quality = options.quality
-                    var result = transcode(quality)
+                    // Native retry reuses prepared pixels and the lossless gain map.
+                    var result = transcode(options.quality)
                     if (!result.isSuccess) { file.delete(); error(result.error) }
-                    var steps = 0
-                    while (options.onlySmaller && result.outputBytes >= result.inputBytes && steps < 1 && quality > 80) {
-                        quality = maxOf(80, quality - 5)
-                        steps++
-                        result = transcode(quality)
-                        if (!result.isSuccess) { file.delete(); error(result.error) }
-                    }
                     var liveAttached = false
                     if (motionInfo != null) {
                         if (options.format == OutputFormat.JPEG || options.format == OutputFormat.HEIC) {

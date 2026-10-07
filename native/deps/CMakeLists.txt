@@ -69,6 +69,7 @@ ExternalProject_Add(x265
                -DCMAKE_C_FLAGS=${X265_ARM_FLAGS}
                -DCMAKE_CXX_FLAGS=${X265_ARM_FLAGS}
                -DENABLE_ASSEMBLY=${X265_ENABLE_ASSEMBLY}
+               -DULTRASLIM_ARM_INTRINSICS=ON
                -DENABLE_SHARED=OFF
                -DENABLE_CLI=OFF
                -DHIGH_BIT_DEPTH=OFF
@@ -102,7 +103,7 @@ ExternalProject_Add(svt-av1
                -DBUILD_APPS=OFF
                -DBUILD_TESTING=OFF
                -DSVT_AV1_LTO=ON
-               -DCOMPILE_C_ONLY=ON
+               -DCOMPILE_C_ONLY=OFF
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --parallel
     INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)
 
@@ -168,6 +169,11 @@ ExternalProject_Add(libheif
     INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)
 
 # Changes to local patches must invalidate an existing superbuild, not only a fresh clone.
+ExternalProject_Add_Step(x265 patch_inputs
+    INDEPENDENT TRUE
+    DEPENDEES update DEPENDERS patch
+    COMMAND ${CMAKE_COMMAND} -E true
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_x265.sh)
 ExternalProject_Add_Step(svt-av1 patch_inputs
     INDEPENDENT TRUE
     DEPENDEES update DEPENDERS patch
@@ -201,4 +207,3 @@ ExternalProject_Add(libjxl
                -DJPEGXL_ENABLE_PLUGINS=OFF
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target jxl jxl_cms jxl_threads brotli --parallel
     INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)
-

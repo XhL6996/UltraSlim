@@ -38,7 +38,7 @@ android {
             )
         }
         debug {
-            applicationIdSuffix = ".debug"
+            applicationIdSuffix = providers.gradleProperty("ultraslimDebugSuffix").orElse(".debug").get()
         }
     }
 
@@ -85,6 +85,8 @@ dependencies {
     }
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation(platform(libs.compose.bom))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation("androidx.room:room-testing:2.8.1")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     implementation(libs.androidx.core.ktx)

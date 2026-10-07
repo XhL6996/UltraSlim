@@ -25,12 +25,13 @@ static std::vector<uint8_t> icc(const std::string& file){
  heif_image_handle*h=nullptr;heif_context_get_primary_image_handle(c,&h);std::vector<uint8_t> v(heif_image_handle_get_raw_color_profile_size(h));
  if(!v.empty())heif_image_handle_get_raw_color_profile(h,v.data());heif_image_handle_release(h);heif_context_free(c);return v;
 }
-static void orientedJpeg(const std::string& path,int orientation){
+static void orientedJpeg(const std::string& path,int orientation,int width=64,int height=32){
  FILE*f=fopen(path.c_str(),"wb");jpeg_compress_struct c{};jpeg_error_mgr e{};c.err=jpeg_std_error(&e);jpeg_create_compress(&c);jpeg_stdio_dest(&c,f);
- c.image_width=64;c.image_height=32;c.input_components=3;c.in_color_space=JCS_RGB;jpeg_set_defaults(&c);jpeg_start_compress(&c,TRUE);
+ c.image_width=width;c.image_height=height;c.input_components=3;c.in_color_space=JCS_RGB;jpeg_set_defaults(&c);jpeg_start_compress(&c,TRUE);
  unsigned char marker[]={'E','x','i','f',0,0,'I','I',42,0,8,0,0,0,1,0,0x12,1,3,0,1,0,0,0,1,0,0,0,0,0,0,0};marker[24]=orientation;
- jpeg_write_marker(&c,JPEG_APP0+1,marker,sizeof(marker));unsigned char row[64*3];memset(row,127,sizeof(row));
- while(c.next_scanline<c.image_height){JSAMPROW r=row;jpeg_write_scanlines(&c,&r,1);}jpeg_finish_compress(&c);jpeg_destroy_compress(&c);fclose(f);
+ jpeg_write_marker(&c,JPEG_APP0+1,marker,sizeof(marker));std::vector<unsigned char> row(width*3);
+ for(int x=0;x<width*3;++x) row[x]=(x*17)%256;
+ while(c.next_scanline<c.image_height){JSAMPROW r=row.data();jpeg_write_scanlines(&c,&r,1);}jpeg_finish_compress(&c);jpeg_destroy_compress(&c);fclose(f);
 }
 int main(int argc,char**argv){
  check(argc==3,"usage regression <fixtures> <output-dir>");std::string dir=argv[1],out=argv[2];
@@ -44,6 +45,13 @@ int main(int argc,char**argv){
  }
  o.outCodec=1;convert(dir+"/minnie-320x240-yuv-icc.jpg",out+"/icc.heic",o);check(!icc(out+"/icc.heic").empty(),"SDR ICC retained");
  convert(out+"/icc.heic",out+"/icc-round.heic",o);check(icc(out+"/icc.heic")==icc(out+"/icc-round.heic"),"ICC preserved byte-for-byte");
+ // P3 must survive both the initial AVIF encode and a container-to-container retry.
+ o.outCodec=2;
+ convert(dir+"/apple_gainmap_new.jpg",out+"/p3.avif",o);
+ check(!icc(out+"/p3.avif").empty(),"P3 AVIF ICC present");
+ convert(out+"/p3.avif",out+"/p3-round.avif",o);
+ check(icc(out+"/p3.avif")==icc(out+"/p3-round.avif"),"AVIF P3 ICC preserved byte-for-byte");
+ o.outCodec=1;
  for(int orientation: {6,8}){
   auto file=out+"/rotate-"+std::to_string(orientation)+".jpg";orientedJpeg(file,orientation);
   for(bool keep:{false,true}){o.keepExif=keep;auto r=convert(file,file+(keep?"-exif":"-none"),o);check(r.width==32&&r.height==64,"orientation normalized independently of EXIF retention");}
@@ -51,6 +59,22 @@ int main(int argc,char**argv){
  // Exercise independent codec settings concurrently (TLS must not bleed across calls).
  std::thread a([&]{auto x=o;x.outCodec=1;x.speedLevel=0;convert(dir+"/apple_gainmap_new.jpg",out+"/parallel-a",x);});
  std::thread b([&]{auto x=o;x.outCodec=2;x.speedLevel=2;convert(dir+"/apple_gainmap_new.jpg",out+"/parallel-b",x);});a.join();b.join();
+ // Odd-sized images exercise parallel resize/YUV row boundaries and scalar tails.
+ auto large=out+"/parallel-pixels.jpg";orientedJpeg(large,1,2051,1537);
+ auto pixelOptions=o;pixelOptions.outCodec=1;pixelOptions.speedLevel=2;pixelOptions.resizePercent=70;
+ pixelOptions.codecThreads=1;convert(large,large+"-serial",pixelOptions);
+ pixelOptions.codecThreads=4;convert(large,large+"-parallel",pixelOptions);
+ auto decodedRgb=[](const std::string& path){
+  auto*ctx=heif_context_alloc();check(heif_context_read_from_file(ctx,path.c_str(),nullptr).code==heif_error_Ok,"read pixel fixture");
+  heif_image_handle*h=nullptr;heif_context_get_primary_image_handle(ctx,&h);heif_image*i=nullptr;
+  check(heif_decode_image(h,&i,heif_colorspace_RGB,heif_chroma_interleaved_RGB,nullptr).code==heif_error_Ok,"decode pixel fixture");
+  int stride;auto*p=heif_image_get_plane_readonly(i,heif_channel_interleaved,&stride);
+  const int w=heif_image_get_primary_width(i),height=heif_image_get_primary_height(i);
+  std::vector<uint8_t> bytes(size_t(w)*height*3);
+  for(int y=0;y<height;++y)memcpy(bytes.data()+size_t(y)*w*3,p+size_t(y)*stride,w*3);
+  heif_image_release(i);heif_image_handle_release(h);heif_context_free(ctx);return bytes;
+ };
+ check(decodedRgb(large+"-serial")==decodedRgb(large+"-parallel"),"parallel preprocessing is pixel exact");
  auto bad=out+"/bad.jpg";FILE*f=fopen(bad.c_str(),"wb");fwrite("\xff\xd8" "bad",1,5,f);fclose(f);
  int fd=open(bad.c_str(),O_RDONLY);check(ultraslim::probeImage(fd).errorCode!=0,"corrupt file rejected");close(fd);
  // GPS payload must be erased, not merely detached from its directory.

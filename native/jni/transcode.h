@@ -24,6 +24,7 @@ struct TranscodeOptions {
   int quality = 90;
   // Legacy rebuild parameters are only used by host fixture generation.
   bool preserveGainMap = true;
+  bool retrySmaller = false; // One base-quality retry, reusing decoded pixels and lossless gain map.
   int gainmapQuality = 60;
   int gainmapScale = 4;
   bool multiChannelGainmap = true;

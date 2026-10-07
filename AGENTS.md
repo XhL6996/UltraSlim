@@ -48,8 +48,17 @@ build-host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 - 速度档位（speedLevel 0/1/2）：HEVC 映射 x265 preset slow/medium/veryfast，AV1 映射 "speed" 4/6/9；经 vendored libultrahdr 补丁注入（`heifultrahdr.cpp` / `avifultrahdr.cpp`，读取全局弱符号 `ultraslim_codec_speed_level`，强定义在 transcode.cpp）。svt 插件没有 "chroma" 参数，`set_internal_color_format` 已改为容错。
 - 分辨率缩放：HDR 路径用 `uhdr_add_effect_resize`（解码时生效），SDR 路径用自带 bilinear（RGBA8888）。
 - 预览兜底：平台解码器不认识 ISO 21496-1 tmap HEIC（Android 15 及更早）时，`UltraAsyncImage`（ui/components/Components.kt）会走 `nativeDecodePreview`（原生解码主图 → JPEG → Bitmap）显示预览；历史/队列/详情共用。
-- x265 4.1 在 Clang + CMake≥4 下需要补丁（`native/deps/patches/patch_x265.sh`）；手写 aarch64 .S 汇编含绝对重定位，Android 共享库禁止（bionic 拒绝 textrel），故只用 NEON intrinsics。
+- x265 4.1 在 Clang + CMake≥4 下需要补丁（`native/deps/patches/patch_x265.sh`）；手写 aarch64 .S 汇编含绝对重定位，Android 共享库禁止（bionic 拒绝 textrel），故保持 `ENABLE_ASSEMBLY=OFF`，通过 `ULTRASLIM_ARM_INTRINSICS` 单独编译并注册 PIC-safe NEON intrinsics；不能仅设置 `HAVE_NEON`。16×16 DCT 使用 C++ intrinsic 实现，依赖汇编的 planar 预测保留 C 回退。
 - HDR 路径：libultrahdr 解码为 RGBA1010102/HLG → 重新编码（重建 gainmap，可配置 scale/quality/多通道/速度/分辨率）。SDR 路径：libjpeg/libheif 解码 → BT.601 限定域 YUV420 → libheif 直编码（或 libjpeg 出 JPEG）。
 - EXIF 透传：HDR 路径经 `uhdr_enc_set_exif_data`，SDR 路径经 APP1 marker + `heif_context_add_exif_metadata`（JPEG 输出经 `jpeg_write_marker`）。
 - ABI 只出 arm64-v8a（见 `app/build.gradle.kts`）；加 x86_64 需要给依赖构建装 nasm。
 - vendored libultrahdr 的本地修改：`cmake/Findlibheif.cmake`（多 define 的 -D 处理）、上述两个 encoder 文件（速度档位 + chroma 容错）。
+
+## 性能与历史页（2026-10-08）
+
+- SVT-AV1 使用 `COMPILE_C_ONLY=OFF`，ARM 优化由运行时 CPU 检测分派，禁止全局强制 SVE2 ISA。
+- `retrySmaller` 在原生层仅重试一次主图质量（下降 5，最低 80）；复用解码/缩放结果。HEIF 增益图码流缓存限定在一个 `GainMapRetryScope` 内，图像/编码格式/增益图参数必须不变，退出或异常时清理；JXL 复用同一 payload 的 jhgm。此改动依赖重建 libheif 本地补丁。
+- HEIC 增益图随速度档位采用 slow/medium/veryfast；AVIF 无损增益图采用 AOM speed 4/6/8，仍保持像素逐值一致。
+- 百万像素以上的缩放/YUV 预处理最多 4 个工作线程，编码前 join；批次仍逐张转换，避免多张全分辨率 HDR 同时驻留。
+- 历史按本地自然日分组，右滑日期标题确认删除；按日期查询包含当前分页外、同筛选条件的记录。只删除应用内成品及记录，已存相册图片不删除。
+- 交互测试可用 `-PultraslimDebugSuffix=.perfqa` 构建独立测试包，避免污染日常使用的历史。同步目录建议外置 `ULTRASLIM_BUILD_ROOT` 并使用 `-Pkotlin.incremental=false`。
