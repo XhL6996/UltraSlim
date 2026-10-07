@@ -34,7 +34,7 @@ data class ThemeSettings(
 /** Persisted conversion defaults (ConversionSettings + 自动保存到相册). */
 data class ConversionDefaults(
     val format: OutputFormat = OutputFormat.AVIF,
-    val quality: Int = 82,
+    val quality: Int = 88,
     val gainmapQuality: Int = 60,
     val gainmapScale: Int = 4,
     val multiChannelGainmap: Boolean = true,
@@ -83,7 +83,7 @@ class SettingsRepository(private val context: Context) {
     val defaults: Flow<ConversionDefaults> = context.settingsDataStore.data.map { p ->
         ConversionDefaults(
             format = OutputFormat.parse(p[Keys.OUTPUT_FORMAT]),
-            quality = p[Keys.QUALITY] ?: 82,
+            quality = p[Keys.QUALITY] ?: 88,
             gainmapQuality = p[Keys.GAINMAP_QUALITY] ?: 60,
             gainmapScale = p[Keys.GAINMAP_SCALE] ?: 4,
             multiChannelGainmap = p[Keys.MULTI_CHANNEL] ?: true,

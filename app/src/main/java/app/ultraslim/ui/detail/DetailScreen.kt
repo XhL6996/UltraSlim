@@ -8,6 +8,8 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.LocalDensity
 import app.ultraslim.convert.OutputStore
 import app.ultraslim.model.OutputFormat
@@ -319,6 +321,7 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
     var panOffset by remember { mutableStateOf(Offset.Zero) }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
+    val haptic = LocalHapticFeedback.current
     // 双击缩放动画的唯一宿主：捏合/拖动随时 cancel 它，杜绝两处并发写同一状态。
     var zoomAnim by remember { mutableStateOf<Job?>(null) }
     fun cancelZoomAnim() {
@@ -368,9 +371,13 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                     detectTapGestures(
                         onPress = {
                             if (compareMode == 1) {
+                                haptic.performHapticFeedback(HapticFeedbackType.LongPress)
                                 isHoldingOriginal = true
-                                tryAwaitRelease()
+                                val released = tryAwaitRelease()
                                 isHoldingOriginal = false
+                                if (released) {
+                                    haptic.performHapticFeedback(HapticFeedbackType.TextHandleMove)
+                                }
                             }
                         },
                         onDoubleTap = {

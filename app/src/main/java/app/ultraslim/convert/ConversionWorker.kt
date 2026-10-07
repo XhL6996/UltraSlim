@@ -105,14 +105,13 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                             }
                         }
                     }
-                    // "仅保留更小"开启时自动降档重试：结果不比原图小就换更低画质再压一次
-                    // （最多两档），仍压不过才保留原图——保证交给用户的结果只会更小。
+                    // "仅保留更小"开启时：如果结果不比原图小，在严守画质不劣化的底线前提下微调重试（最多微降 1 次 5 点且绝不低于 80 保底）
                     var quality = options.quality
                     var result = transcode(quality)
                     if (!result.isSuccess) { file.delete(); error(result.error) }
                     var steps = 0
-                    while (options.onlySmaller && result.outputBytes >= result.inputBytes && steps < 2 && quality > 50) {
-                        quality = maxOf(50, quality - 14)
+                    while (options.onlySmaller && result.outputBytes >= result.inputBytes && steps < 1 && quality > 80) {
+                        quality = maxOf(80, quality - 5)
                         steps++
                         result = transcode(quality)
                         if (!result.isSuccess) { file.delete(); error(result.error) }
@@ -125,7 +124,7 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     if (!verified.isSuccess || (probe.hasGainMap && !verified.hasGainMap) || (options.keepExif && probe.hasExif && !verified.hasExif)) { file.delete(); error("输出校验失败") }
                     if (options.onlySmaller && result.outputBytes >= result.inputBytes) {
                         file.delete()
-                        val why = if (steps > 0) "已尽力压缩（降 $steps 档画质）仍无法比原图小，已保留原图" else "输出没有比原图小，已保留原图"
+                        val why = "输出体积未比原图更小，为确保画质不劣化已保留原图"
                         repo.update(id) { it.copy(status = QueueStatus.SKIPPED, result = result, error = why) }
                         continue
                     }

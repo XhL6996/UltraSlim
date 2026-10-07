@@ -10,12 +10,12 @@ enum class OutputFormat(
 ) {
     AVIF("avif", 2, "AVIF", "image/avif"),
     HEIC("heic", 1, "HEIC", "image/heic"),
-    JPEG("jpg", 0, "JPEG", "image/jpeg"),
     JXL("jxl", 3, "JXL", "image/jxl"),
+    JPEG("jpg", 0, "JPEG", "image/jpeg"),
     ;
 
     companion object {
-        /** Matches by extension ("avif"/"heic"/"jpg") or label ("JPEG"), case-insensitive. Defaults to AVIF. */
+        /** Matches by extension ("avif"/"heic"/"jxl"/"jpg") or label ("JXL"/"JPEG"), case-insensitive. Defaults to AVIF. */
         fun parse(value: String?): OutputFormat =
             entries.firstOrNull {
                 it.extension.equals(value, ignoreCase = true) || it.label.equals(value, ignoreCase = true)
@@ -26,7 +26,7 @@ enum class OutputFormat(
 /** The subset of options that is passed straight to the native transcode call. */
 data class ConversionSettings(
     val format: OutputFormat = OutputFormat.AVIF,
-    val quality: Int = 82,
+    val quality: Int = 88,
     val gainmapQuality: Int = 60,
     val gainmapScale: Int = 4,
     val multiChannelGainmap: Boolean = true,

@@ -556,10 +556,52 @@ private fun ImportHero(empty: Boolean, onPick: () -> Unit, onAlbums: () -> Unit)
             }
             Text("主图高效压缩 · Gain Map 跟随原图", style = MaterialTheme.typography.bodySmall, color = Color(0xFFD0DFD4))
             if(empty) {
-                Button(onClick = onPick, modifier = Modifier.fillMaxWidth().heightIn(min = 52.dp), shape = MaterialTheme.shapes.medium, colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = ink)) {
-                    Icon(Icons.Rounded.AddPhotoAlternate, null, Modifier.size(20.dp)); Spacer(Modifier.width(8.dp)); Text("选择照片", fontWeight = FontWeight.Bold)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Button(
+                        onClick = onPick,
+                        modifier = Modifier.weight(1f).heightIn(min = 50.dp),
+                        shape = MaterialTheme.shapes.medium,
+                        colors = ButtonDefaults.buttonColors(containerColor = accent, contentColor = ink)
+                    ) {
+                        Icon(Icons.Rounded.AddPhotoAlternate, null, Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("选择照片", fontWeight = FontWeight.Bold)
+                    }
+                    FilledTonalButton(
+                        onClick = onAlbums,
+                        modifier = Modifier.weight(1f).heightIn(min = 50.dp),
+                        shape = MaterialTheme.shapes.medium,
+                        colors = ButtonDefaults.filledTonalButtonColors(
+                            containerColor = Color.White.copy(alpha = 0.16f),
+                            contentColor = Color.White
+                        )
+                    ) {
+                        Icon(Icons.Rounded.PhotoLibrary, null, Modifier.size(20.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text("相册批量导入")
+                    }
                 }
-                TextButton(onClick = onAlbums, modifier = Modifier.align(Alignment.CenterHorizontally), colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFD0DFD4))) { Text("从相册批量导入（可选只导 HDR）") }
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(Icons.Rounded.Verified, null, Modifier.size(13.dp), tint = accent)
+                        Text("无损 Gain Map", style = MaterialTheme.typography.labelSmall, color = Color(0xFFD0DFD4))
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(Icons.Rounded.Compress, null, Modifier.size(13.dp), tint = accent)
+                        Text("画质体积双保底", style = MaterialTheme.typography.labelSmall, color = Color(0xFFD0DFD4))
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Icon(Icons.Rounded.Lock, null, Modifier.size(13.dp), tint = accent)
+                        Text("本地离线安全", style = MaterialTheme.typography.labelSmall, color = Color(0xFFD0DFD4))
+                    }
+                }
             }
         }
     }
@@ -583,13 +625,13 @@ private fun FormatBadge(probe: ProbeResult?, status: QueueStatus) {
         )
 
         probe.hasGainMap -> BadgeChip(
-            "Gainmap",
+            "Gainmap · ${probe.containerLabel}",
             MaterialTheme.colorScheme.secondaryContainer,
             MaterialTheme.colorScheme.onSecondaryContainer,
         )
 
         else -> BadgeChip(
-            "SDR",
+            "SDR · ${probe.containerLabel}",
             MaterialTheme.colorScheme.surfaceContainerHighest,
             MaterialTheme.colorScheme.onSurfaceVariant,
         )

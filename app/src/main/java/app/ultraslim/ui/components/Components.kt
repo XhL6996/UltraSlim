@@ -273,15 +273,16 @@ class OptionsCallbacks(
 /** Named bundles of conversion parameters shown as quick-select chips. */
 enum class CompressionPreset(
     val label: String,
+    val description: String,
     val quality: Int,
     val gainmapQuality: Int,
     val gainmapScale: Int,
     val resizePercent: Int,
     val speedLevel: Int,
 ) {
-    QUALITY("高画质", quality = 92, gainmapQuality = 70, gainmapScale = 2, resizePercent = 100, speedLevel = 0),
-    BALANCED("均衡", quality = 82, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 1),
-    EXTREME("极限省空间", quality = 65, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 0),
+    QUALITY("高保真", "近乎无损质感，保留极致微观纹理", quality = 92, gainmapQuality = 70, gainmapScale = 2, resizePercent = 100, speedLevel = 1),
+    BALANCED("均衡推荐", "画质无感劣化，体积精简 50%~65%", quality = 88, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 1),
+    EXTREME("省空间", "适度权衡，最大化节省存储空间", quality = 78, gainmapQuality = 60, gainmapScale = 4, resizePercent = 100, speedLevel = 1),
     ;
 
     fun matches(defaults: ConversionDefaults): Boolean =
@@ -312,7 +313,7 @@ fun ConversionOptionsPanel(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            SectionHeader("输出格式", "体积和 HDR 显示支持取决于图片、设备与查看应用")
+            SectionHeader("输出格式", "推荐优先使用 AVIF、HEIC 或 JXL")
             val formats = OutputFormat.entries
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                 formats.forEachIndexed { index, format ->
@@ -326,9 +327,16 @@ fun ConversionOptionsPanel(
                     }
                 }
             }
+            val formatTip = when (defaults.format) {
+                OutputFormat.AVIF -> "AVIF：现代 AV1 编码，体积超小，高动态范围与暗部细节优秀"
+                OutputFormat.HEIC -> "HEIC：高效 HEVC 编码，与 iOS 及 Android 系统相册兼容性最佳"
+                OutputFormat.JXL -> "JXL：JPEG XL 现代格式，超强微观纹理保真度与无损增益图"
+                OutputFormat.JPEG -> "JPEG：经典兼容格式，直接复用原图增益图，体积缩减相对有限"
+            }
+            Text(formatTip, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
-            SectionHeader("画质档位", "推荐「均衡」；Gain Map 始终按原图质量无损保留")
             val matchedPreset = CompressionPreset.entries.firstOrNull { it.matches(defaults) }
+            SectionHeader("画质档位", matchedPreset?.description ?: "自定义画质数值 ${defaults.quality} · Gain Map 始终无损保留")
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CompressionPreset.entries.forEach { preset ->
                     FilterChip(selected = matchedPreset == preset, onClick = { callbacks.onPreset(preset) }, enabled = enabled, label = { Text(preset.label) })
@@ -341,7 +349,7 @@ fun ConversionOptionsPanel(
                         else "增益图独立无损编码，不缩小、不重建；方向与主图同步。", style = MaterialTheme.typography.bodySmall)
                 }
             }
-            SwitchRow("仅保留更小结果", "压不过原图的照片自动保留原图，不会输出更大的文件", defaults.onlySmaller, callbacks.onOnlySmallerChange, enabled = enabled)
+            SwitchRow("仅保留更小结果", "若压缩后体积未比原图小，自动保留原图，杜绝反向变大", defaults.onlySmaller, callbacks.onOnlySmallerChange, enabled = enabled)
             var advanced by remember { mutableStateOf(false) }
             TextButton(onClick = { advanced = !advanced }, enabled = enabled) { Text(if(advanced) "收起更多选项" else "更多选项（画质数值、尺寸、速度、元数据）") }
             AnimatedVisibility(
