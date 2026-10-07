@@ -337,7 +337,7 @@ fun ConversionOptionsPanel(
             Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.medium) {
                 Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text("Gain Map · 跟随原图", style = MaterialTheme.typography.titleSmall)
-                    Text(if (defaults.format == OutputFormat.JPEG) "直接复用 JPEG 原始增益图；其他 HDR 输入请选择 HEIC / AVIF。"
+                    Text(if (defaults.format == OutputFormat.JPEG) "直接复用 JPEG 原始增益图；其他 HDR 输入请选择 HEIC / AVIF / JXL。"
                         else "增益图独立无损编码，不缩小、不重建；方向与主图同步。", style = MaterialTheme.typography.bodySmall)
                 }
             }

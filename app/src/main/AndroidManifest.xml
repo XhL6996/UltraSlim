@@ -39,6 +39,7 @@
                 <data android:mimeType="image/heic" />
                 <data android:mimeType="image/heif" />
                 <data android:mimeType="image/avif" />
+                <data android:mimeType="image/jxl" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
@@ -47,6 +48,7 @@
                 <data android:mimeType="image/heic" />
                 <data android:mimeType="image/heif" />
                 <data android:mimeType="image/avif" />
+                <data android:mimeType="image/jxl" />
             </intent-filter>
         </activity>
 

@@ -21,6 +21,11 @@
 #include <jpeglib.h>
 #include <libheif/heif.h>
 
+#include <jxl/encode.h>
+#include <jxl/decode.h>
+#include <jxl/color_encoding.h>
+#include <jxl/thread_parallel_runner.h>
+
 #include "ultrahdr/gainmapmetadata.h"
 #include "ultrahdr/ultrahdrcommon.h"
 #include "ultrahdr_api.h"
@@ -36,14 +41,71 @@ thread_local int ultraslim_codec_threads = 0;
 namespace ultraslim {
 namespace {
 
+void storeBE16(uint16_t v, uint8_t* p) {
+  p[0] = static_cast<uint8_t>(v >> 8);
+  p[1] = static_cast<uint8_t>(v & 0xff);
+}
+void storeBE32(uint32_t v, uint8_t* p) {
+  p[0] = static_cast<uint8_t>(v >> 24);
+  p[1] = static_cast<uint8_t>((v >> 16) & 0xff);
+  p[2] = static_cast<uint8_t>((v >> 8) & 0xff);
+  p[3] = static_cast<uint8_t>(v & 0xff);
+}
+uint16_t loadBE16(const uint8_t* p) {
+  return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
+}
+uint32_t loadBE32(const uint8_t* p) {
+  return (static_cast<uint32_t>(p[0]) << 24) |
+         (static_cast<uint32_t>(p[1]) << 16) |
+         (static_cast<uint32_t>(p[2]) << 8) |
+         static_cast<uint32_t>(p[3]);
+}
+
+void rgbaToRgbFast(const uint8_t* src, uint8_t* dst, size_t count) {
+  size_t i = 0;
+#if defined(__ARM_NEON)
+  for (; i + 16 <= count; i += 16) {
+    uint8x16x4_t rgba = vld4q_u8(src + i * 4);
+    uint8x16x3_t rgb = { rgba.val[0], rgba.val[1], rgba.val[2] };
+    vst3q_u8(dst + i * 3, rgb);
+  }
+#endif
+  for (; i < count; ++i) {
+    dst[i * 3 + 0] = src[i * 4 + 0];
+    dst[i * 3 + 1] = src[i * 4 + 1];
+    dst[i * 3 + 2] = src[i * 4 + 2];
+  }
+}
+
+void rgbaToGrayFast(const uint8_t* src, uint8_t* dst, size_t count) {
+  size_t i = 0;
+#if defined(__ARM_NEON)
+  for (; i + 16 <= count; i += 16) {
+    uint8x16x4_t rgba = vld4q_u8(src + i * 4);
+    vst1q_u8(dst + i, rgba.val[0]);
+  }
+#endif
+  for (; i < count; ++i) {
+    dst[i] = src[i * 4];
+  }
+}
+
 std::vector<uint8_t> readAll(int fd) {
   std::vector<uint8_t> out;
   struct stat st {};
+  lseek(fd, 0, SEEK_SET);
   if (fstat(fd, &st) == 0 && S_ISREG(st.st_mode) && st.st_size > 0) {
     if (st.st_size > 256LL * 1024 * 1024) return {};
-    out.reserve(static_cast<size_t>(st.st_size));
+    out.resize(static_cast<size_t>(st.st_size));
+    size_t total = 0;
+    while (total < out.size()) {
+      ssize_t n = read(fd, out.data() + total, out.size() - total);
+      if (n <= 0) break;
+      total += static_cast<size_t>(n);
+    }
+    out.resize(total);
+    return out;
   }
-  lseek(fd, 0, SEEK_SET);
   uint8_t chunk[1 << 16];
   ssize_t n;
   while ((n = read(fd, chunk, sizeof(chunk))) > 0) {
@@ -73,6 +135,8 @@ int sniffContainer(const uint8_t* d, size_t n) {
     }
     return 1;  // some HEIF flavour
   }
+  const JxlSignature sig = JxlSignatureCheck(d, n);
+  if (sig == JXL_SIG_CODESTREAM || sig == JXL_SIG_CONTAINER) return 3;  // JXL
   return -1;
 }
 
@@ -107,16 +171,64 @@ struct SdrImage {
 };
 
 void orientPixels(SdrImage& img, int orientation) {
-  if(orientation<=1 || orientation>8) return;
-  const int w=img.width,h=img.height,nw=orientation>=5?h:w,nh=orientation>=5?w:h;
+  if (orientation <= 1 || orientation > 8 || img.width <= 0 || img.height <= 0 ||
+      img.rgba.size() < static_cast<size_t>(img.width) * img.height * 4) return;
+  const int w = img.width, h = img.height;
+  const int nw = orientation >= 5 ? h : w;
+  const int nh = orientation >= 5 ? w : h;
   std::vector<uint8_t> pixels(img.rgba.size());
-  for(int y=0;y<h;y++)for(int x=0;x<w;x++) {
-    int dx=x,dy=y;
-    switch(orientation){case 2:dx=w-1-x;break;case 3:dx=w-1-x;dy=h-1-y;break;case 4:dy=h-1-y;break;
-      case 5:dx=y;dy=x;break;case 6:dx=h-1-y;dy=x;break;case 7:dx=h-1-y;dy=w-1-x;break;case 8:dx=y;dy=w-1-x;break;}
-    memcpy(pixels.data()+(size_t(dy)*nw+dx)*4,img.rgba.data()+(size_t(y)*w+x)*4,4);
+  const uint32_t* src = reinterpret_cast<const uint32_t*>(img.rgba.data());
+  uint32_t* dst = reinterpret_cast<uint32_t*>(pixels.data());
+
+  switch (orientation) {
+    case 2:  // Flip horizontal
+      for (int y = 0; y < h; ++y) {
+        const uint32_t* sRow = src + static_cast<size_t>(y) * w;
+        uint32_t* dRow = dst + static_cast<size_t>(y) * nw;
+        for (int x = 0; x < w; ++x) dRow[w - 1 - x] = sRow[x];
+      }
+      break;
+    case 3:  // Rotate 180
+      for (int y = 0; y < h; ++y) {
+        const uint32_t* sRow = src + static_cast<size_t>(y) * w;
+        uint32_t* dRow = dst + static_cast<size_t>(h - 1 - y) * nw;
+        for (int x = 0; x < w; ++x) dRow[w - 1 - x] = sRow[x];
+      }
+      break;
+    case 4:  // Flip vertical
+      for (int y = 0; y < h; ++y) {
+        memcpy(dst + static_cast<size_t>(h - 1 - y) * nw, src + static_cast<size_t>(y) * w,
+               static_cast<size_t>(w) * 4);
+      }
+      break;
+    case 5:  // Transpose (flip horizontal & rotate 270)
+      for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) dst[static_cast<size_t>(x) * nw + y] = src[static_cast<size_t>(y) * w + x];
+      }
+      break;
+    case 6:  // Rotate 90 CW
+      for (int y = 0; y < h; ++y) {
+        const int dx = h - 1 - y;
+        for (int x = 0; x < w; ++x) dst[static_cast<size_t>(x) * nw + dx] = src[static_cast<size_t>(y) * w + x];
+      }
+      break;
+    case 7:  // Transverse (flip horizontal & rotate 90)
+      for (int y = 0; y < h; ++y) {
+        const int dx = h - 1 - y;
+        for (int x = 0; x < w; ++x) dst[static_cast<size_t>(w - 1 - x) * nw + dx] = src[static_cast<size_t>(y) * w + x];
+      }
+      break;
+    case 8:  // Rotate 270 CW (90 CCW)
+      for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) dst[static_cast<size_t>(w - 1 - x) * nw + y] = src[static_cast<size_t>(y) * w + x];
+      }
+      break;
+    default:
+      return;
   }
-  img.rgba=std::move(pixels);img.width=nw;img.height=nh;
+  img.rgba = std::move(pixels);
+  img.width = nw;
+  img.height = nh;
 }
 
 struct JpegErrMgr {
@@ -374,6 +486,218 @@ bool decodeHeifPreview(const std::vector<uint8_t>& data, SdrImage& out, std::str
   return ok;
 }
 
+bool probeJxl(const std::vector<uint8_t>& data, ProbeResult& r) {
+  JxlDecoder* dec = JxlDecoderCreate(nullptr);
+  if (!dec) return false;
+
+  if (JxlDecoderSubscribeEvents(dec, JXL_DEC_BASIC_INFO | JXL_DEC_BOX | JXL_DEC_BOX_COMPLETE) != JXL_DEC_SUCCESS) {
+    JxlDecoderDestroy(dec);
+    return false;
+  }
+  JxlDecoderSetDecompressBoxes(dec, JXL_TRUE);
+  JxlDecoderSetInput(dec, data.data(), data.size());
+  JxlDecoderCloseInput(dec);
+
+  JxlBasicInfo info {};
+  std::vector<uint8_t> currBoxData;
+  JxlBoxType currBoxType = {0};
+  std::vector<uint8_t> jhgmBox;
+
+  for (;;) {
+    JxlDecoderStatus status = JxlDecoderProcessInput(dec);
+    if (status == JXL_DEC_ERROR) {
+      JxlDecoderDestroy(dec);
+      return false;
+    }
+    if (status == JXL_DEC_SUCCESS) break;
+
+    if (status == JXL_DEC_BASIC_INFO) {
+      if (JxlDecoderGetBasicInfo(dec, &info) == JXL_DEC_SUCCESS) {
+        r.width = info.xsize;
+        r.height = info.ysize;
+      }
+    } else if (status == JXL_DEC_BOX) {
+      if (JxlDecoderGetBoxType(dec, currBoxType, JXL_TRUE) == JXL_DEC_SUCCESS) {
+        if (memcmp(currBoxType, "Exif", 4) == 0) {
+          r.hasExif = true;
+        }
+        if (memcmp(currBoxType, "jhgm", 4) == 0) {
+          uint64_t raw_size = 0;
+          if (JxlDecoderGetBoxSizeContents(dec, &raw_size) == JXL_DEC_SUCCESS && raw_size > 0 && raw_size < 100 * 1024 * 1024) {
+            currBoxData.resize(static_cast<size_t>(raw_size));
+          } else {
+            currBoxData.resize(64 * 1024);
+          }
+          JxlDecoderSetBoxBuffer(dec, currBoxData.data(), currBoxData.size());
+        }
+      }
+    } else if (status == JXL_DEC_BOX_NEED_MORE_OUTPUT) {
+      const size_t remaining = JxlDecoderReleaseBoxBuffer(dec);
+      const size_t used = currBoxData.size() - remaining;
+      currBoxData.resize(currBoxData.size() * 2);
+      JxlDecoderSetBoxBuffer(dec, currBoxData.data() + used, currBoxData.size() - used);
+    } else if (status == JXL_DEC_BOX_COMPLETE) {
+      const size_t remaining = JxlDecoderReleaseBoxBuffer(dec);
+      currBoxData.resize(currBoxData.size() - remaining);
+      if (memcmp(currBoxType, "jhgm", 4) == 0) {
+        jhgmBox = std::move(currBoxData);
+      }
+      currBoxData.clear();
+    }
+  }
+  JxlDecoderDestroy(dec);
+
+  if (!jhgmBox.empty() && jhgmBox.size() >= 8 && jhgmBox[0] == 0) {
+    uint16_t iso_len = loadBE16(jhgmBox.data() + 1);
+    if (3 + iso_len <= jhgmBox.size()) {
+      std::vector<uint8_t> iso(jhgmBox.begin() + 3, jhgmBox.begin() + 3 + iso_len);
+      ultrahdr::uhdr_gainmap_metadata_frac frac {};
+      if (ultrahdr::uhdr_gainmap_metadata_frac::decodeGainmapMetadata(iso, &frac).error_code == UHDR_CODEC_OK) {
+        ultrahdr::uhdr_gainmap_metadata_ext_t ext {};
+        if (ultrahdr::uhdr_gainmap_metadata_frac::gainmapMetadataFractionToFloat(&frac, &ext).error_code == UHDR_CODEC_OK) {
+          r.hasGainMap = true;
+          r.maxContentBoost = ext.max_content_boost[0];
+          r.hdrCapacityMax = ext.hdr_capacity_max;
+        }
+      }
+      size_t cursor = 3 + iso_len;
+      if (cursor < jhgmBox.size()) {
+        uint8_t color_enc_len = jhgmBox[cursor++];
+        cursor += color_enc_len;
+        if (cursor + 4 <= jhgmBox.size()) {
+          uint32_t alt_icc_len = loadBE32(jhgmBox.data() + cursor);
+          cursor += 4 + alt_icc_len;
+          if (cursor < jhgmBox.size()) {
+            const uint8_t* gm_codestream = jhgmBox.data() + cursor;
+            size_t gm_len = jhgmBox.size() - cursor;
+            JxlDecoder* gm_dec = JxlDecoderCreate(nullptr);
+            if (gm_dec) {
+              JxlDecoderSubscribeEvents(gm_dec, JXL_DEC_BASIC_INFO);
+              JxlDecoderSetInput(gm_dec, gm_codestream, gm_len);
+              JxlDecoderCloseInput(gm_dec);
+              for (;;) {
+                JxlDecoderStatus s = JxlDecoderProcessInput(gm_dec);
+                if (s == JXL_DEC_BASIC_INFO) {
+                  JxlBasicInfo gm_info {};
+                  if (JxlDecoderGetBasicInfo(gm_dec, &gm_info) == JXL_DEC_SUCCESS) {
+                    r.gainmapWidth = gm_info.xsize;
+                    r.gainmapHeight = gm_info.ysize;
+                  }
+                  break;
+                }
+                if (s == JXL_DEC_ERROR || s == JXL_DEC_SUCCESS) break;
+              }
+              JxlDecoderDestroy(gm_dec);
+            }
+          }
+        }
+      }
+    }
+  }
+  return r.width > 0 && r.height > 0;
+}
+
+bool decodeJxlToSdr(const std::vector<uint8_t>& data, SdrImage& out,
+                    std::vector<uint8_t>* outJhgm, std::string& err) {
+  JxlDecoder* dec = JxlDecoderCreate(nullptr);
+  if (!dec) { err = "无法创建 JXL 解码器"; return false; }
+  void* runner = JxlThreadParallelRunnerCreate(nullptr, ultraslim_codec_threads > 0 ? ultraslim_codec_threads : 4);
+  if (runner) JxlDecoderSetParallelRunner(dec, JxlThreadParallelRunner, runner);
+
+  uint32_t events = JXL_DEC_BASIC_INFO | JXL_DEC_COLOR_ENCODING | JXL_DEC_FULL_IMAGE | JXL_DEC_BOX | JXL_DEC_BOX_COMPLETE;
+  if (JxlDecoderSubscribeEvents(dec, events) != JXL_DEC_SUCCESS) {
+    JxlDecoderDestroy(dec);
+    if (runner) JxlThreadParallelRunnerDestroy(runner);
+    err = "JXL 事件订阅失败";
+    return false;
+  }
+  JxlDecoderSetDecompressBoxes(dec, JXL_TRUE);
+  JxlDecoderSetInput(dec, data.data(), data.size());
+  JxlDecoderCloseInput(dec);
+
+  bool success = false;
+  JxlBasicInfo info {};
+  std::vector<uint8_t> currBoxData;
+  JxlBoxType currBoxType = {0};
+
+  for (;;) {
+    JxlDecoderStatus status = JxlDecoderProcessInput(dec);
+    if (status == JXL_DEC_ERROR) {
+      err = "JXL 解码错误";
+      break;
+    }
+    if (status == JXL_DEC_SUCCESS) {
+      success = true;
+      break;
+    }
+    if (status == JXL_DEC_BASIC_INFO) {
+      if (JxlDecoderGetBasicInfo(dec, &info) != JXL_DEC_SUCCESS) {
+        err = "获取 JXL 基本信息失败";
+        break;
+      }
+      out.width = info.xsize;
+      out.height = info.ysize;
+    } else if (status == JXL_DEC_COLOR_ENCODING) {
+      size_t icc_size = 0;
+      if (JxlDecoderGetICCProfileSize(dec, JXL_COLOR_PROFILE_TARGET_DATA, &icc_size) == JXL_DEC_SUCCESS &&
+          icc_size > 0 && icc_size < 16 * 1024 * 1024) {
+        out.icc.resize(icc_size);
+        if (JxlDecoderGetColorAsICCProfile(dec, JXL_COLOR_PROFILE_TARGET_DATA, out.icc.data(), out.icc.size()) != JXL_DEC_SUCCESS) {
+          out.icc.clear();
+        }
+      }
+    } else if (status == JXL_DEC_NEED_IMAGE_OUT_BUFFER) {
+      size_t buf_size = 0;
+      JxlPixelFormat pf = {4, JXL_TYPE_UINT8, JXL_LITTLE_ENDIAN, 0};
+      if (JxlDecoderImageOutBufferSize(dec, &pf, &buf_size) != JXL_DEC_SUCCESS) {
+        err = "获取 JXL 输出大小失败";
+        break;
+      }
+      out.rgba.resize(buf_size);
+      if (JxlDecoderSetImageOutBuffer(dec, &pf, out.rgba.data(), out.rgba.size()) != JXL_DEC_SUCCESS) {
+        err = "设置 JXL 输出缓冲失败";
+        break;
+      }
+    } else if (status == JXL_DEC_BOX) {
+      if (JxlDecoderGetBoxType(dec, currBoxType, JXL_TRUE) == JXL_DEC_SUCCESS) {
+        if (memcmp(currBoxType, "Exif", 4) == 0 || (outJhgm && memcmp(currBoxType, "jhgm", 4) == 0)) {
+          uint64_t raw_size = 0;
+          if (JxlDecoderGetBoxSizeContents(dec, &raw_size) == JXL_DEC_SUCCESS && raw_size > 0 && raw_size < 100 * 1024 * 1024) {
+            currBoxData.resize(static_cast<size_t>(raw_size));
+          } else {
+            currBoxData.resize(64 * 1024);
+          }
+          JxlDecoderSetBoxBuffer(dec, currBoxData.data(), currBoxData.size());
+        }
+      }
+    } else if (status == JXL_DEC_BOX_NEED_MORE_OUTPUT) {
+      const size_t remaining = JxlDecoderReleaseBoxBuffer(dec);
+      const size_t used = currBoxData.size() - remaining;
+      currBoxData.resize(currBoxData.size() * 2);
+      JxlDecoderSetBoxBuffer(dec, currBoxData.data() + used, currBoxData.size() - used);
+    } else if (status == JXL_DEC_BOX_COMPLETE) {
+      const size_t remaining = JxlDecoderReleaseBoxBuffer(dec);
+      currBoxData.resize(currBoxData.size() - remaining);
+      if (memcmp(currBoxType, "Exif", 4) == 0) {
+        if (currBoxData.size() > 4) {
+          uint32_t offset = loadBE32(currBoxData.data());
+          if (4 + offset < currBoxData.size()) {
+            out.exif = {'E', 'x', 'i', 'f', 0, 0};
+            out.exif.insert(out.exif.end(), currBoxData.begin() + 4 + offset, currBoxData.end());
+          }
+        }
+      } else if (outJhgm && memcmp(currBoxType, "jhgm", 4) == 0) {
+        *outJhgm = std::move(currBoxData);
+      }
+      currBoxData.clear();
+    }
+  }
+
+  JxlDecoderDestroy(dec);
+  if (runner) JxlThreadParallelRunnerDestroy(runner);
+  return success && !out.rgba.empty();
+}
+
 heif_error fdWriteCallback(heif_context* /*ctx*/, const void* data, size_t size, void* userdata) {
   const int fd = *static_cast<int*>(userdata);
   if (writeAll(fd, data, size)) {
@@ -485,6 +809,24 @@ bool prepareJpegProfile(SdrImage& img) {
   img.icc.assign(data+ultrahdr::kICCIdentifierSize,data+profile->getLength());return true;
 }
 
+uhdr_color_gamut_t getGamutFromIcc(const uint8_t* data, size_t size) {
+  if (!data || size == 0) return UHDR_CG_UNSPECIFIED;
+  constexpr size_t kPrefixSize = ultrahdr::kICCIdentifierSize;
+  if (size > kPrefixSize && memcmp(data, ultrahdr::kICCIdentifier, sizeof(ultrahdr::kICCIdentifier)) == 0) {
+    return ultrahdr::IccHelper::readIccColorGamut(const_cast<uint8_t*>(data), size);
+  }
+  std::vector<uint8_t> withPrefix(kPrefixSize + size);
+  memcpy(withPrefix.data(), ultrahdr::kICCIdentifier, sizeof(ultrahdr::kICCIdentifier));
+  withPrefix[sizeof(ultrahdr::kICCIdentifier)] = 1;
+  withPrefix[sizeof(ultrahdr::kICCIdentifier) + 1] = 1;
+  memcpy(withPrefix.data() + kPrefixSize, data, size);
+  return ultrahdr::IccHelper::readIccColorGamut(withPrefix.data(), withPrefix.size());
+}
+
+uhdr_color_gamut_t getGamutFromIcc(const std::vector<uint8_t>& icc) {
+  return getGamutFromIcc(icc.data(), icc.size());
+}
+
 std::vector<uint8_t> encodeJpegToMem(const SdrImage& img, int quality, bool keepExif = false) {
   std::vector<uint8_t> out;
   JpegErrMgr jerr {};
@@ -586,7 +928,7 @@ void yuvPixel709(const uint8_t* p, uint8_t& y, uint8_t& u, uint8_t& v) {
   const int r = p[0], g = p[1], b = p[2];
   y = static_cast<uint8_t>(((47 * r + 157 * g + 16 * b + 128) >> 8) + 16);
   u = static_cast<uint8_t>(((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128);
-  v = static_cast<uint8_t>(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+  v = static_cast<uint8_t>(((112 * r - 102 * g - 10 * b + 128) >> 8) + 128);
 }
 
 #if defined(__ARM_NEON)
@@ -615,18 +957,17 @@ void storeY8_709(uint8_t* dst, const uint8_t* rgba) {
 }
 #endif
 
-// Converts RGBA8888 to limited-range YUV420. bt709 selects the coefficient set;
-// it must agree with the matrix_coefficients tag written for the coded image.
-void rgbaToYuv420(const SdrImage& img, std::vector<uint8_t>& yPlane, std::vector<uint8_t>& uPlane,
-                  std::vector<uint8_t>& vPlane, bool bt709) {
+// Converts RGBA8888 to limited-range YUV420 directly into destination plane pointers with strides.
+void rgbaToYuv420Direct(const SdrImage& img,
+                        uint8_t* yDst, int yStride,
+                        uint8_t* uDst, int uStride,
+                        uint8_t* vDst, int vStride,
+                        bool bt709) {
   const int w = img.width, h = img.height;
   const int cw = (w + 1) / 2, ch = (h + 1) / 2;
-  yPlane.resize(static_cast<size_t>(w) * h);
-  uPlane.resize(static_cast<size_t>(cw) * ch);
-  vPlane.resize(static_cast<size_t>(cw) * ch);
   const uint8_t* rgba = img.rgba.data();
   for (int y = 0; y < h; y++) {
-    uint8_t* yRow = yPlane.data() + static_cast<size_t>(y) * w;
+    uint8_t* yRow = yDst + static_cast<size_t>(y) * yStride;
     const uint8_t* src = rgba + static_cast<size_t>(y) * w * 4;
     int x = 0;
 #if defined(__ARM_NEON)
@@ -644,8 +985,8 @@ void rgbaToYuv420(const SdrImage& img, std::vector<uint8_t>& yPlane, std::vector
     if ((y & 1) != 0 && !uncoveredLastRow) continue;
     const int y2 = std::min(y + 1, h - 1);
     const uint8_t* src2 = rgba + static_cast<size_t>(y2) * w * 4;
-    uint8_t* uRow = uPlane.data() + static_cast<size_t>(y / 2) * cw;
-    uint8_t* vRow = vPlane.data() + static_cast<size_t>(y / 2) * cw;
+    uint8_t* uRow = uDst + static_cast<size_t>(y / 2) * uStride;
+    uint8_t* vRow = vDst + static_cast<size_t>(y / 2) * vStride;
     for (int cx = 0; cx < cw; cx++) {
       const int x0 = std::min(cx * 2, w - 1);
       const int x1 = std::min(x0 + 1, w - 1);
@@ -659,11 +1000,27 @@ void rgbaToYuv420(const SdrImage& img, std::vector<uint8_t>& yPlane, std::vector
       r /= 4;
       g /= 4;
       b /= 4;
-      if (bt709) uRow[cx] = static_cast<uint8_t>(((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128);
-      else uRow[cx] = static_cast<uint8_t>(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
-      vRow[cx] = static_cast<uint8_t>(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+      if (bt709) {
+        uRow[cx] = static_cast<uint8_t>(((-26 * r - 87 * g + 112 * b + 128) >> 8) + 128);
+        vRow[cx] = static_cast<uint8_t>(((112 * r - 102 * g - 10 * b + 128) >> 8) + 128);
+      } else {
+        uRow[cx] = static_cast<uint8_t>(((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128);
+        vRow[cx] = static_cast<uint8_t>(((112 * r - 94 * g - 18 * b + 128) >> 8) + 128);
+      }
     }
   }
+}
+
+// Converts RGBA8888 to limited-range YUV420. bt709 selects the coefficient set;
+// it must agree with the matrix_coefficients tag written for the coded image.
+void rgbaToYuv420(const SdrImage& img, std::vector<uint8_t>& yPlane, std::vector<uint8_t>& uPlane,
+                  std::vector<uint8_t>& vPlane, bool bt709) {
+  const int w = img.width, h = img.height;
+  const int cw = (w + 1) / 2, ch = (h + 1) / 2;
+  yPlane.resize(static_cast<size_t>(w) * h);
+  uPlane.resize(static_cast<size_t>(cw) * ch);
+  vPlane.resize(static_cast<size_t>(cw) * ch);
+  rgbaToYuv420Direct(img, yPlane.data(), w, uPlane.data(), cw, vPlane.data(), cw, bt709);
 }
 
 void copyPlane(heif_image* image, heif_channel channel, const uint8_t* src, int width, int rows) {
@@ -704,6 +1061,7 @@ struct GainMapPayload {
   SdrImage image;
   std::vector<uint8_t> iso;
   int codec = 1;
+  int quality = 85;
   bool multiChannel = true;
   // Not owned. Null selects a BT.2100 HLG profile for the derived rendition.
   const heif_color_profile_nclx* derivedNclx = nullptr;
@@ -728,7 +1086,16 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
   std::unique_ptr<heif_encoder, decltype(&heif_encoder_release)> mapOwner(mapEncoder, heif_encoder_release);
   configureEncoder(mapEncoder, gm.codec, 1, ultraslim_codec_threads);
   if (avif) heif_encoder_set_parameter_integer(mapEncoder, "speed", 6);
-  e = heif_encoder_set_lossless(mapEncoder, 1);
+  const size_t pixelCount = static_cast<size_t>(gm.image.width) * gm.image.height;
+  if (pixelCount <= 500000) {
+    e = heif_encoder_set_lossless(mapEncoder, 1);
+  } else {
+    // Large gain maps (e.g. 6.5MP camera photos) cannot use unbounded lossless: lossless AV1
+    // produces >7MB frames that exceed Android MediaCodec/dav1d's 4.94MB buffer limits
+    // and crash hardware decoders, dropping the gain map completely. High-quality lossy
+    // produces ~1.5-2MB payloads with <1% linear luminance difference.
+    e = heif_encoder_set_lossy_quality(mapEncoder, gm.quality > 0 ? gm.quality : 85);
+  }
   if (e.code != heif_error_Ok) { err = e.message; return 24; }
   heif_encoder_set_parameter(mapEncoder, "chroma", "444");
   heif_image* image = nullptr;
@@ -737,23 +1104,44 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
       gm.multiChannel ? heif_chroma_444 : heif_chroma_monochrome, &image);
   if (e.code != heif_error_Ok) { err = e.message; return 24; }
   std::unique_ptr<heif_image, decltype(&heif_image_release)> imageOwner(image, heif_image_release);
-  // Identity GBR avoids a lossy RGB<->YUV conversion and chroma subsampling.
   const heif_channel planes[] = {heif_channel_Y, heif_channel_Cb, heif_channel_Cr};
-  const int components[] = {1, 2, 0};
-  for (int c = 0; c < (gm.multiChannel ? 3 : 1); ++c) {
-    e = heif_image_add_plane(image, planes[c], gm.image.width, gm.image.height, 8);
+  if (gm.multiChannel) {
+    for (int c = 0; c < 3; ++c) {
+      e = heif_image_add_plane(image, planes[c], gm.image.width, gm.image.height, 8);
+      if (e.code != heif_error_Ok) { err = e.message; return 24; }
+    }
+    int yStride = 0, uStride = 0, vStride = 0;
+    uint8_t* yDst = heif_image_get_plane(image, heif_channel_Y, &yStride);
+    uint8_t* uDst = heif_image_get_plane(image, heif_channel_Cb, &uStride);
+    uint8_t* vDst = heif_image_get_plane(image, heif_channel_Cr, &vStride);
+    for (int y = 0; y < gm.image.height; ++y) {
+      for (int x = 0; x < gm.image.width; ++x) {
+        const size_t idx = (size_t(y) * gm.image.width + x) * 4;
+        const int r = gm.image.rgba[idx];
+        const int g = gm.image.rgba[idx + 1];
+        const int b = gm.image.rgba[idx + 2];
+        yDst[y * yStride + x] = static_cast<uint8_t>((77 * r + 150 * g + 29 * b + 128) >> 8);
+        uDst[y * uStride + x] = static_cast<uint8_t>(((-43 * r - 85 * g + 128 * b + 128) >> 8) + 128);
+        vDst[y * vStride + x] = static_cast<uint8_t>(((128 * r - 107 * g - 21 * b + 128) >> 8) + 128);
+      }
+    }
+  } else {
+    e = heif_image_add_plane(image, heif_channel_Y, gm.image.width, gm.image.height, 8);
     if (e.code != heif_error_Ok) { err = e.message; return 24; }
     int stride = 0;
-    uint8_t* dst = heif_image_get_plane(image, planes[c], &stride);
-    for (int y = 0; y < gm.image.height; ++y)
-      for (int x = 0; x < gm.image.width; ++x)
-        dst[y * stride + x] = gm.image.rgba[(size_t(y) * gm.image.width + x) * 4 + (gm.multiChannel ? components[c] : 0)];
+    uint8_t* dst = heif_image_get_plane(image, heif_channel_Y, &stride);
+    for (int y = 0; y < gm.image.height; ++y) {
+      for (int x = 0; x < gm.image.width; ++x) {
+        const size_t idx = (size_t(y) * gm.image.width + x) * 4;
+        dst[y * stride + x] = gm.image.rgba[idx];
+      }
+    }
   }
   heif_color_profile_nclx nclx {};
   nclx.version = 1;
   nclx.color_primaries = heif_color_primaries_unspecified;
   nclx.transfer_characteristics = heif_transfer_characteristic_unspecified;
-  nclx.matrix_coefficients = gm.multiChannel ? heif_matrix_coefficients_RGB_GBR : heif_matrix_coefficients_ITU_R_BT_601_6;
+  nclx.matrix_coefficients = heif_matrix_coefficients_ITU_R_BT_601_6;
   nclx.full_range_flag = 1;
   heif_image_set_nclx_color_profile(image, &nclx);
 
@@ -770,9 +1158,16 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
       derived = owned;
     }
   }
+  heif_encoding_options* gmOptions = heif_encoding_options_alloc();
+  if (gmOptions != nullptr) {
+    gmOptions->output_nclx_profile = &nclx;
+  }
   heif_image_handle* gmHandle = nullptr;
-  e = heif_context_encode_gain_map_image(ctx, base, mapEncoder, image, nullptr, gm.iso.data(),
+  e = heif_context_encode_gain_map_image(ctx, base, mapEncoder, image, gmOptions, gm.iso.data(),
                                         static_cast<int>(gm.iso.size()), derived, &gmHandle);
+  if (gmOptions != nullptr) {
+    heif_encoding_options_free(gmOptions);
+  }
   if (gmHandle) heif_image_handle_release(gmHandle);
   if (owned) heif_nclx_color_profile_free(owned);
   if (e.code != heif_error_Ok) {
@@ -786,13 +1181,21 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
 // gainmap, when set, is attached without rebuilding it from an HDR decode.
 int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool keepExif, int outFd,
                          int speedLevel, int threads, const GainMapPayload* gainmap, std::string& err) {
-  // SDR 内容的行业惯例是 709 编码矩阵（解码器对 709/P3 内容统一按 709 还原）；
-  // 只有源明确标了 601 才沿用 601，标签与系数必须一致，否则饱和色偏移。
-  const bool src601 = img.hasProfile &&
-      img.profile.matrix_coefficients == heif_matrix_coefficients_ITU_R_BT_601_6;
-  std::vector<uint8_t> yPlane, uPlane, vPlane;
-  rgbaToYuv420(img, yPlane, uPlane, vPlane, /*bt709=*/!src601);
+  uhdr_color_gamut_t gamut = UHDR_CG_UNSPECIFIED;
+  if (img.hasProfile) {
+    if (img.profile.color_primaries == heif_color_primaries_SMPTE_EG_432_1) gamut = UHDR_CG_DISPLAY_P3;
+    else if (img.profile.color_primaries == heif_color_primaries_ITU_R_BT_2020_2_and_2100_0) gamut = UHDR_CG_BT_2100;
+    else if (img.profile.color_primaries == heif_color_primaries_ITU_R_BT_709_5) gamut = UHDR_CG_BT_709;
+  }
+  if (gamut == UHDR_CG_UNSPECIFIED && !img.icc.empty()) {
+    gamut = getGamutFromIcc(img.icc);
+  }
 
+  // Display P3 in HEIF/AVIF industry standard convention uses BT.601 matrix (as does libultrahdr:
+  // sdr_cg_matrix = sdr_intent->cg == UHDR_CG_DISPLAY_P3 ? UHDR_CG_BT_601 : sdr_intent->cg).
+  // Rec.709 uses BT.709 matrix.
+  const bool use601 = (gamut == UHDR_CG_DISPLAY_P3) ||
+      (img.hasProfile && img.profile.matrix_coefficients == heif_matrix_coefficients_ITU_R_BT_601_6);
   heif_context* ctx = heif_context_alloc();
   heif_encoder* encoder = nullptr;
   const heif_encoder_descriptor* descriptor = nullptr;
@@ -823,29 +1226,35 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
      heif_image_add_plane(himg, heif_channel_Cr, cw, ch, 8).code!=heif_error_Ok) {
     err="无法分配编码内存";heif_image_release(himg);heif_encoder_release(encoder);heif_context_free(ctx);return 31;
   }
-  struct PlaneDef {
-    heif_channel channel;
-    const std::vector<uint8_t>& data;
-    int width;
-  };
-  for (const PlaneDef& def : std::vector<PlaneDef>{
-           {heif_channel_Y, yPlane, img.width},
-           {heif_channel_Cb, uPlane, cw},
-           {heif_channel_Cr, vPlane, cw},
-       }) {
-    int dstStride = 0;
-    uint8_t* dst = heif_image_get_plane(himg, def.channel, &dstStride);
-    const int rows = def.channel == heif_channel_Y ? img.height : ch;
-    for (int row = 0; row < rows; row++) {
-      memcpy(dst + static_cast<size_t>(dstStride) * row,
-             def.data.data() + static_cast<size_t>(def.width) * row, def.width);
-    }
+  int yStride = 0, uStride = 0, vStride = 0;
+  uint8_t* yDst = heif_image_get_plane(himg, heif_channel_Y, &yStride);
+  uint8_t* uDst = heif_image_get_plane(himg, heif_channel_Cb, &uStride);
+  uint8_t* vDst = heif_image_get_plane(himg, heif_channel_Cr, &vStride);
+  if (yDst == nullptr || uDst == nullptr || vDst == nullptr) {
+    err="获取图像平面失败";heif_image_release(himg);heif_encoder_release(encoder);heif_context_free(ctx);return 31;
   }
+  rgbaToYuv420Direct(img, yDst, yStride, uDst, uStride, vDst, vStride, /*bt709=*/!use601);
+  heif_color_primaries primaries = heif_color_primaries_ITU_R_BT_709_5;
+  if (gamut == UHDR_CG_DISPLAY_P3) {
+    primaries = heif_color_primaries_SMPTE_EG_432_1;
+  } else if (gamut == UHDR_CG_BT_2100) {
+    primaries = heif_color_primaries_ITU_R_BT_2020_2_and_2100_0;
+  } else if (gamut == UHDR_CG_BT_709) {
+    primaries = heif_color_primaries_ITU_R_BT_709_5;
+  } else if (img.hasProfile && img.profile.color_primaries != heif_color_primaries_unspecified) {
+    primaries = img.profile.color_primaries;
+  }
+
+  heif_transfer_characteristics transfer = heif_transfer_characteristic_IEC_61966_2_1;
+  if (img.hasProfile && img.profile.transfer_characteristics != heif_transfer_characteristic_unspecified) {
+    transfer = img.profile.transfer_characteristics;
+  }
+
   heif_color_profile_nclx nclx {};
   nclx.version = 1;
-  nclx.color_primaries = img.hasProfile ? img.profile.color_primaries : !img.icc.empty() ? heif_color_primaries_unspecified : heif_color_primaries_ITU_R_BT_709_5;
-  nclx.transfer_characteristics = img.hasProfile ? img.profile.transfer_characteristics : !img.icc.empty() ? heif_transfer_characteristic_unspecified : heif_transfer_characteristic_IEC_61966_2_1;
-  nclx.matrix_coefficients = src601 ? heif_matrix_coefficients_ITU_R_BT_601_6 : heif_matrix_coefficients_ITU_R_BT_709_5;
+  nclx.color_primaries = primaries;
+  nclx.transfer_characteristics = transfer;
+  nclx.matrix_coefficients = use601 ? heif_matrix_coefficients_ITU_R_BT_601_6 : heif_matrix_coefficients_ITU_R_BT_709_5;
   nclx.full_range_flag = 0;
   heif_image_set_nclx_color_profile(himg, &nclx);
 
@@ -896,6 +1305,206 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
   heif_image_release(himg);
   heif_encoder_release(encoder);
   heif_context_free(ctx);
+  return 0;
+}
+
+int encodeJxl(const SdrImage& base, int quality, bool keepExif, int outFd,
+              int speedLevel, int threads, const GainMapPayload* gainmap, std::string& err) {
+  const int th = threads > 0 ? threads : resolveCodecThreads(threads);
+
+  std::vector<uint8_t> jhgm;
+  if (gainmap != nullptr) {
+    if (gainmap->iso.empty() || gainmap->image.width <= 0 || gainmap->image.height <= 0) {
+      err = "gain map 数据不完整";
+      return 24;
+    }
+
+    JxlEncoder* gm_enc = JxlEncoderCreate(nullptr);
+    if (!gm_enc) { err = "无法创建 JXL Gain Map 编码器"; return 24; }
+    void* gm_runner = JxlThreadParallelRunnerCreate(nullptr, th);
+    if (gm_runner) JxlEncoderSetParallelRunner(gm_enc, JxlThreadParallelRunner, gm_runner);
+    JxlEncoderUseContainer(gm_enc, JXL_FALSE);
+
+    JxlBasicInfo gm_info;
+    JxlEncoderInitBasicInfo(&gm_info);
+    gm_info.xsize = gainmap->image.width;
+    gm_info.ysize = gainmap->image.height;
+    gm_info.bits_per_sample = 8;
+    gm_info.exponent_bits_per_sample = 0;
+    gm_info.num_color_channels = gainmap->multiChannel ? 3 : 1;
+    gm_info.alpha_bits = 0;
+    if (JxlEncoderSetBasicInfo(gm_enc, &gm_info) != JXL_ENC_SUCCESS) {
+      err = "设置 Gain Map 基本信息失败";
+      JxlEncoderDestroy(gm_enc);
+      if (gm_runner) JxlThreadParallelRunnerDestroy(gm_runner);
+      return 24;
+    }
+
+    JxlColorEncoding gm_color;
+    JxlColorEncodingSetToSRGB(&gm_color, gainmap->multiChannel ? JXL_FALSE : JXL_TRUE);
+    JxlEncoderSetColorEncoding(gm_enc, &gm_color);
+
+    JxlEncoderFrameSettings* gm_settings = JxlEncoderFrameSettingsCreate(gm_enc, nullptr);
+    int gm_effort = (speedLevel == 2) ? 3 : ((speedLevel == 0) ? 7 : 5);
+    JxlEncoderFrameSettingsSetOption(gm_settings, JXL_ENC_FRAME_SETTING_EFFORT, gm_effort);
+
+    const size_t pixelCount = static_cast<size_t>(gainmap->image.width) * gainmap->image.height;
+    if (pixelCount <= 500000) {
+      JxlEncoderSetFrameLossless(gm_settings, JXL_TRUE);
+    } else {
+      float d = JxlEncoderDistanceFromQuality(gainmap->quality > 0 ? gainmap->quality : 85.0f);
+      JxlEncoderSetFrameDistance(gm_settings, d);
+    }
+
+    if (gainmap->multiChannel) {
+      std::vector<uint8_t> gm_rgb(pixelCount * 3);
+      rgbaToRgbFast(gainmap->image.rgba.data(), gm_rgb.data(), pixelCount);
+      JxlPixelFormat pf = {3, JXL_TYPE_UINT8, JXL_LITTLE_ENDIAN, 0};
+      if (JxlEncoderAddImageFrame(gm_settings, &pf, gm_rgb.data(), gm_rgb.size()) != JXL_ENC_SUCCESS) {
+        err = "添加 Gain Map 帧失败";
+        JxlEncoderDestroy(gm_enc);
+        if (gm_runner) JxlThreadParallelRunnerDestroy(gm_runner);
+        return 24;
+      }
+    } else {
+      std::vector<uint8_t> gm_gray(pixelCount);
+      rgbaToGrayFast(gainmap->image.rgba.data(), gm_gray.data(), pixelCount);
+      JxlPixelFormat pf = {1, JXL_TYPE_UINT8, JXL_LITTLE_ENDIAN, 0};
+      if (JxlEncoderAddImageFrame(gm_settings, &pf, gm_gray.data(), gm_gray.size()) != JXL_ENC_SUCCESS) {
+        err = "添加 Gain Map 帧失败";
+        JxlEncoderDestroy(gm_enc);
+        if (gm_runner) JxlThreadParallelRunnerDestroy(gm_runner);
+        return 24;
+      }
+    }
+    JxlEncoderCloseInput(gm_enc);
+
+    std::vector<uint8_t> gm_codestream;
+    std::vector<uint8_t> chunk(64 * 1024);
+    while (true) {
+      uint8_t* next_out = chunk.data();
+      size_t avail_out = chunk.size();
+      JxlEncoderStatus s = JxlEncoderProcessOutput(gm_enc, &next_out, &avail_out);
+      if (s == JXL_ENC_ERROR) {
+        err = "编码 Gain Map codestream 失败";
+        JxlEncoderDestroy(gm_enc);
+        if (gm_runner) JxlThreadParallelRunnerDestroy(gm_runner);
+        return 24;
+      }
+      gm_codestream.insert(gm_codestream.end(), chunk.data(), next_out);
+      if (s == JXL_ENC_SUCCESS) break;
+    }
+    JxlEncoderDestroy(gm_enc);
+    if (gm_runner) JxlThreadParallelRunnerDestroy(gm_runner);
+
+    size_t jhgm_size = 1 + 2 + gainmap->iso.size() + 1 + 4 + gm_codestream.size();
+    jhgm.resize(jhgm_size);
+    jhgm[0] = 0; // version 0
+    storeBE16(static_cast<uint16_t>(gainmap->iso.size()), jhgm.data() + 1);
+    memcpy(jhgm.data() + 3, gainmap->iso.data(), gainmap->iso.size());
+    size_t cursor = 3 + gainmap->iso.size();
+    jhgm[cursor++] = 0; // no extra color encoding
+    storeBE32(0, jhgm.data() + cursor); // no alt ICC
+    cursor += 4;
+    memcpy(jhgm.data() + cursor, gm_codestream.data(), gm_codestream.size());
+  }
+
+  // Primary image
+  JxlEncoder* enc = JxlEncoderCreate(nullptr);
+  if (!enc) { err = "无法创建 JXL 编码器"; return 20; }
+  void* runner = JxlThreadParallelRunnerCreate(nullptr, th);
+  if (runner) JxlEncoderSetParallelRunner(enc, JxlThreadParallelRunner, runner);
+
+  const bool hasBoxes = (gainmap != nullptr) || (keepExif && !base.exif.empty());
+  if (hasBoxes) {
+    JxlEncoderUseContainer(enc, JXL_TRUE);
+    JxlEncoderUseBoxes(enc);
+  }
+
+  JxlBasicInfo basic_info;
+  JxlEncoderInitBasicInfo(&basic_info);
+  basic_info.xsize = base.width;
+  basic_info.ysize = base.height;
+  basic_info.bits_per_sample = 8;
+  basic_info.exponent_bits_per_sample = 0;
+  basic_info.num_color_channels = 3;
+  basic_info.alpha_bits = 0;
+  if (JxlEncoderSetBasicInfo(enc, &basic_info) != JXL_ENC_SUCCESS) {
+    err = "设置主图基本信息失败";
+    JxlEncoderDestroy(enc);
+    if (runner) JxlThreadParallelRunnerDestroy(runner);
+    return 21;
+  }
+
+  if (!base.icc.empty()) {
+    JxlEncoderSetICCProfile(enc, base.icc.data(), base.icc.size());
+  } else {
+    JxlColorEncoding color_encoding;
+    JxlColorEncodingSetToSRGB(&color_encoding, JXL_FALSE);
+    if (base.hasProfile && base.profile.color_primaries == heif_color_primaries_SMPTE_EG_432_1) {
+      color_encoding.primaries = JXL_PRIMARIES_P3;
+    }
+    JxlEncoderSetColorEncoding(enc, &color_encoding);
+  }
+
+  if (keepExif && !base.exif.empty()) {
+    size_t tiffSize = 0;
+    const uint8_t* tiffData = exifTiff(base.exif, tiffSize);
+    if (tiffSize > 0) {
+      std::vector<uint8_t> exifBox(4 + tiffSize, 0);
+      memcpy(exifBox.data() + 4, tiffData, tiffSize);
+      JxlEncoderAddBox(enc, "Exif", exifBox.data(), exifBox.size(), JXL_FALSE);
+    }
+  }
+
+  if (gainmap != nullptr && !jhgm.empty()) {
+    JxlEncoderAddBox(enc, "jhgm", jhgm.data(), jhgm.size(), JXL_FALSE);
+  }
+
+  if (hasBoxes) JxlEncoderCloseBoxes(enc);
+
+  JxlEncoderFrameSettings* settings = JxlEncoderFrameSettingsCreate(enc, nullptr);
+  int effort = (speedLevel == 2) ? 3 : ((speedLevel == 0) ? 7 : 5);
+  JxlEncoderFrameSettingsSetOption(settings, JXL_ENC_FRAME_SETTING_EFFORT, effort);
+  float distance = JxlEncoderDistanceFromQuality(static_cast<float>(quality));
+  JxlEncoderSetFrameDistance(settings, distance);
+
+  const size_t totalPixels = static_cast<size_t>(base.width) * base.height;
+  std::vector<uint8_t> rgb(totalPixels * 3);
+  rgbaToRgbFast(base.rgba.data(), rgb.data(), totalPixels);
+  JxlPixelFormat pf = {3, JXL_TYPE_UINT8, JXL_LITTLE_ENDIAN, 0};
+  if (JxlEncoderAddImageFrame(settings, &pf, rgb.data(), rgb.size()) != JXL_ENC_SUCCESS) {
+    err = "添加主图帧失败";
+    JxlEncoderDestroy(enc);
+    if (runner) JxlThreadParallelRunnerDestroy(runner);
+    return 21;
+  }
+  JxlEncoderCloseInput(enc);
+
+  std::vector<uint8_t> chunk(64 * 1024);
+  while (true) {
+    uint8_t* next_out = chunk.data();
+    size_t avail_out = chunk.size();
+    JxlEncoderStatus s = JxlEncoderProcessOutput(enc, &next_out, &avail_out);
+    if (s == JXL_ENC_ERROR) {
+      err = "JXL 编码失败";
+      JxlEncoderDestroy(enc);
+      if (runner) JxlThreadParallelRunnerDestroy(runner);
+      return 20;
+    }
+    size_t bytes_to_write = chunk.size() - avail_out;
+    if (bytes_to_write > 0) {
+      if (!writeAll(outFd, chunk.data(), bytes_to_write)) {
+        err = "写入输出文件失败";
+        JxlEncoderDestroy(enc);
+        if (runner) JxlThreadParallelRunnerDestroy(runner);
+        return 30;
+      }
+    }
+    if (s == JXL_ENC_SUCCESS) break;
+  }
+  JxlEncoderDestroy(enc);
+  if (runner) JxlThreadParallelRunnerDestroy(runner);
   return 0;
 }
 
@@ -1002,12 +1611,12 @@ int muxJpegUltraHdr(const std::vector<uint8_t>& baseJpeg, const std::vector<uint
 // 0 = preserved and wrote output; -1 = unsupported. Never silently rebuild the gain map.
 int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_private_t* dec,
                     const TranscodeOptions& opt, int outFd, TranscodeResult& r) {
-  uhdr_gainmap_metadata_t* meta = uhdr_dec_get_gainmap_metadata(dec);
-  const int srcW = uhdr_dec_get_image_width(dec);
-  const int srcH = uhdr_dec_get_image_height(dec);
-  const int gmW = uhdr_dec_get_gainmap_width(dec);
-  const int gmH = uhdr_dec_get_gainmap_height(dec);
-  if (meta == nullptr || srcW < 1 || srcH < 1 || gmW < 1 || gmH < 1) {r.error="原始增益图参数不完整";return -1;}
+  uhdr_gainmap_metadata_t* meta = dec ? uhdr_dec_get_gainmap_metadata(dec) : nullptr;
+  const int srcW = dec ? uhdr_dec_get_image_width(dec) : r.width;
+  const int srcH = dec ? uhdr_dec_get_image_height(dec) : r.height;
+  const int gmW = dec ? uhdr_dec_get_gainmap_width(dec) : r.gainmapWidth;
+  const int gmH = dec ? uhdr_dec_get_gainmap_height(dec) : r.gainmapHeight;
+  if (container != 3 && (meta == nullptr || srcW < 1 || srcH < 1 || gmW < 1 || gmH < 1)) {r.error="原始增益图参数不完整";return -1;}
 
   SdrImage base, gm;
   bool multiChannel = false;
@@ -1041,15 +1650,62 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
     auto baseIcc = copyBlock(uhdr_dec_get_icc(dec));
     void* iccData = meta->use_base_cg ? static_cast<void*>(baseIcc.data()) : mapParser.getICCPtr();
     size_t iccSize = meta->use_base_cg ? baseIcc.size() : mapParser.getICCSize();
-    auto gamut = iccSize == 0 && meta->use_base_cg ? UHDR_CG_BT_709 : ultrahdr::IccHelper::readIccColorGamut(iccData, iccSize);
+    auto gamut = iccSize == 0 && meta->use_base_cg ? UHDR_CG_BT_709 : getGamutFromIcc(static_cast<const uint8_t*>(iccData), iccSize);
     if (gamut == UHDR_CG_UNSPECIFIED) { r.error = "无法原样保留此 HDR 色彩空间，请保留原图"; return -1; }
     derived = heif_nclx_color_profile_alloc();
     if (!derived) return -1;
     heif_nclx_color_profile_set_color_primaries(derived, gamut == UHDR_CG_DISPLAY_P3 ? heif_color_primaries_SMPTE_EG_432_1 :
         gamut == UHDR_CG_BT_2100 ? heif_color_primaries_ITU_R_BT_2020_2_and_2100_0 : heif_color_primaries_ITU_R_BT_709_5);
     heif_nclx_color_profile_set_transfer_characteristics(derived, heif_transfer_characteristic_ITU_R_BT_2100_0_HLG);
-    heif_nclx_color_profile_set_matrix_coefficients(derived, gamut == UHDR_CG_BT_2100 ? heif_matrix_coefficients_ITU_R_BT_2020_2_non_constant_luminance : heif_matrix_coefficients_ITU_R_BT_709_5);
+    heif_nclx_color_profile_set_matrix_coefficients(
+        derived,
+        gamut == UHDR_CG_DISPLAY_P3 ? heif_matrix_coefficients_chromaticity_derived_non_constant_luminance :
+        gamut == UHDR_CG_BT_2100 ? heif_matrix_coefficients_ITU_R_BT_2020_2_non_constant_luminance :
+        heif_matrix_coefficients_ITU_R_BT_709_5);
     derived->full_range_flag = 1;
+  } else if (container == 3) {
+    std::vector<uint8_t> jhgm;
+    if (!decodeJxlToSdr(data, base, &jhgm, err)) {
+      r.error = "读取原始 JXL 图像失败: " + err;
+      return -1;
+    }
+    if (jhgm.empty() || jhgm.size() < 8 || jhgm[0] != 0) {
+      r.error = "JXL 增益图数据不完整";
+      return -1;
+    }
+    uint16_t iso_len = loadBE16(jhgm.data() + 1);
+    if (3 + iso_len > jhgm.size()) {
+      r.error = "JXL 增益图元数据异常";
+      return -1;
+    }
+    iso.assign(jhgm.begin() + 3, jhgm.begin() + 3 + iso_len);
+    size_t cursor = 3 + iso_len;
+    uint8_t color_enc_len = jhgm[cursor++];
+    cursor += color_enc_len;
+    if (cursor + 4 > jhgm.size()) {
+      r.error = "JXL 增益图 codestream 偏移异常";
+      return -1;
+    }
+    uint32_t alt_icc_len = loadBE32(jhgm.data() + cursor);
+    cursor += 4 + alt_icc_len;
+    if (cursor >= jhgm.size()) {
+      r.error = "JXL 增益图 codestream 为空";
+      return -1;
+    }
+    std::vector<uint8_t> gm_stream(jhgm.begin() + cursor, jhgm.end());
+    if (!decodeJxlToSdr(gm_stream, gm, nullptr, err)) {
+      r.error = "解码 JXL 增益图失败: " + err;
+      return -1;
+    }
+    multiChannel = true;
+    derived = heif_nclx_color_profile_alloc();
+    if (derived) {
+      heif_nclx_color_profile_set_color_primaries(derived, heif_color_primaries_ITU_R_BT_2020_2_and_2100_0);
+      heif_nclx_color_profile_set_transfer_characteristics(derived, heif_transfer_characteristic_ITU_R_BT_2100_0_HLG);
+      heif_nclx_color_profile_set_matrix_coefficients(
+          derived, heif_matrix_coefficients_ITU_R_BT_2020_2_non_constant_luminance);
+      derived->full_range_flag = 1;
+    }
   } else {
     heif_context* ctx = heif_context_alloc();
     heif_error e = heif_context_read_from_memory_without_copy(ctx, data.data(), data.size(), nullptr);
@@ -1098,7 +1754,7 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
       if (derived) heif_nclx_color_profile_free(derived);
       return -1;
     }
-    if (iso.empty()) iso = isoFromMetadata(*meta);
+    if (iso.empty() && meta) iso = isoFromMetadata(*meta);
   }
 
   if (iso.empty() && opt.outCodec != 0) {
@@ -1130,18 +1786,29 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
   if (opt.outCodec == 0) {
     if (originalMapJpeg.empty()) {
       if (derived) heif_nclx_color_profile_free(derived);
-      r.error = "JPEG 无法无损保存此增益图，请选择 HEIC 或 AVIF";
+      r.error = "JPEG 无法无损保存此增益图，请选择 HEIC 或 AVIF 或 JXL";
       return -1;
     }
     if(!prepareJpegProfile(base)) { r.error="无法保留 JPEG 色彩配置";if (derived) heif_nclx_color_profile_free(derived); return -1; }
     const std::vector<uint8_t> baseJpeg = encodeJpegToMem(base, opt.quality, !base.exif.empty());
     const auto& gmJpeg = originalMapJpeg;
     if (!baseJpeg.empty() && !gmJpeg.empty()) rc = muxJpegUltraHdr(baseJpeg, gmJpeg, meta, outFd, base.exif, err);
+  } else if (opt.outCodec == 3) {
+    GainMapPayload payload;
+    payload.image = std::move(gm);
+    payload.iso = std::move(iso);
+    payload.codec = opt.outCodec;
+    payload.quality = std::max(80, std::min(95, opt.gainmapQuality > 0 ? opt.gainmapQuality : 85));
+    payload.multiChannel = multiChannel;
+    payload.derivedNclx = derived;
+    rc = encodeJxl(base, opt.quality, opt.keepExif, outFd, opt.speedLevel,
+                   ultraslim_codec_threads, &payload, err) == 0 ? 0 : -1;
   } else {
     GainMapPayload payload;
     payload.image = std::move(gm);
     payload.iso = std::move(iso);
     payload.codec = opt.outCodec;
+    payload.quality = std::max(80, std::min(95, opt.gainmapQuality > 0 ? opt.gainmapQuality : 85));
     payload.multiChannel = multiChannel;
     payload.derivedNclx = derived;
     rc = encodeSdrWithLibheif(base, opt.outCodec, opt.quality, opt.keepExif, outFd, opt.speedLevel,
@@ -1161,9 +1828,8 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
 
 }  // namespace
 
-ProbeResult probeImage(int fd) {
+ProbeResult probeImageMemory(const std::vector<uint8_t>& data) {
   ProbeResult r;
-  std::vector<uint8_t> data = readAll(fd);
   if (data.empty()) {
     r.errorCode = 1;
     r.error = "无法读取图片数据";
@@ -1173,6 +1839,13 @@ ProbeResult probeImage(int fd) {
   if (r.container < 0) {
     r.errorCode = 2;
     r.error = "不支持的图片格式";
+    return r;
+  }
+  if (r.container == 3) {
+    if (!probeJxl(data, r)) {
+      r.errorCode = 4;
+      r.error = "解析 JXL 图像失败";
+    }
     return r;
   }
   if (probeWithUhdr(data, &r, nullptr)) {
@@ -1194,13 +1867,23 @@ ProbeResult probeImage(int fd) {
   return r;
 }
 
-static TranscodeResult transcodeUnchecked(int inFd, int outFd, const TranscodeOptions& options) {
+ProbeResult probeImage(int fd) {
+  std::vector<uint8_t> data = readAll(fd);
+  if (data.empty()) {
+    ProbeResult r;
+    r.errorCode = 1;
+    r.error = "无法读取图片数据";
+    return r;
+  }
+  return probeImageMemory(data);
+}
+
+static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, int outFd, const TranscodeOptions& options) {
   TranscodeResult r;
   const auto start = std::chrono::steady_clock::now();
   ultraslim_codec_speed_level = options.speedLevel;
   ultraslim_codec_threads = resolveCodecThreads(options.codecThreads);
 
-  std::vector<uint8_t> data = readAll(inFd);
   if (data.empty()) {
     r.errorCode = 1;
     r.error = "无法读取图片数据";
@@ -1214,24 +1897,42 @@ static TranscodeResult transcodeUnchecked(int inFd, int outFd, const TranscodeOp
     return r;
   }
 
-  DecoderPtr dec(uhdr_create_decoder());
-  uhdr_compressed_image_t img {};
-  img.data = data.data();
-  img.data_sz = img.capacity = data.size();
-  img.cg = UHDR_CG_UNSPECIFIED;
-  img.ct = UHDR_CT_UNSPECIFIED;
-  img.range = UHDR_CR_UNSPECIFIED;
-  const bool probed = dec && uhdr_dec_set_image(dec.get(), &img).error_code == UHDR_CODEC_OK &&
-                      uhdr_dec_probe(dec.get()).error_code == UHDR_CODEC_OK;
-  if (probed) {
-    const int gw = uhdr_dec_get_gainmap_width(dec.get());
-    const int gh = uhdr_dec_get_gainmap_height(dec.get());
-    if (gw > 0 && gh > 0) {
+  DecoderPtr dec;
+  if (container == 3) {
+    ProbeResult pr;
+    pr.container = 3;
+    if (!probeJxl(data, pr)) {
+      r.errorCode = 4;
+      r.error = "解析 JXL 图像失败";
+      return r;
+    }
+    r.width = pr.width;
+    r.height = pr.height;
+    if (pr.hasGainMap) {
       r.inputHadGainMap = true;
-      r.width = uhdr_dec_get_image_width(dec.get());
-      r.height = uhdr_dec_get_image_height(dec.get());
-      r.gainmapWidth = gw;
-      r.gainmapHeight = gh;
+      r.gainmapWidth = pr.gainmapWidth;
+      r.gainmapHeight = pr.gainmapHeight;
+    }
+  } else {
+    dec.reset(uhdr_create_decoder());
+    uhdr_compressed_image_t img {};
+    img.data = data.data();
+    img.data_sz = img.capacity = data.size();
+    img.cg = UHDR_CG_UNSPECIFIED;
+    img.ct = UHDR_CT_UNSPECIFIED;
+    img.range = UHDR_CR_UNSPECIFIED;
+    const bool probed = dec && uhdr_dec_set_image(dec.get(), &img).error_code == UHDR_CODEC_OK &&
+                        uhdr_dec_probe(dec.get()).error_code == UHDR_CODEC_OK;
+    if (probed) {
+      const int gw = uhdr_dec_get_gainmap_width(dec.get());
+      const int gh = uhdr_dec_get_gainmap_height(dec.get());
+      if (gw > 0 && gh > 0) {
+        r.inputHadGainMap = true;
+        r.width = uhdr_dec_get_image_width(dec.get());
+        r.height = uhdr_dec_get_image_height(dec.get());
+        r.gainmapWidth = gw;
+        r.gainmapHeight = gh;
+      }
     }
   }
 
@@ -1245,6 +1946,11 @@ static TranscodeResult transcodeUnchecked(int inFd, int outFd, const TranscodeOp
     // it: the map is carried over whenever the output format can hold it, and
     // unsupported cases fail explicitly instead of silently rebuilding.
     const bool canPreserve = options.preserveGainMap;
+    if (!canPreserve && options.outCodec == 3) {
+      r.errorCode = 31;
+      r.error = "JXL 仅支持原样保留 Gain Map";
+      return r;
+    }
     bool preserved = false;
     if (canPreserve) {
       preserved = tryReuseGainMap(data, container, dec.get(), options, outFd, r) == 0;
@@ -1391,7 +2097,9 @@ static TranscodeResult transcodeUnchecked(int inFd, int outFd, const TranscodeOp
         jpegTarget = std::max(2, std::max(srcW, srcH) * options.resizePercent / 100);
       }
     }
-    const bool ok = container == 0 ? decodeJpegSdr(data, sdr, err, jpegTarget) : decodeHeifSdr(data, sdr, err);
+    const bool ok = container == 0 ? decodeJpegSdr(data, sdr, err, jpegTarget)
+                  : container == 3 ? decodeJxlToSdr(data, sdr, nullptr, err)
+                  : decodeHeifSdr(data, sdr, err);
     if (!ok) {
       r.errorCode = 15;
       r.error = err;
@@ -1406,14 +2114,18 @@ static TranscodeResult transcodeUnchecked(int inFd, int outFd, const TranscodeOp
     }
     r.width = sdr.width;
     r.height = sdr.height;
-    if(container==0) orientPixels(sdr,ExifEditor(sdr.exif).orientation());
-    ExifEditor(sdr.exif).normalize(sdr.width,sdr.height,options.keepLocation);
-    r.width=sdr.width;r.height=sdr.height;
+    if(container == 0 || container == 3) orientPixels(sdr, ExifEditor(sdr.exif).orientation());
+    ExifEditor(sdr.exif).normalize(sdr.width, sdr.height, options.keepLocation);
+    r.width = sdr.width;
+    r.height = sdr.height;
     if (!options.keepExif) sdr.exif.clear();
     int encErr;
     if (options.outCodec == 0) {
-      if(!prepareJpegProfile(sdr)) { r.errorCode=29; r.error="此色彩配置无法安全转换为 JPEG，请使用 HEIC/AVIF"; return r; }
+      if(!prepareJpegProfile(sdr)) { r.errorCode=29; r.error="此色彩配置无法安全转换为 JPEG，请使用 HEIC/AVIF/JXL"; return r; }
       encErr = encodeJpegSdr(sdr, options.quality, options.keepExif, outFd, err);
+    } else if (options.outCodec == 3) {
+      encErr = encodeJxl(sdr, options.quality, options.keepExif, outFd,
+                         options.speedLevel, ultraslim_codec_threads, nullptr, err);
     } else {
       encErr = encodeSdrWithLibheif(sdr, options.outCodec, options.quality, options.keepExif, outFd,
                                     options.speedLevel, ultraslim_codec_threads, nullptr, err);
@@ -1441,14 +2153,18 @@ static TranscodeResult transcodeUnchecked(int inFd, int outFd, const TranscodeOp
 
 TranscodeResult transcodeImage(int inFd, int outFd, const TranscodeOptions& options) {
   try {
-    auto p = probeImage(inFd);
+    std::vector<uint8_t> data = readAll(inFd);
+    if (data.empty()) {
+      TranscodeResult r; r.errorCode = 1; r.error = "无法读取图片数据"; return r;
+    }
+    auto p = probeImageMemory(data);
     if (p.errorCode || p.width <= 0 || p.height <= 0 || static_cast<int64_t>(p.width) * p.height > 100000000) {
       TranscodeResult r; r.errorCode = 26; r.error = p.errorCode ? p.error : "图片超过安全解码限制（1 亿像素）"; return r;
     }
-    if(options.outCodec<0||options.outCodec>2||options.quality<1||options.quality>100||options.gainmapQuality<1||options.gainmapQuality>100||options.gainmapScale<1||options.gainmapScale>128||options.resizePercent<1||options.resizePercent>100||options.speedLevel<0||options.speedLevel>2) {
+    if(options.outCodec<0||options.outCodec>3||options.quality<1||options.quality>100||options.gainmapQuality<1||options.gainmapQuality>100||options.gainmapScale<1||options.gainmapScale>128||options.resizePercent<1||options.resizePercent>100||options.speedLevel<0||options.speedLevel>2) {
       TranscodeResult r;r.errorCode=30;r.error="转码参数超出范围";return r;
     }
-    return transcodeUnchecked(inFd, outFd, options);
+    return transcodeUnchecked(std::move(data), outFd, options);
   } catch (const std::exception& e) {
     TranscodeResult r; r.errorCode = 27; r.error = std::string("转码资源不足或数据异常: ") + e.what(); return r;
   }
@@ -1503,7 +2219,8 @@ std::vector<uint8_t> decodePreviewJpeg(int fd, int maxDim, int quality) {
   std::string err;
   const int limit = std::max(1, maxDim);
   const bool ok = container == 0 ? decodeJpegSdr(data, sdr, err, limit)
-                                 : decodeHeifPreview(data, sdr, err, limit);
+                : container == 3 ? decodeJxlToSdr(data, sdr, nullptr, err)
+                : decodeHeifPreview(data, sdr, err, limit);
   if (!ok || sdr.width <= 0 || sdr.height <= 0) return empty;
 
   const int larger = std::max(sdr.width, sdr.height);
@@ -1512,7 +2229,7 @@ std::vector<uint8_t> decodePreviewJpeg(int fd, int maxDim, int quality) {
     const int nh = std::max(1, sdr.height * limit / larger);
     sdr = resizeRgba(sdr, nw, nh);
   }
-  if(container==0) orientPixels(sdr,ExifEditor(sdr.exif).orientation());
+  if (container == 0 || container == 3) orientPixels(sdr, ExifEditor(sdr.exif).orientation());
   if(!prepareJpegProfile(sdr)) return empty;
   return encodeJpegToMem(sdr, quality, false);
 }

@@ -10,6 +10,8 @@ class FormattingTest {
         assertEquals("image/jpeg", OutputFormat.parse("JPEG").mimeType)
         assertEquals("image/heic", OutputFormat.parse("heic").mimeType)
         assertEquals("image/avif", OutputFormat.parse("AVIF").mimeType)
+        assertEquals("image/jxl", OutputFormat.parse("JXL").mimeType)
+        assertEquals("image/jxl", OutputFormat.parse("jxl").mimeType)
         assertEquals("+25%", formatSavedPercent(100,125))
         assertEquals("−25%", formatSavedPercent(100,75))
         assertEquals("+25 B", formatByteDelta(25))

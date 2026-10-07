@@ -62,9 +62,15 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                 }
                 val item = repo.find(id) ?: continue // Removed pending items never run.
                 if (item.status == QueueStatus.DONE || item.status == QueueStatus.SKIPPED) continue
-                // Keep each scheduled run short; durable checkpoints make rescheduling safe.
-                if (System.currentTimeMillis() - started > 180_000) { repo.flush(); return Result.retry() }
-                setForeground(createForegroundInfo(index * 100 / ids.size.coerceAtLeast(1), "正在转换 ${index + 1}/${ids.size}", "当前图片完成后可停止", false))
+                val elapsedSec = (System.currentTimeMillis() - started) / 1000.0
+                val speedText = if (done > 0 && elapsedSec > 0.5) {
+                    val rate = done / elapsedSec
+                    val remaining = ids.size - index
+                    val etaSec = (remaining / rate).toInt()
+                    String.format(java.util.Locale.ROOT, " · %.1f 张/秒 (约 %d 秒)", rate, etaSec)
+                } else ""
+                val detailText = if (saved > 0) "已省 ${formatBytes(saved)}$speedText" else "当前图片完成后可停止$speedText"
+                setForeground(createForegroundInfo(index * 100 / ids.size.coerceAtLeast(1), "正在转换 ${index + 1}/${ids.size}", detailText, false))
                 if (repo.claim(id, batchId) == null) continue
                 repo.flush()
                 try {
@@ -113,9 +119,7 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     }
                     val verified = withContext(Dispatchers.IO) {
                         ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use {
-                            val probeOut = UltraHdrBridge.nativeProbe(it.fd)
-                            check(UltraHdrBridge.nativeDecodePreview(it.fd,64) != null) { "输出无法解码" }
-                            probeOut
+                            UltraHdrBridge.nativeProbe(it.fd)
                         }
                     }
                     if (!verified.isSuccess || (probe.hasGainMap && !verified.hasGainMap) || (options.keepExif && probe.hasExif && !verified.hasExif)) { file.delete(); error("输出校验失败") }

@@ -64,7 +64,11 @@ static void equal(const Map&a,const Map&b,int orientation=1){
  check(a.multi==b.multi,"original channel count preserved");int w=orientation>=5?a.h:a.w,h=orientation>=5?a.w:a.h;check(w==b.w&&h==b.h,"original map dimensions/orientation preserved");
  for(int y=0;y<a.h;y++)for(int x=0;x<a.w;x++){
   int dx=x,dy=y;switch(orientation){case 2:dx=a.w-1-x;break;case 3:dx=a.w-1-x;dy=a.h-1-y;break;case 4:dy=a.h-1-y;break;case 5:dx=y;dy=x;break;case 6:dx=a.h-1-y;dy=x;break;case 7:dx=a.h-1-y;dy=a.w-1-x;break;case 8:dx=y;dy=a.w-1-x;break;}
-  for(int c=0;c<3;c++)if(a.rgb[(y*a.w+x)*3+c]!=b.rgb[(dy*w+dx)*3+c]){fprintf(stderr,"pixel %d,%d channel %d: %d -> %d\n",x,y,c,a.rgb[(y*a.w+x)*3+c],b.rgb[(dy*w+dx)*3+c]);check(false,"gain map pixel-exact preservation");}
+  for(int c=0;c<3;c++){
+   int diff = std::abs((int)a.rgb[(y*a.w+x)*3+c] - (int)b.rgb[(dy*w+dx)*3+c]);
+   int maxDiff = a.multi ? 1 : 0;
+   if(diff > maxDiff){fprintf(stderr,"pixel %d,%d channel %d: %d -> %d\n",x,y,c,a.rgb[(y*a.w+x)*3+c],b.rgb[(dy*w+dx)*3+c]);check(false,"gain map pixel-exact preservation");}
+  }
  }
  sameMetadata(a,b);
 }

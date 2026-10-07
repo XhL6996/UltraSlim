@@ -8,7 +8,7 @@ data class ProbeResult(
     val errorCode: Int,
     val error: String,
     val hasGainMap: Boolean,
-    /** 0 = JPEG, 1 = HEIF, 2 = AVIF, -1 = unknown */
+    /** 0 = JPEG, 1 = HEIF, 2 = AVIF, 3 = JXL, -1 = unknown */
     val container: Int,
     val width: Int,
     val height: Int,
@@ -25,6 +25,7 @@ data class ProbeResult(
             0 -> "JPEG"
             1 -> "HEIC"
             2 -> "AVIF"
+            3 -> "JXL"
             else -> "未知"
         }
 }

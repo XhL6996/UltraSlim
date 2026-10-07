@@ -11,6 +11,7 @@ enum class OutputFormat(
     AVIF("avif", 2, "AVIF", "image/avif"),
     HEIC("heic", 1, "HEIC", "image/heic"),
     JPEG("jpg", 0, "JPEG", "image/jpeg"),
+    JXL("jxl", 3, "JXL", "image/jxl"),
     ;
 
     companion object {

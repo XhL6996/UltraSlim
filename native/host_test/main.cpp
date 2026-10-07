@@ -13,7 +13,7 @@ namespace {
 
 void printUsage(const char* prog) {
   fprintf(stderr,
-          "usage: %s <input> <output.(heic|avif)> [quality=90] [gainmapScale=4] [gainmapQuality=60]\n",
+          "usage: %s <input> <output.(heic|avif|jpg|jxl)> [quality=90] [gainmapScale=4] [gainmapQuality=60]\n",
           prog);
 }
 
@@ -41,7 +41,7 @@ int main(int argc, char** argv) {
   ultraslim::ProbeResult p = ultraslim::probeImage(inFd);
   printf("== probe ==\n");
   printf("  errorCode     : %d %s\n", p.errorCode, p.error.c_str());
-  printf("  container     : %d (0=jpeg 1=heif 2=avif)\n", p.container);
+  printf("  container     : %d (0=jpeg 1=heif 2=avif 3=jxl)\n", p.container);
   printf("  size          : %dx%d\n", p.width, p.height);
   printf("  hasGainMap    : %s\n", p.hasGainMap ? "yes" : "no");
   printf("  gainmap       : %dx%d\n", p.gainmapWidth, p.gainmapHeight);
@@ -87,8 +87,10 @@ int main(int argc, char** argv) {
     o.outCodec = 1;
   } else if (endsWith(outPath, ".jpg") || endsWith(outPath, ".jpeg")) {
     o.outCodec = 0;
+  } else if (endsWith(outPath, ".jxl")) {
+    o.outCodec = 3;
   } else {
-    fprintf(stderr, "output must end with .heic, .avif or .jpg\n");
+    fprintf(stderr, "output must end with .heic, .avif, .jpg or .jxl\n");
     close(inFd);
     return 2;
   }

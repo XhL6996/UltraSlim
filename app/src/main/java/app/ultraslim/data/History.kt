@@ -17,7 +17,14 @@ import androidx.room.RoomDatabase
 import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
-@Entity(tableName = "history", indices = [Index(value = ["taskId"], unique = true)])
+@Entity(
+    tableName = "history",
+    indices = [
+        Index(value = ["taskId"], unique = true),
+        Index(value = ["createdAt"]),
+        Index(value = ["status"]),
+    ]
+)
 data class HistoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val displayName: String,
@@ -114,7 +121,7 @@ interface TaskDao {
     @Query("UPDATE batches SET cancelled = 1 WHERE id = :id") suspend fun cancel(id: String)
 }
 
-@Database(entities = [HistoryEntity::class, QueueItem::class, BatchEntity::class], version = 2, exportSchema = true)
+@Database(entities = [HistoryEntity::class, QueueItem::class, BatchEntity::class], version = 3, exportSchema = true)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun historyDao(): HistoryDao
     abstract fun taskDao(): TaskDao
@@ -131,6 +138,12 @@ abstract class AppDatabase : RoomDatabase() {
                 db.execSQL("CREATE UNIQUE INDEX index_history_taskId ON history(taskId)")
                 db.execSQL(TASK_TABLE_SQL)
                 db.execSQL("CREATE TABLE IF NOT EXISTS batches (id TEXT NOT NULL PRIMARY KEY, itemIds TEXT NOT NULL, settings TEXT NOT NULL, cancelled INTEGER NOT NULL, createdAt INTEGER NOT NULL)")
+            }
+        }
+        val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_history_createdAt ON history(createdAt)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_history_status ON history(status)")
             }
         }
     }

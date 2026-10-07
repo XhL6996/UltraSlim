@@ -19,7 +19,9 @@ class UltraSlimApp : Application() {
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val database: AppDatabase by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
-        Room.databaseBuilder(this, AppDatabase::class.java, "ultraslim.db").addMigrations(AppDatabase.MIGRATION_1_2).build()
+        Room.databaseBuilder(this, AppDatabase::class.java, "ultraslim.db")
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3)
+            .build()
     }
 
     val settingsRepository: SettingsRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {

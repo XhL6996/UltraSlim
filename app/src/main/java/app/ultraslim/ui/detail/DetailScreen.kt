@@ -50,12 +50,15 @@ import androidx.compose.material.icons.rounded.DragIndicator
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.SaveAlt
 import androidx.compose.material.icons.rounded.Share
+import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.AssistChip
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -71,6 +74,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -307,6 +311,8 @@ private fun DetailContent(
 
 @Composable
 private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
+    var compareMode by remember { mutableIntStateOf(0) } // 0: 卷帘, 1: 按住
+    var isHoldingOriginal by remember { mutableStateOf(false) }
     var fraction by remember { mutableFloatStateOf(0.5f) }
     var viewSize by remember { mutableStateOf(IntSize(1, 1)) }
     var zoomScale by remember { mutableFloatStateOf(1f) }
@@ -323,6 +329,12 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
         (scaleNow - 1f) * viewSize.width / 2f,
         (scaleNow - 1f) * viewSize.height / 2f,
     )
+
+    val effectiveFraction = if (compareMode == 1) {
+        if (isHoldingOriginal) 1f else 0f
+    } else {
+        fraction
+    }
 
     val previewHeight = with(density) { (LocalWindowInfo.current.containerSize.height.toDp() * .4f).coerceIn(220.dp, 420.dp) }
     val transform = rememberTransformableState { zoom, pan, _ ->
@@ -352,8 +364,15 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                 .onSizeChanged {
                     viewSize = IntSize(it.width.coerceAtLeast(1), it.height.coerceAtLeast(1))
                 }
-                .pointerInput(Unit) {
+                .pointerInput(compareMode) {
                     detectTapGestures(
+                        onPress = {
+                            if (compareMode == 1) {
+                                isHoldingOriginal = true
+                                tryAwaitRelease()
+                                isHoldingOriginal = false
+                            }
+                        },
                         onDoubleTap = {
                             cancelZoomAnim()
                             val target = if (zoomScale > 1f) 1f else 2.5f
@@ -369,10 +388,9 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                         },
                     )
                 }
-                // 未放大：整图横向拖动 = 移动分割线（手柄只是视觉锚点），纵向让给页面滚动；
-                // 放大后本检测器停用，单指交给 transformable 平移，分割线由下方滑杆控制。
-                .pointerInput(zoomScale <= 1f) {
-                    if (zoomScale <= 1f) {
+                // 未放大且卷帘模式：整图横向拖动 = 移动分割线；纵向让给页面滚动
+                .pointerInput(zoomScale <= 1f && compareMode == 0) {
+                    if (zoomScale <= 1f && compareMode == 0) {
                         detectHorizontalDragGestures { change, dragAmount ->
                             change.consume()
                             fraction = (fraction + dragAmount / viewSize.width).coerceIn(0f, 1f)
@@ -387,7 +405,7 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                     translationY = panOffset.y
                 },
         ) {
-            // 压缩后（右侧，底层）
+            // 压缩后（右侧/底层）
             UltraAsyncImage(
                 uriString = entity.outputUri,
                 contentDescription = "压缩后 SDR",
@@ -397,8 +415,7 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                 modifier = Modifier.fillMaxSize(),
             )
 
-            // 原图（左侧，按分割线裁剪）。输出分辨率更小时，原图预览也按输出尺寸
-            // 解码，保证两侧锐度一致、对比公平。
+            // 原图（左侧/按分割比例裁剪）
             val outputLong = maxOf(entity.width, entity.height)
             UltraAsyncImage(
                 uriString = entity.inputUri,
@@ -406,57 +423,131 @@ private fun HeroCompareCard(entity: HistoryEntity, scale: Float, corner: Dp) {
                 contentScale = ContentScale.Fit,
                 forceSdr = true,
                 maxDim = if(zoomScale > 1f) 4096 else if(outputLong in 1 until 1600) outputLong else 1600,
-                modifier = Modifier.fillMaxSize().drawWithContent { clipRect(right = size.width * fraction) { this@drawWithContent.drawContent() } },
+                modifier = Modifier.fillMaxSize().drawWithContent {
+                    clipRect(right = size.width * effectiveFraction) { this@drawWithContent.drawContent() }
+                },
             )
 
-            // 分割线
-            Box(
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .offset { androidx.compose.ui.unit.IntOffset((viewSize.width * fraction - with(density) { 1.dp.toPx() }).toInt(), 0) }
-                    .width(2.dp)
-                    .fillMaxHeight()
-                    .background(Color.White.copy(alpha = 0.9f)),
-            )
+            if (compareMode == 0) {
+                // 分割线
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .offset { androidx.compose.ui.unit.IntOffset((viewSize.width * fraction - with(density) { 1.dp.toPx() }).toInt(), 0) }
+                        .width(2.dp)
+                        .fillMaxHeight()
+                        .background(Color.White.copy(alpha = 0.9f)),
+                )
 
-            // 拖拽手柄：视觉锚点。分割线由整图横向拖动或下方滑杆控制，这里不再拦截手势，
-            // 保证从手柄上起手的捏合/拖动也有正确仲裁。
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
-                shadowElevation = 4.dp,
-                modifier = Modifier
-                    .align(Alignment.CenterStart)
-                    .offset { androidx.compose.ui.unit.IntOffset((viewSize.width * fraction - with(density) { 18.dp.toPx() }).toInt(), 0) }
-                    .size(36.dp),
-            ) {
-                Icon(
-                    Icons.Rounded.DragIndicator,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(8.dp),
+                // 拖拽手柄
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f),
+                    shadowElevation = 4.dp,
+                    modifier = Modifier
+                        .align(Alignment.CenterStart)
+                        .offset { androidx.compose.ui.unit.IntOffset((viewSize.width * fraction - with(density) { 18.dp.toPx() }).toInt(), 0) }
+                        .size(36.dp),
+                ) {
+                    Icon(
+                        Icons.Rounded.DragIndicator,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(8.dp),
+                    )
+                }
+
+                CompareLabel("原图", Modifier.align(Alignment.TopStart).padding(12.dp))
+                CompareLabel("压缩后", Modifier.align(Alignment.TopEnd).padding(12.dp))
+            } else {
+                CompareLabel(
+                    text = if (isHoldingOriginal) "原图 (查看中)" else "压缩后",
+                    modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
+                    active = isHoldingOriginal,
                 )
             }
-
-            CompareLabel("原图", Modifier.align(Alignment.TopStart).padding(12.dp))
-            CompareLabel("压缩后", Modifier.align(Alignment.TopEnd).padding(12.dp))
         }
-        Slider(modifier = Modifier.padding(horizontal = 16.dp).semantics { contentDescription = "原图与成品比较比例" }, value = fraction, onValueChange = { fraction = it }, valueRange = 0f..1f)
-        Text("左右拖动对比 · 双指缩放 · 放大后单指平移", modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.labelSmall)
+
+        // 模式切换与缩放复位栏
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 16.dp, vertical = 6.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FilterChip(
+                    selected = compareMode == 0,
+                    onClick = { compareMode = 0 },
+                    label = { Text("卷帘对比") },
+                )
+                FilterChip(
+                    selected = compareMode == 1,
+                    onClick = { compareMode = 1 },
+                    label = { Text("按住对比") },
+                )
+            }
+            if (zoomScale > 1f) {
+                AssistChip(
+                    onClick = {
+                        cancelZoomAnim()
+                        zoomScale = 1f
+                        panOffset = Offset.Zero
+                    },
+                    label = { Text("复位 1x") },
+                )
+            }
+        }
+
+        if (compareMode == 0) {
+            Slider(
+                modifier = Modifier.padding(horizontal = 16.dp).semantics { contentDescription = "原图与成品比较比例" },
+                value = fraction,
+                onValueChange = { fraction = it },
+                valueRange = 0f..1f,
+            )
+            Text(
+                "左右拖动分割线 · 双击 2.5x 放大 · 捏合缩放",
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
+                style = MaterialTheme.typography.labelSmall,
+            )
+        } else {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.Center,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Rounded.TouchApp,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = if (isHoldingOriginal) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    if (isHoldingOriginal) "松开恢复压缩图" else "按住画面任何位置查看原图",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = if (isHoldingOriginal) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
     }
 }
 
 @Composable
-private fun CompareLabel(text: String, modifier: Modifier = Modifier) {
+private fun CompareLabel(text: String, modifier: Modifier = Modifier, active: Boolean = false) {
     Surface(
         modifier = modifier,
         shape = MaterialTheme.shapes.small,
-        color = Color.Black.copy(alpha = 0.45f),
+        color = if (active) MaterialTheme.colorScheme.primary else Color.Black.copy(alpha = 0.55f),
     ) {
         Text(
             text,
             style = MaterialTheme.typography.labelMedium,
-            color = Color.White,
+            color = if (active) MaterialTheme.colorScheme.onPrimary else Color.White,
             modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
         )
     }

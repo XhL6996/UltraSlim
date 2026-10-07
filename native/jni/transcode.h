@@ -9,7 +9,7 @@ struct ProbeResult {
   int errorCode = 0;  // 0 = ok, otherwise failed
   std::string error;
   bool hasGainMap = false;
-  int container = -1;  // 0 = JPEG, 1 = HEIF, 2 = AVIF, -1 = unknown
+  int container = -1;  // 0 = JPEG, 1 = HEIF, 2 = AVIF, 3 = JXL, -1 = unknown
   int width = 0;
   int height = 0;
   int gainmapWidth = 0;
@@ -20,7 +20,7 @@ struct ProbeResult {
 };
 
 struct TranscodeOptions {
-  int outCodec = 1;  // 0 = JPEG, 1 = HEIF, 2 = AVIF
+  int outCodec = 1;  // 0 = JPEG, 1 = HEIF, 2 = AVIF, 3 = JXL
   int quality = 90;
   // Legacy rebuild parameters are only used by host fixture generation.
   bool preserveGainMap = true;

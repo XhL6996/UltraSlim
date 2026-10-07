@@ -26,21 +26,14 @@ internal object PreviewCache {
     private val requestLocks = Array(32) { Any() }
     private val decodeSlots = java.util.concurrent.Semaphore(1)
 
-    fun load(context: Context, uriString: String, maxDim: Int): Bitmap? = synchronized(requestLocks[(uriString.hashCode() and Int.MAX_VALUE) % requestLocks.size]) {
-        decodeSlots.acquire()
-        try { loadInternal(context, uriString, maxDim) } finally { decodeSlots.release() }
-    }
-
-    private fun loadInternal(context: Context, uriString: String, maxDim: Int): Bitmap? {
-        val version = runCatching {
-            if(uriString.startsWith("content://")) {
-                val uri = Uri.parse(uriString)
-                val modified = runCatching { context.contentResolver.query(uri, arrayOf(android.provider.MediaStore.MediaColumns.DATE_MODIFIED), null, null, null)?.use { cursor -> if(cursor.moveToFirst()) cursor.getLong(0) else 0L } }.getOrNull() ?: 0L
-                context.contentResolver.openFileDescriptor(uri, "r")?.use { "${it.statSize}:$modified" } ?: return null
-            } else { val source = File(uriString); if(!source.isFile) return null; "${source.length()}:${source.lastModified()}" }
-        }.getOrNull() ?: return null
+    fun load(context: Context, uriString: String, maxDim: Int): Bitmap? {
+        val version = getVersion(context, uriString) ?: return null
         val key = cacheKey("$uriString:$version:v4", maxDim)
+
+        // 1. Fast-path: In-memory cache hit (no locks, no semaphore)
         memory.get(key)?.let { return it }
+
+        // 2. Disk cache check (only diskLock, does not block on native decode semaphore)
         val dir = File(context.cacheDir, "previews")
         val file = File(dir, "$key.jpg")
         synchronized(diskLock) {
@@ -55,17 +48,58 @@ internal object PreviewCache {
                 file.delete()
             }
         }
-        val bytes = decode(context, uriString, maxDim) ?: return null
-        val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
-        synchronized(diskLock) {
-            memory.get(key)?.let { return it }
-            dir.mkdirs()
-            runCatching { file.writeBytes(bytes) }
-            trim(dir)
-            memory.put(key, bitmap)
+
+        // 3. Heavy native decode: serialized via per-URI requestLocks and global decodeSlots
+        return synchronized(requestLocks[(uriString.hashCode() and Int.MAX_VALUE) % requestLocks.size]) {
+            memory.get(key)?.let { return@synchronized it }
+            decodeSlots.acquire()
+            try {
+                val bytes = decode(context, uriString, maxDim) ?: return@synchronized null
+                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@synchronized null
+                synchronized(diskLock) {
+                    memory.get(key)?.let { return@synchronized it }
+                    dir.mkdirs()
+                    runCatching { file.writeBytes(bytes) }
+                    trim(dir)
+                    memory.put(key, bitmap)
+                }
+                bitmap
+            } finally {
+                decodeSlots.release()
+            }
         }
-        return bitmap
     }
+
+    private fun getVersion(context: Context, uriString: String): String? = runCatching {
+        if (uriString.startsWith("content://")) {
+            val uri = Uri.parse(uriString)
+            var modified = 0L
+            var size = 0L
+            var queried = false
+            context.contentResolver.query(
+                uri,
+                arrayOf(android.provider.MediaStore.MediaColumns.DATE_MODIFIED, android.provider.MediaStore.MediaColumns.SIZE),
+                null, null, null
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    queried = true
+                    val modIdx = cursor.getColumnIndex(android.provider.MediaStore.MediaColumns.DATE_MODIFIED)
+                    val sizeIdx = cursor.getColumnIndex(android.provider.MediaStore.MediaColumns.SIZE)
+                    if (modIdx >= 0) modified = cursor.getLong(modIdx)
+                    if (sizeIdx >= 0) size = cursor.getLong(sizeIdx)
+                }
+            }
+            if (!queried || (size == 0L && modified == 0L)) {
+                context.contentResolver.openFileDescriptor(uri, "r")?.use { "${it.statSize}:$modified" } ?: return null
+            } else {
+                "$size:$modified"
+            }
+        } else {
+            val source = File(uriString)
+            if (!source.isFile) return null
+            "${source.length()}:${source.lastModified()}"
+        }
+    }.getOrNull()
 
     private fun decode(context: Context, uriString: String, maxDim: Int): ByteArray? = runCatching {
         if (uriString.startsWith("content://")) {

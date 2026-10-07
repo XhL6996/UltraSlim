@@ -1,15 +1,15 @@
 # UltraSlim
 
-把 Ultra HDR (gain map) 照片转码为体积更小的 HEIC / AVIF（保留 gain map），也支持纯 SDR 图片转码。Android app：Kotlin + Jetpack Compose (Material 3)，原生核心为 libultrahdr v2.0.2。
+把 Ultra HDR (gain map) 照片转码为体积更小的 HEIC / AVIF / JXL（保留 gain map），也支持纯 SDR 图片转码。Android app：Kotlin + Jetpack Compose (Material 3)，原生核心为 libultrahdr v2.0.2。
 
 ## 结构
 
 - `app/` — Android 应用模块（Compose / Room / WorkManager / DataStore / Coil3）
 - `native/` — 原生代码
-  - `jni/transcode.cpp` — 转码核心（平台无关）：probe + JPEG/HEIC/AVIF → JPEG/HEIC/AVIF（HDR 路径走 libultrahdr，SDR 路径走 libheif 直编码；支持速度档位 speedLevel 0/1/2、分辨率缩放 resizePercent）
+  - `jni/transcode.cpp` — 转码核心（平台无关）：probe + JPEG/HEIC/AVIF/JXL → JPEG/HEIC/AVIF/JXL（HDR 路径走 libultrahdr + ISO 21496-1 jhgm/tmap，SDR 路径走直编码；支持速度档位 speedLevel 0/1/2、分辨率缩放 resizePercent）
   - `jni/ultraslim_jni.cpp` — JNI 桥接（`app.ultraslim.bridge.UltraHdrBridge`）
   - `CMakeLists.txt` — App 原生构建（Gradle externalNativeBuild 入口；`ULTRASLIM_HOST_TEST=ON` 时构建主机测试程序）
-  - `deps/` — 依赖超级构建：libjpeg-turbo 3.1.1 / x265 4.1 / aom 3.12.1(仅解码) / SVT-AV1 3.0.0(AV1 编码) / libde265 1.0.16 / libheif(4a3f74bc + ISO 21496-1 gain map patch)
+  - `deps/` — 依赖超级构建：libjpeg-turbo 3.1.1 / x265 4.1 / aom 3.12.1(仅解码) / SVT-AV1 3.0.0(AV1 编码) / libde265 1.0.16 / libheif(4a3f74bc + ISO 21496-1 gain map patch) / libjxl 0.11.1 (含 highway, brotli, skcms)
 - `third_party/libultrahdr` — google/libultrahdr v2.0.2（vendored；`cmake/Findlibheif.cmake` 有一处本地修复：多个 compile definitions 的 `-D` 前缀处理）
 - `native/prefix/<flavor>/` — 依赖产物（`host`、`android-arm64-v8a`），被 .gitignore 忽略
 

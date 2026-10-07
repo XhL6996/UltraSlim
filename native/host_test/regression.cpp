@@ -35,7 +35,7 @@ static void orientedJpeg(const std::string& path,int orientation){
 int main(int argc,char**argv){
  check(argc==3,"usage regression <fixtures> <output-dir>");std::string dir=argv[1],out=argv[2];
  ultraslim::TranscodeOptions o;o.codecThreads=2;
- for(int codec=0;codec<3;codec++){
+ for(int codec=0;codec<4;codec++){
   o.outCodec=codec;o.resizePercent=50;
   auto target=out+"/hdr-"+std::to_string(codec);
   convert(dir+"/apple_gainmap_new.jpg",target,o);check(exif(target),"HDR EXIF retained");

@@ -178,3 +178,27 @@ ExternalProject_Add_Step(libheif patch_inputs
     DEPENDEES update DEPENDERS patch
     COMMAND ${CMAKE_COMMAND} -E true
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_libheif.sh)
+
+# ---------------------------------------------------------------- libjxl (JPEG XL encoder/decoder)
+ExternalProject_Add(libjxl
+    GIT_REPOSITORY https://github.com/libjxl/libjxl.git
+    GIT_TAG v0.11.1
+    GIT_SHALLOW TRUE
+    GIT_SUBMODULES "third_party/brotli" "third_party/highway" "third_party/skcms"
+    CMAKE_ARGS ${COMMON_CMAKE_ARGS}
+               -DBUILD_TESTING=OFF
+               -DJPEGXL_ENABLE_TOOLS=OFF
+               -DJPEGXL_ENABLE_EXAMPLES=OFF
+               -DJPEGXL_ENABLE_MANPAGES=OFF
+               -DJPEGXL_ENABLE_BENCHMARK=OFF
+               -DJPEGXL_ENABLE_JPEGLI=OFF
+               -DJPEGXL_ENABLE_JPEGLI_LIBJPEG=OFF
+               -DJPEGXL_ENABLE_DOXYGEN=OFF
+               -DJPEGXL_ENABLE_VIEWERS=OFF
+               -DJPEGXL_ENABLE_DEVTOOLS=OFF
+               -DJPEGXL_ENABLE_SJPEG=OFF
+               -DJPEGXL_ENABLE_SKCMS=ON
+               -DJPEGXL_ENABLE_PLUGINS=OFF
+    BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target jxl jxl_cms jxl_threads brotli --parallel
+    INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)
+
