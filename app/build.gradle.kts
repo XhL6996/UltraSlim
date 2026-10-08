@@ -15,8 +15,8 @@ android {
         minSdk = 26
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 5
-        versionName = "1.2.2"
+        versionCode = 6
+        versionName = "1.0.0"
 
         // Filter transitive JNI libraries too, not only our CMake target.
         ndk { abiFilters += listOf("arm64-v8a") }

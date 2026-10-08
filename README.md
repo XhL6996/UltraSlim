@@ -1,6 +1,6 @@
-# UltraSlim
+# UltraSlim (v1.0.0 正式版)
 
-Android 离线图片转码工具，支持 JPEG、HEIC、AVIF，以及 Ultra HDR / ISO 21496-1 Gain Map。原图始终保留。
+Android 离线图片转码工具，支持 JPEG、HEIC、AVIF，以及 Ultra HDR / ISO 21496-1 Gain Map。原图始终保留。包含手风琴就地展开设置、轻量单行底部操作条、自然日分组折叠动效与相册级色彩兼容。
 
 ## 构建
 
