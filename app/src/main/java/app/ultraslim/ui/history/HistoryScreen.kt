@@ -1,6 +1,9 @@
 package app.ultraslim.ui.history
 
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.expandVertically
@@ -29,6 +32,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import app.ultraslim.convert.MediaStoreTrashHelper
 import app.ultraslim.convert.OutputStore
 import app.ultraslim.data.HistoryEntity
 import app.ultraslim.ui.appViewModelFactory
@@ -51,6 +55,12 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
     var confirmClear by remember { mutableStateOf(false) }
     var selecting by remember { mutableStateOf(false) }
     var collapsedDates by remember { mutableStateOf(emptySet<LocalDate>()) }
+    var lastTrashCount by remember { mutableIntStateOf(0) }
+    val trashLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            vm.onSelectedOriginalsTrashed(lastTrashCount)
+        }
+    }
     fun finishSelection() { selecting = false; selected = emptySet() }
     BackHandler(selecting && !state.busy) { finishSelection() }
     LaunchedEffect(vm) { vm.events.collect { snackbar.showSnackbar(it) } }
@@ -100,11 +110,28 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                                     Text(if (state.busy) "处理中…" else "保存 $pendingCount 张")
                                 }
                             }
+                            if (MediaStoreTrashHelper.isTrashSupported) {
+                                val trashableUris = remember(selectedItems) { vm.getTrashableOriginalUris(selectedItems.map { it.id }.toSet()) }
+                                if (trashableUris.isNotEmpty()) {
+                                    FilledTonalButton(
+                                        onClick = {
+                                            lastTrashCount = trashableUris.size
+                                            val sender = vm.requestTrashSelected(selectedItems.map { it.id }.toSet())
+                                            if (sender != null) trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                                        },
+                                        enabled = !state.busy,
+                                    ) {
+                                        Icon(Icons.Rounded.DeleteSweep, null, modifier = Modifier.size(16.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("原图移至回收站 (${trashableUris.size})")
+                                    }
+                                }
+                            }
                             OutlinedButton(onClick = {
                                 if (!OutputStore.share(context, selectedItems)) scope.launch { snackbar.showSnackbar("分享失败，文件不可访问") }
                             }, enabled = !state.busy && selectedItems.isNotEmpty()) { Text("分享") }
                             OutlinedButton(onClick = { vm.requestDelete(selectedItems.map { it.id }.toSet()) },
-                                enabled = !state.busy && selectedItems.isNotEmpty()) { Text("删除") }
+                                enabled = !state.busy && selectedItems.isNotEmpty()) { Text("删除记录") }
                         }
                     }
                 }
@@ -115,7 +142,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
             contentPadding = PaddingValues(start = 20.dp, top = 20.dp, end = 20.dp,
                 bottom = 20.dp + if (railMode && !selecting) WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item { StatsCard(state.totalSavedBytes, state.convertedCount) }
+            item { StatsCard(state.stats) }
             item {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("全部", "待保存", "已保存", "保存失败").forEach { label ->

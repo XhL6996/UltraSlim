@@ -46,9 +46,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.activity.result.IntentSenderRequest
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.DeleteSweep
 import androidx.compose.material.icons.rounded.DragIndicator
 import androidx.compose.material.icons.rounded.FileDownload
 import androidx.compose.material.icons.rounded.Link
@@ -136,6 +139,17 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
     var showDeleteConfirm by remember { mutableStateOf(false) }
     val sourcePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(vm::relinkSource) }
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(OutputFormat.parse(state.entity?.format).mimeType)) { it?.let(vm::exportTo) }
+    val trashLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            vm.onOriginalTrashed()
+        }
+    }
+    val trashOriginal = {
+        val sender = vm.requestTrashOriginal()
+        if (sender != null) {
+            trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
+        }
+    }
 
     LaunchedEffect(Unit) {
         vm.events.collect { event ->
@@ -171,6 +185,16 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                                         export.launch(state.entity?.displayName ?: "image.heic")
                                     }
                                 )
+                                if (state.canTrashOriginal) {
+                                    DropdownMenuItem(
+                                        text = { Text("原图移至相册回收站…") },
+                                        leadingIcon = { Icon(Icons.Rounded.DeleteSweep, null) },
+                                        onClick = {
+                                            menu = false
+                                            trashOriginal()
+                                        }
+                                    )
+                                }
                                 DropdownMenuItem(
                                     text = { Text("重新关联原图…") },
                                     leadingIcon = { Icon(Icons.Rounded.Link, null) },
@@ -267,6 +291,9 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
         } else {
             DetailContent(
                 entity = entity,
+                canTrashOriginal = state.canTrashOriginal,
+                originalTrashed = state.originalTrashed,
+                onTrashOriginal = trashOriginal,
                 modifier = Modifier.padding(innerPadding),
             )
         }
@@ -299,6 +326,9 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
 @Composable
 private fun DetailContent(
     entity: HistoryEntity,
+    canTrashOriginal: Boolean,
+    originalTrashed: Boolean,
+    onTrashOriginal: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val saved = entity.outputUri.startsWith("content://")
@@ -321,6 +351,62 @@ private fun DetailContent(
                     BadgeChip(formatSavedPercent(entity.inputBytes, entity.outputBytes), MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.primary)
                 }
                 Text("${formatBytes(entity.inputBytes)} → ${formatBytes(entity.outputBytes)} · ${entity.format}", style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+
+        if (canTrashOriginal) {
+            Card(
+                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Icon(
+                        Icons.Rounded.DeleteSweep,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp),
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("相册空间一键释放", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                        Text(
+                            "高画质瘦身图已就绪。原图可安全移入系统相册回收站，释放 ${formatBytes(entity.inputBytes)}（30天内可在系统相册随时恢复）。",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    FilledTonalButton(onClick = onTrashOriginal) {
+                        Text("移入回收站")
+                    }
+                }
+            }
+        } else if (originalTrashed) {
+            Surface(
+                shape = RoundedCornerShape(14.dp),
+                color = MaterialTheme.colorScheme.surfaceContainer,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(
+                        Icons.Rounded.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Text(
+                        "原图已移入系统相册回收站，相册已减负 ${formatBytes(entity.inputBytes)}（30天内可恢复）",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
             }
         }
 
@@ -550,7 +636,7 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
                         zoomScale = 1f
                         panOffset = Offset.Zero
                     },
-                    label = { Text("复位 1x") },
+                    label = { Text(String.format(java.util.Locale.ROOT, "%.1fx 复位", zoomScale)) },
                 )
             }
         }

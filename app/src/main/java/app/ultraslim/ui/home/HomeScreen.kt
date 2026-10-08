@@ -4,6 +4,7 @@ import android.Manifest
 import android.os.Build
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
@@ -109,14 +110,51 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
         else vm.startConversion()
     }
+    var lastTrashCount by remember { mutableIntStateOf(0) }
+    val trashBatchLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            vm.onBatchOriginalsTrashed(lastTrashCount)
+        }
+    }
+
     LaunchedEffect(vm) {
         vm.events.collect { event ->
             when(event) {
                 is HomeEvent.Info -> snackbar.showSnackbar(event.message)
                 is HomeEvent.Finished -> {
-                    val result = snackbar.showSnackbar("完成 ${event.done} · 失败 ${event.failed} · 跳过 ${event.skipped}；输出净变化 ${formatByteDelta(-event.savedBytes)}",
-                        actionLabel = if(event.failed > 0) "重试失败项" else null, duration = SnackbarDuration.Long)
-                    if (result == SnackbarResult.ActionPerformed) vm.retryFailed()
+                    if (event.trialHistoryId != null) {
+                        val result = snackbar.showSnackbar(
+                            message = "试转完成！节省 ${formatBytes(event.savedBytes)} · 点击立即对比画质",
+                            actionLabel = "对比画质",
+                            duration = SnackbarDuration.Long,
+                        )
+                        if (result == SnackbarResult.ActionPerformed) {
+                            onOpenDetail(event.trialHistoryId)
+                        }
+                    } else {
+                        val trashable = if (MediaStoreTrashHelper.isTrashSupported) vm.getTrashableOriginalUris() else emptyList()
+                        val actionLabel = when {
+                            event.failed > 0 -> "重试失败项"
+                            trashable.isNotEmpty() -> "移入回收站 (${trashable.size})"
+                            else -> null
+                        }
+                        val result = snackbar.showSnackbar(
+                            message = "完成 ${event.done} · 失败 ${event.failed} · 跳过 ${event.skipped}；输出净变化 ${formatByteDelta(-event.savedBytes)}",
+                            actionLabel = actionLabel,
+                            duration = SnackbarDuration.Long,
+                        )
+                        if (result == SnackbarResult.ActionPerformed) {
+                            if (event.failed > 0) {
+                                vm.retryFailed()
+                            } else if (trashable.isNotEmpty()) {
+                                lastTrashCount = trashable.size
+                                val sender = vm.requestTrashOriginals()
+                                if (sender != null) {
+                                    trashBatchLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -431,9 +469,25 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                 verticalAlignment = Alignment.CenterVertically,
                             ) {
                                 Text("已完成 · ${finishedItems.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                if (state.hasFinishedItems) {
-                                    TextButton(onClick = vm::clearFinished) {
-                                        Text("清除成功项")
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    if (MediaStoreTrashHelper.isTrashSupported) {
+                                        val trashableUris = remember(finishedItems) { vm.getTrashableOriginalUris(finishedItems.map { it.id }) }
+                                        if (trashableUris.isNotEmpty()) {
+                                            TextButton(onClick = {
+                                                lastTrashCount = trashableUris.size
+                                                val sender = vm.requestTrashOriginals(finishedItems.map { it.id })
+                                                if (sender != null) trashBatchLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                                            }) {
+                                                Icon(Icons.Rounded.DeleteSweep, null, modifier = Modifier.size(16.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                                Text("移入回收站 (${trashableUris.size})")
+                                            }
+                                        }
+                                    }
+                                    if (state.hasFinishedItems) {
+                                        TextButton(onClick = vm::clearFinished) {
+                                            Text("清除成功项")
+                                        }
                                     }
                                 }
                             }
@@ -700,6 +754,16 @@ private fun QueueCard(
                         FormatBadge(item.probe, item.status)
                         if (item.displayName.startsWith("MVIMG_", ignoreCase = true) || item.displayName.contains("MotionPhoto", ignoreCase = true)) {
                             BadgeChip("实况", MaterialTheme.colorScheme.tertiaryContainer, MaterialTheme.colorScheme.onTertiaryContainer)
+                        }
+                        val p = item.probe
+                        if (p != null && p.width > 0 && p.height > 0) {
+                            val mp = (p.width.toLong() * p.height) / 1_000_000
+                            val aspect = p.width.toFloat() / p.height.toFloat()
+                            if (mp >= 20) {
+                                BadgeChip("${mp}MP 超清", MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer)
+                            } else if (aspect >= 2.2f || aspect <= 0.45f) {
+                                BadgeChip("全景", MaterialTheme.colorScheme.secondaryContainer, MaterialTheme.colorScheme.onSecondaryContainer)
+                            }
                         }
                     }
                 }

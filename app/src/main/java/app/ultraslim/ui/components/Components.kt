@@ -18,8 +18,10 @@ import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -106,7 +108,10 @@ fun SectionHeader(title: String, hint: String? = null, modifier: Modifier = Modi
 }
 
 @Composable
-fun StatsCard(totalSavedBytes: Long, convertedCount: Int, modifier: Modifier = Modifier) {
+fun StatsCard(
+    stats: app.ultraslim.data.HistoryStats,
+    modifier: Modifier = Modifier,
+) {
     Card(
         modifier = modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.extraLarge,
@@ -115,37 +120,121 @@ fun StatsCard(totalSavedBytes: Long, convertedCount: Int, modifier: Modifier = M
             contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         ),
     ) {
-        Row(
-            modifier = Modifier.padding(horizontal = 24.dp, vertical = 20.dp),
-            verticalAlignment = Alignment.CenterVertically,
+        Column(
+            modifier = Modifier.padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    if (totalSavedBytes >= 0) "输出体积减少" else "输出体积增加",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f),
-                )
-                Text(
-                    formatBytes(kotlin.math.abs(totalSavedBytes)),
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
-                )
+            // 顶栏：累计瘦身体积与瘦身率徽章
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.Top,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        if (stats.totalSavedBytes >= 0) "累计相册瘦身减负" else "累计体积净变化",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f),
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        formatBytes(kotlin.math.abs(stats.totalSavedBytes)),
+                        style = MaterialTheme.typography.headlineLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                    if (stats.countDone > 0 && stats.equivalentPhotosSaved > 0) {
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            "相当于为手机多腾出 ~${stats.equivalentPhotosSaved} 张原图空间",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+                        )
+                    }
+                }
+                if (stats.countDone > 0 && stats.totalInputBytes > 0) {
+                    val percent = (stats.savedPercent * 100).toInt()
+                    BadgeChip(
+                        text = if (percent >= 0) "-$percent%" else "+${-percent}%",
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        contentColor = MaterialTheme.colorScheme.primary,
+                    )
+                }
             }
-            Spacer(Modifier.width(16.dp))
-            Column(horizontalAlignment = Alignment.End) {
-                Text(
-                    "已转换 · 原图保留",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f),
-                )
-                Text(
-                    "$convertedCount",
-                    style = MaterialTheme.typography.headlineMedium,
-                    fontWeight = FontWeight.Bold,
-                )
+
+            // 中间栏：容量流向对比条（双色条显示原总体积 vs 现总体积）
+            if (stats.countDone > 0 && stats.totalInputBytes > 0) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    val ratio = (stats.totalOutputBytes.toFloat() / stats.totalInputBytes.toFloat()).coerceIn(0.05f, 1f)
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(8.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.15f)),
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth(ratio)
+                                .fillMaxHeight()
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary),
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            "原总体积 ${formatBytes(stats.totalInputBytes)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
+                        )
+                        Text(
+                            "瘦身后 ${formatBytes(stats.totalOutputBytes)}",
+                            style = MaterialTheme.typography.labelSmall,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                }
+            }
+
+            // 底栏：三列数据指标（已转换、平均每张省、HDR增益图）
+            HorizontalDivider(
+                color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.12f),
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column {
+                    Text("已瘦身照片", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
+                    Text("${stats.countDone} 张", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                }
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text("单张平均瘦身", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
+                    Text(if (stats.countDone > 0) formatBytes(stats.avgSavedBytes) else "-", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    Text("Ultra HDR 增益图", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
+                    Text(if (stats.gainmapCount > 0) "${stats.gainmapCount} 张保留" else "高动态完整", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                }
             }
         }
     }
+}
+
+@Composable
+fun StatsCard(totalSavedBytes: Long, convertedCount: Int, modifier: Modifier = Modifier) {
+    StatsCard(
+        stats = app.ultraslim.data.HistoryStats(
+            countDone = convertedCount,
+            totalInputBytes = if (totalSavedBytes > 0) totalSavedBytes * 2 else 0,
+            totalOutputBytes = if (totalSavedBytes > 0) totalSavedBytes else 0,
+            gainmapCount = convertedCount,
+        ),
+        modifier = modifier,
+    )
 }
 
 @Composable

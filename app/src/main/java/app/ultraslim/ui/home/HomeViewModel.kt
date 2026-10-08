@@ -30,6 +30,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.ensureActive
 import kotlin.coroutines.coroutineContext
 import org.json.JSONArray
+import app.ultraslim.convert.MediaStoreTrashHelper
 import app.ultraslim.model.OutputFormat
 import app.ultraslim.ui.components.CompressionPreset
 import java.util.UUID
@@ -55,7 +56,13 @@ import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 
 sealed interface HomeEvent {
-    data class Finished(val done: Int, val failed: Int, val skipped: Int, val savedBytes: Long) : HomeEvent
+    data class Finished(
+        val done: Int,
+        val failed: Int,
+        val skipped: Int,
+        val savedBytes: Long,
+        val trialHistoryId: Long? = null,
+    ) : HomeEvent
 
     data class Info(val message: String) : HomeEvent
 }
@@ -451,10 +458,17 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     private var starting = false
-    fun tryOne() { startConversion(repo.queue.value.firstOrNull { it.status == QueueStatus.READY }?.let { setOf(it.id) } ?: emptySet()) }
+    private var isTrialRun = false
+
+    fun tryOne() {
+        val ready = repo.queue.value.firstOrNull { it.status == QueueStatus.READY } ?: return
+        isTrialRun = true
+        startConversion(setOf(ready.id))
+    }
 
     fun startConversion(onlyIds: Set<String>? = null) {
         if (starting || uiState.value.isConverting) return
+        if (onlyIds == null) isTrialRun = false
         starting = true
         viewModelScope.launch {
             try {
@@ -569,6 +583,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         if (cancelledRun) {
             cancelledRun = false
             lastRunIds = emptySet()
+            isTrialRun = false
             _events.tryEmit(HomeEvent.Info("已取消转换"))
             return
         }
@@ -581,7 +596,48 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         val saved = run
             .filter { it.status == QueueStatus.DONE }
             .sumOf { ((it.result?.inputBytes ?: 0L) - (it.result?.outputBytes ?: 0L)) }
-        _events.tryEmit(HomeEvent.Finished(done = done, failed = failed, skipped = skipped, savedBytes = saved))
+        val trialId = if (isTrialRun && done == 1) {
+            run.firstOrNull { it.status == QueueStatus.DONE }?.historyId
+        } else null
+        isTrialRun = false
+        _events.tryEmit(
+            HomeEvent.Finished(
+                done = done,
+                failed = failed,
+                skipped = skipped,
+                savedBytes = saved,
+                trialHistoryId = trialId,
+            )
+        )
+    }
+
+    fun getTrashableOriginalUris(itemIds: Collection<String>? = null): List<Uri> {
+        val items = if (itemIds != null) {
+            repo.queue.value.filter { it.id in itemIds && it.status == QueueStatus.DONE && it.result != null && (it.result.outputBytes < it.result.inputBytes) }
+        } else {
+            repo.queue.value.filter { it.status == QueueStatus.DONE && it.result != null && (it.result.outputBytes < it.result.inputBytes) }
+        }
+        return items.mapNotNull {
+            val uri = Uri.parse(it.uri)
+            MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, uri)
+        }.distinct()
+    }
+
+    fun requestTrashOriginals(itemIds: Collection<String>? = null): android.content.IntentSender? {
+        val uris = getTrashableOriginalUris(itemIds)
+        if (uris.isEmpty()) {
+            _events.tryEmit(HomeEvent.Info("未找到可移至回收站的原图（可能不在系统相册管理内）"))
+            return null
+        }
+        val sender = MediaStoreTrashHelper.createTrashIntentSender(app, uris)
+        if (sender == null) {
+            _events.tryEmit(HomeEvent.Info("系统不支持或无法获取回收站权限"))
+        }
+        return sender
+    }
+
+    fun onBatchOriginalsTrashed(count: Int) {
+        _events.tryEmit(HomeEvent.Info("已将 $count 张原图移至系统相册回收站（30天内可恢复）"))
     }
 
     companion object {

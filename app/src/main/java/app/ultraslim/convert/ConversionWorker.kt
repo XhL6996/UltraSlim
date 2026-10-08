@@ -54,6 +54,8 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
         }
         var done = 0; var saved = 0L
         val started = System.currentTimeMillis()
+        val prefetchScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        var prefetchDeferred: Deferred<PrefetchedMeta?>? = null
         try {
             for ((index, id) in ids.withIndex()) {
                 currentCoroutineContext().ensureActive()
@@ -84,7 +86,10 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                         continue
                     }
                     val source = Uri.parse(item.uri)
-                    val probe = withContext(Dispatchers.IO) {
+                    val cachedMeta = prefetchDeferred?.let { runCatching { it.await() }.getOrNull() }?.takeIf { it.id == id }
+                    prefetchDeferred = null
+
+                    val probe = cachedMeta?.probe ?: withContext(Dispatchers.IO) {
                         app.contentResolver.openFileDescriptor(source, "r")?.use { UltraHdrBridge.nativeProbe(it.fd) }
                     } ?: error("无法读取原图，请重新选择或授权")
                     check(probe.isSuccess) { probe.error }
@@ -95,9 +100,28 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     val mem = ActivityManager.MemoryInfo().also { app.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }
                     val pixels = probe.width.toLong() * probe.height
                     check(pixels > 0 && pixels * (if (probe.hasGainMap) 40 else 16) < mem.availMem * 3 / 5) { "当前可用内存不足，请关闭其他应用后重试" }
-                    val motionInfo = withContext(Dispatchers.IO) { MotionPhotoHelper.detect(app, source) }
+                    val motionInfo = cachedMeta?.motionInfo ?: withContext(Dispatchers.IO) { MotionPhotoHelper.detect(app, source) }
                     val motionXmp = if (motionInfo != null && options.format == OutputFormat.HEIC)
                         MotionPhotoContainer.xmp(motionInfo, options.format.mimeType) else null
+
+                    // Pipelining: Asynchronously prefetch next image's probe & motion info while current image is being transcoded
+                    val nextId = ids.getOrNull(index + 1)
+                    if (nextId != null) {
+                        prefetchDeferred = prefetchScope.async {
+                            runCatching {
+                                val nextItem = repo.find(nextId) ?: return@async null
+                                if (nextItem.status == QueueStatus.DONE || nextItem.status == QueueStatus.SKIPPED) return@async null
+                                val nextSource = Uri.parse(nextItem.uri)
+                                val nextProbe = app.contentResolver.openFileDescriptor(nextSource, "r")?.use {
+                                    UltraHdrBridge.nativeProbe(it.fd)
+                                } ?: return@async null
+                                if (!nextProbe.isSuccess) return@async null
+                                val nextMotion = MotionPhotoHelper.detect(app, nextSource)
+                                PrefetchedMeta(nextId, nextProbe, nextMotion)
+                            }.getOrNull()
+                        }
+                    }
+
                     val file = File(app.filesDir, "outputs/$id.${options.format.extension}").apply { parentFile?.mkdirs() }
                     suspend fun transcode(quality: Int) = withContext(Dispatchers.IO) {
                         app.contentResolver.openFileDescriptor(source, "r")!!.use { input ->
@@ -169,6 +193,7 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                 } finally { withContext(NonCancellable) { repo.flush() } }
             }
         } finally {
+            prefetchScope.cancel()
             ids.forEach { id -> repo.update(id) { if (it.status == QueueStatus.CONVERTING) it.copy(status = QueueStatus.READY, error = "已中断，可继续") else it } }
             withContext(NonCancellable) { repo.flush() }
         }
@@ -225,3 +250,9 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
         runCatching { NotificationManagerCompat.from(applicationContext).notify(SUMMARY_ID, notification) }
     }
 }
+
+private data class PrefetchedMeta(
+    val id: String,
+    val probe: app.ultraslim.bridge.ProbeResult,
+    val motionInfo: MotionPhotoInfo?,
+)

@@ -100,6 +100,24 @@ interface HistoryDao {
 
     @Query("SELECT COUNT(*) FROM history WHERE status = 'DONE'")
     fun countDone(): Flow<Int>
+
+    @Query("SELECT COUNT(*) as countDone, COALESCE(SUM(inputBytes), 0) as totalInputBytes, COALESCE(SUM(outputBytes), 0) as totalOutputBytes, COALESCE(SUM(CASE WHEN hadGainMap THEN 1 ELSE 0 END), 0) as gainmapCount FROM history WHERE status = 'DONE'")
+    fun flowStats(): Flow<HistoryStats>
+}
+
+data class HistoryStats(
+    val countDone: Int = 0,
+    val totalInputBytes: Long = 0L,
+    val totalOutputBytes: Long = 0L,
+    val gainmapCount: Int = 0,
+) {
+    val totalSavedBytes: Long get() = totalInputBytes - totalOutputBytes
+    val savedPercent: Float get() = if (totalInputBytes > 0L) (totalSavedBytes.toFloat() / totalInputBytes.toFloat()).coerceIn(-1f, 1f) else 0f
+    val avgSavedBytes: Long get() = if (countDone > 0) (totalSavedBytes / countDone) else 0L
+    val equivalentPhotosSaved: Int get() = if (countDone > 0 && totalInputBytes > 0L) {
+        val avgInput = totalInputBytes / countDone
+        if (avgInput > 0) (totalSavedBytes / avgInput).toInt().coerceAtLeast(0) else 0
+    } else 0
 }
 
 @Entity(tableName = "batches")
