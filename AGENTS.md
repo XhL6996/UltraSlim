@@ -39,6 +39,11 @@ build-host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 
 ## 关键实现说明
 
+- **AVIF 相册兼容**：App 新任务默认开启 `avifGainmapCompatibility`；用户显式关闭仍保留，原生/JNI 默认 false，旧快照缺字段按 false。彩色增益图转换为实际 BT.601 限定域 YCbCr 4:4:4，再 AOM 无损编码；不缩小或重建，不保证 RGB 逐值无损。关闭开关时保留 Identity GBR，但必须提示部分 Apple / Android 相册会偏色。不要将兼容模式标为逐值无损。
+- AVIF 增益图超过 512 像素时使用 512×512 HEIF grid，避免单包超出 MediaCodec 输入缓冲。主图任一边超过 4096 时用 2048×2048 grid，保持原分辨率、ICC/NCLX 和 EXIF。`patch_avif_grid.py` 同时修复 libheif grid 的内存 ISPE，防止后续 tmap 写成 0×0；分块不得复用单图 gainmap 缓存。
+- 奇数尺寸 HDR AVIF 主图使用 AOM 4:4:4，避免 4:2:0 偶数画布及仅主图 clap 使系统丢失 gainmap。通常尺寸仍用 SVT。该例外比 SVT 慢，但不裁剪、不缩放原图或 gainmap。
+- App 在 API 34+ 保存兼容 HDR AVIF 前检查平台能否解码主图并读出 gainmap；失败不保存，保留原图并明确提示。API 34 以下没有此系统检查能力。平台可读不代表色彩逐值无损或所有相册视觉验收通过。
+
 - 两条转码路径，按请求自动选择：
   - **preserve（原样保留 gainmap）**：默认且唯一的 HDR 路径；主图重压缩/缩放/换格式，gainmap 像素逐值保留（HEIF/AVIF 走无损 GBR/mono 直写）。旧 gainmapScale / gainmapQuality / multiChannelGainmap 参数对保留行为无影响（仅为接口/快照兼容保留）。*不要*对 gainmap 做下采样——实验证明即使 2x bilinear 下采样也会砍掉高光增益。
   - **rebuild（重建 gainmap）**：仅在显式传 `preserveGainMap=false` 时走的 libultrahdr 全解码重编码逃生通道（自一致、已验证）。preserve 不支持的情况（>8 位增益图、容器 HDR 转 JPEG）明确报错（errorCode 31）并保持输出为空，绝不静默回退 rebuild。
@@ -57,7 +62,7 @@ build-host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 ## 性能与历史页（2026-10-08）
 
 - SVT-AV1 使用 `COMPILE_C_ONLY=OFF`，ARM 优化由运行时 CPU 检测分派，禁止全局强制 SVE2 ISA。
-- `retrySmaller` 在原生层仅重试一次主图质量（下降 5，最低 80）；复用解码/缩放结果。HEIF 增益图码流缓存限定在一个 `GainMapRetryScope` 内，图像/编码格式/增益图参数必须不变，退出或异常时清理；JXL 复用同一 payload 的 jhgm。此改动依赖重建 libheif 本地补丁。
+- `retrySmaller` 在原生层仅重试一次主图质量（下降 5，最低 80）；复用解码/缩放结果。非分块 HEIF 增益图码流缓存限定在一个 `GainMapRetryScope` 内，图像/编码格式/增益图参数必须不变，退出或异常时清理；JXL 复用同一 payload 的 jhgm。此改动依赖重建 libheif 本地补丁。
 - HEIC 增益图随速度档位采用 slow/medium/veryfast；AVIF 无损增益图采用 AOM speed 4/6/8，仍保持像素逐值一致。
 - 百万像素以上的缩放/YUV 预处理最多 4 个工作线程，编码前 join；批次仍逐张转换，避免多张全分辨率 HDR 同时驻留。
 - 历史按本地自然日分组，右滑日期标题确认删除；按日期查询包含当前分页外、同筛选条件的记录。只删除应用内成品及记录，已存相册图片不删除。

@@ -44,6 +44,16 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.HorizontalDivider
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
+import androidx.compose.material.icons.rounded.BookmarkBorder
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -271,6 +281,9 @@ class OptionsCallbacks(
     val onResizePercentChange: (Int) -> Unit,
     val onOnlySmallerChange: (Boolean) -> Unit = {},
     val onKeepLocationChange: (Boolean) -> Unit = {},
+    val onAvifGainmapCompatibilityChange: (Boolean) -> Unit = {},
+    val onSaveAsDefault: (() -> Unit)? = null,
+    val onResetToDefault: (() -> Unit)? = null,
 )
 
 /** Named bundles of conversion parameters shown as quick-select chips. */
@@ -295,8 +308,89 @@ enum class CompressionPreset(
 }
 
 /**
- * The conversion options card, shared by the home screen and the settings
- * screen. Every change is persisted through the supplied callbacks.
+ * 底部或常驻展示的紧凑“方案胶囊条”
+ */
+@Composable
+fun SchemeCapsuleBar(
+    defaults: ConversionDefaults,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val activePreset = remember(defaults) {
+        CompressionPreset.entries.firstOrNull { it.matches(defaults) }
+    }
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        shape = RoundedCornerShape(16.dp),
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                modifier = Modifier.weight(1f),
+            ) {
+                Icon(
+                    Icons.Rounded.Tune,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                Text(
+                    "输出方案",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                BadgeChip(
+                    text = defaults.format.label,
+                    containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                )
+                BadgeChip(
+                    text = activePreset?.label ?: "品质 ${defaults.quality}",
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                )
+                if (defaults.resizePercent != 100) {
+                    BadgeChip(
+                        text = "${defaults.resizePercent}% 尺寸",
+                        containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                        contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                Text(
+                    "微调",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+                Icon(
+                    Icons.Rounded.KeyboardArrowDown,
+                    contentDescription = "展开配置",
+                    modifier = Modifier.size(18.dp),
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * 转换选项面板：结构清晰的三层递进布局
+ * 1. 核心格式与画质预设（90% 场景）
+ * 2. 基础输出与防变大保障
+ * 3. 进阶参数（尺寸、速度、精确品质、EXIF）折叠
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -316,7 +410,8 @@ fun ConversionOptionsPanel(
             modifier = Modifier.padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            SectionHeader("输出格式", "推荐优先使用 AVIF、HEIC 或 JXL")
+            // === 第一层：输出格式与画质预设 ===
+            SectionHeader("1. 输出格式", "优先推荐 AVIF / HEIC 保持高画质极省体积")
             val formats = OutputFormat.entries
             SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
                 formats.forEachIndexed { index, format ->
@@ -334,54 +429,119 @@ fun ConversionOptionsPanel(
             }
             val formatTip = when (defaults.format) {
                 OutputFormat.AVIF -> "AVIF：现代 AV1 编码，体积超小；实况照片将导出为静止 HDR"
-                OutputFormat.HEIC -> "HEIC：高效 HEVC 编码，相册兼容性最佳，完美保留实况动态"
-                OutputFormat.JXL -> "JXL：JPEG XL 现代格式，极致纹理保真；实况照片将导出为静止 HDR"
-                OutputFormat.JPEG -> "JPEG：经典兼容格式，体积缩减相对有限，完美保留实况动态"
+                OutputFormat.HEIC -> "HEIC：高效 HEVC 编码，支持保留实况照片；系统相册普遍支持"
+                OutputFormat.JXL -> "JXL：JPEG XL 现代格式，保留极致微观纹理与无损级色彩"
+                OutputFormat.JPEG -> "JPEG：经典通用格式，最大兼容性，体积缩减相对有限"
             }
             Text(formatTip, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
 
             val matchedPreset = CompressionPreset.entries.firstOrNull { it.matches(defaults) }
-            SectionHeader("画质档位", matchedPreset?.description ?: "自定义画质数值 ${defaults.quality} · Gain Map 始终无损保留")
+            SectionHeader("2. 画质与压缩档位", matchedPreset?.description ?: "自定义品质值 ${defaults.quality} / 缩放 ${defaults.resizePercent}%")
             FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 CompressionPreset.entries.forEach { preset ->
-                    FilterChip(selected = matchedPreset == preset, onClick = { callbacks.onPreset(preset) }, enabled = enabled, label = { Text(preset.label) })
+                    FilterChip(
+                        selected = matchedPreset == preset,
+                        onClick = { callbacks.onPreset(preset) },
+                        enabled = enabled,
+                        label = { Text(preset.label) },
+                    )
                 }
             }
-            Surface(color = MaterialTheme.colorScheme.primaryContainer, shape = MaterialTheme.shapes.medium) {
-                Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("Gain Map · 跟随原图", style = MaterialTheme.typography.titleSmall)
-                    Text(if (defaults.format == OutputFormat.JPEG) "直接复用 JPEG 原始增益图；其他 HDR 输入请选择 HEIC / AVIF / JXL。"
-                        else "增益图独立无损编码，不缩小、不重建；方向与主图同步。", style = MaterialTheme.typography.bodySmall)
+
+            // HDR / Gainmap 原样保留特性卡片
+            Surface(
+                color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.6f),
+                shape = MaterialTheme.shapes.medium,
+            ) {
+                Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    val compatibleAvif = defaults.format == OutputFormat.AVIF && defaults.avifGainmapCompatibility
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        Icon(Icons.Rounded.Tune, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
+                        Text(
+                            if (compatibleAvif) "HDR · 相册兼容模式" else "Gain Map · 原样保留",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                    }
+                    Text(
+                        when {
+                            compatibleAvif -> "保留 HDR 效果、增益图尺寸与参数；转换兼顾主流系统相册解析。"
+                            defaults.format == OutputFormat.JPEG -> "复用 JPEG 原始增益图流；其它 HDR 源图推荐 HEIC / AVIF / JXL。"
+                            else -> "增益图独立无损编码，不缩小、不重新计算；高光质感 100% 保留。"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
+                    )
                 }
             }
-            SwitchRow("仅保留更小结果", "若压缩后体积未比原图小，自动保留原图，杜绝反向变大", defaults.onlySmaller, callbacks.onOnlySmallerChange, enabled = enabled)
+
+            // === 第二层：核心保护与保存选项 ===
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+            SectionHeader("3. 保护与保存策略")
+            SwitchRow(
+                title = "仅保留更小结果",
+                hint = "若压缩后体积未减小，自动保留原图，杜绝反向变大",
+                checked = defaults.onlySmaller,
+                onCheckedChange = callbacks.onOnlySmallerChange,
+                enabled = enabled,
+            )
+            if (defaults.format == OutputFormat.AVIF) {
+                SwitchRow(
+                    title = "AVIF 相册兼容",
+                    hint = "针对部分手机相册避免色彩偏差；关闭则保持 RGB 逐像素直写",
+                    checked = defaults.avifGainmapCompatibility,
+                    onCheckedChange = callbacks.onAvifGainmapCompatibilityChange,
+                    enabled = enabled,
+                )
+            }
+            if (showAutoSave) {
+                SwitchRow(
+                    title = "自动保存到相册",
+                    hint = "转换完成后自动写入系统 相册/UltraSlim 目录",
+                    checked = defaults.autoSave,
+                    onCheckedChange = callbacks.onAutoSaveChange,
+                    enabled = enabled,
+                )
+            }
+
+            // === 第三层：进阶参数折叠区 ===
             var advanced by remember { mutableStateOf(false) }
-            TextButton(onClick = { advanced = !advanced }, enabled = enabled) { Text(if(advanced) "收起更多选项" else "更多选项（画质数值、尺寸、速度、元数据）") }
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHighest.copy(alpha = 0.5f),
+                modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(enabled = enabled) { advanced = !advanced },
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column {
+                        Text("进阶参数与元数据", style = MaterialTheme.typography.titleSmall)
+                        Text("尺寸缩放、速度档位、精确品质、EXIF 与 GPS", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                    Icon(
+                        if (advanced) Icons.Rounded.KeyboardArrowUp else Icons.Rounded.KeyboardArrowDown,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+
             AnimatedVisibility(
                 visible = advanced,
                 enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
                 exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
-                    SliderOption("画质数值（进阶）", defaults.quality, 50f..100f, 0, callbacks.onQualityChange, enabled = enabled)
+                Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    SliderOption("精确画质数值", defaults.quality, 50f..100f, 0, callbacks.onQualityChange, enabled = enabled)
                     Text(
-                        "数值越高画质越好、体积越大；100 是编码器档位，不代表无损。拿不准就用上面的画质档位。",
+                        "数值越高画质越好、体积越大。常用 85~92 即可获得近乎无损的视觉观感。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    SectionHeader("编码速度", "更快编码可能增加体积或影响细节，建议先试转")
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        listOf(0 to "画质", 1 to "平衡", 2 to "速度").forEach { (level, label) ->
-                            FilterChip(
-                                selected = defaults.speedLevel == level,
-                                onClick = { callbacks.onSpeedLevelChange(level) },
-                                enabled = enabled,
-                                label = { Text(label) },
-                            )
-                        }
-                    }
 
-                    SectionHeader("分辨率", "缩小分辨率可大幅减小体积")
+                    SectionHeader("分辨率缩放", "缩小分辨率可大幅减少高像素照片的体积")
                     FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         listOf(100, 75, 50).forEach { percent ->
                             FilterChip(
@@ -393,31 +553,72 @@ fun ConversionOptionsPanel(
                         }
                     }
 
+                    SectionHeader("编码速度档位", "更快编码可能略微增加体积，建议先试转对比")
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        listOf(0 to "画质优先", 1 to "平衡推荐", 2 to "速度优先").forEach { (level, label) ->
+                            FilterChip(
+                                selected = defaults.speedLevel == level,
+                                onClick = { callbacks.onSpeedLevelChange(level) },
+                                enabled = enabled,
+                                label = { Text(label) },
+                            )
+                        }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
+
                     SwitchRow(
-                        title = "保留 EXIF",
-                        hint = "保留拍摄时间、地点等元数据",
+                        title = "保留 EXIF 信息",
+                        hint = "保留拍摄器材、曝光参数、时间等",
                         checked = defaults.keepExif,
                         onCheckedChange = callbacks.onKeepExifChange,
                         enabled = enabled,
                     )
-                    SwitchRow("保留位置数据", "关闭后移除 EXIF GPS 信息", defaults.keepLocation, callbacks.onKeepLocationChange, enabled = enabled)
+                    SwitchRow(
+                        title = "保留 GPS 位置信息",
+                        hint = "关闭后将擦除照片拍摄地理坐标，保护隐私",
+                        checked = defaults.keepLocation,
+                        onCheckedChange = callbacks.onKeepLocationChange,
+                        enabled = enabled,
+                    )
                     SwitchRow(
                         title = "允许纯 SDR 转换",
-                        hint = "没有 Gain Map 的图片也进行转码",
+                        hint = "没有 Gain Map 增益图的普通照片也执行转码",
                         checked = defaults.allowSdr,
                         onCheckedChange = callbacks.onAllowSdrChange,
                         enabled = enabled,
                     )
                 }
             }
-            if (showAutoSave) {
-                SwitchRow(
-                    title = "自动保存到相册",
-                    hint = "转换完成后写入 相册/UltraSlim",
-                    checked = defaults.autoSave,
-                    onCheckedChange = callbacks.onAutoSaveChange,
-                    enabled = enabled,
-                )
+
+            // 本次参数与全局默认参数快捷同步条
+            if (callbacks.onSaveAsDefault != null || callbacks.onResetToDefault != null) {
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        "当前仅对本次任务生效",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        if (callbacks.onResetToDefault != null) {
+                            TextButton(onClick = callbacks.onResetToDefault, enabled = enabled) {
+                                Text("重置为默认")
+                            }
+                        }
+                        if (callbacks.onSaveAsDefault != null) {
+                            OutlinedButton(onClick = callbacks.onSaveAsDefault, enabled = enabled) {
+                                Icon(Icons.Rounded.BookmarkBorder, null, Modifier.size(16.dp))
+                                Spacer(Modifier.width(4.dp))
+                                Text("保存为全局默认")
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -559,7 +760,7 @@ private fun ImageFallbackPlaceholder() {
 }
 
 /**
- * 批次时间戳分组头部：清晰展示本次导入/转换的时间（今天 17:01 / 刚刚 / 昨天等）、张数与省下体积，并支持批次级快捷操作。
+ * 批次时间戳分组头部：清晰展示本次导入/转换的时间（今天 17:01 / 刚刚 / 昨天等）、张数与省下体积，并支持批次级快捷操作与折叠/展开。
  */
 @Composable
 fun BatchGroupHeader(
@@ -568,12 +769,26 @@ fun BatchGroupHeader(
     modifier: Modifier = Modifier,
     savedBytes: Long? = null,
     statusSummary: String? = null,
+    collapsible: Boolean = false,
+    collapsed: Boolean = false,
+    onToggleCollapse: (() -> Unit)? = null,
     action: @Composable (() -> Unit)? = null,
 ) {
+    val rotation by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (collapsed) 0f else 180f,
+        animationSpec = Motion.accordion(),
+        label = "collapseRotation",
+    )
     Row(
         modifier = modifier
             .fillMaxWidth()
-            .padding(top = 10.dp, bottom = 4.dp),
+            .clip(RoundedCornerShape(12.dp))
+            .then(
+                if (collapsible && onToggleCollapse != null) {
+                    Modifier.clickable(onClick = onToggleCollapse)
+                } else Modifier
+            )
+            .padding(horizontal = if (collapsible) 6.dp else 0.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.SpaceBetween,
     ) {
@@ -594,7 +809,22 @@ fun BatchGroupHeader(
                 )
             }
             Column {
-                Text(title, style = MaterialTheme.typography.titleSmall)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text(title, style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
+                    if (collapsible) {
+                        Icon(
+                            Icons.Rounded.KeyboardArrowDown,
+                            contentDescription = if (collapsed) "展开" else "折叠",
+                            modifier = Modifier
+                                .size(18.dp)
+                                .rotate(rotation),
+                            tint = MaterialTheme.colorScheme.primary,
+                        )
+                    }
+                }
                 val sub = buildString {
                     append("$count 张照片")
                     if (savedBytes != null && savedBytes > 0) {
@@ -602,6 +832,9 @@ fun BatchGroupHeader(
                     }
                     if (!statusSummary.isNullOrBlank()) {
                         append(" · $statusSummary")
+                    }
+                    if (collapsible && collapsed) {
+                        append(" · 点击展开")
                     }
                 }
                 Text(

@@ -45,6 +45,7 @@ data class ConversionDefaults(
     val keepLocation: Boolean = true,
     val speedLevel: Int = 1,
     val resizePercent: Int = 100,
+    val avifGainmapCompatibility: Boolean = true,
 ) {
     fun toConversionSettings(): ConversionSettings =
         ConversionSettings(
@@ -58,6 +59,7 @@ data class ConversionDefaults(
             allowSdr = allowSdr,
             speedLevel = speedLevel,
             resizePercent = resizePercent,
+            avifGainmapCompatibility = avifGainmapCompatibility,
         )
 }
 
@@ -78,6 +80,7 @@ class SettingsRepository(private val context: Context) {
         val KEEP_LOCATION = booleanPreferencesKey("keep_location")
         val SPEED_LEVEL = intPreferencesKey("speed_level")
         val RESIZE_PERCENT = intPreferencesKey("resize_percent")
+        val AVIF_GAINMAP_COMPATIBILITY = booleanPreferencesKey("avif_gainmap_compatibility")
     }
 
     val defaults: Flow<ConversionDefaults> = context.settingsDataStore.data.map { p ->
@@ -94,6 +97,7 @@ class SettingsRepository(private val context: Context) {
             keepLocation = p[Keys.KEEP_LOCATION] ?: true,
             speedLevel = p[Keys.SPEED_LEVEL] ?: 1,
             resizePercent = p[Keys.RESIZE_PERCENT] ?: 100,
+            avifGainmapCompatibility = p[Keys.AVIF_GAINMAP_COMPATIBILITY] ?: true,
         )
     }
 
@@ -154,6 +158,28 @@ class SettingsRepository(private val context: Context) {
     suspend fun setResizePercent(percent: Int) {
         context.settingsDataStore.edit { it[Keys.RESIZE_PERCENT] = percent.coerceIn(25, 100) }
     }
+
+    suspend fun setAvifGainmapCompatibility(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.AVIF_GAINMAP_COMPATIBILITY] = enabled }
+    }
+
+    suspend fun setDefaults(d: ConversionDefaults) {
+        context.settingsDataStore.edit { p ->
+            p[Keys.OUTPUT_FORMAT] = d.format.extension
+            p[Keys.QUALITY] = d.quality.coerceIn(50, 100)
+            p[Keys.GAINMAP_QUALITY] = d.gainmapQuality.coerceIn(30, 90)
+            p[Keys.GAINMAP_SCALE] = d.gainmapScale
+            p[Keys.MULTI_CHANNEL] = d.multiChannelGainmap
+            p[Keys.KEEP_EXIF] = d.keepExif
+            p[Keys.ALLOW_SDR] = d.allowSdr
+            p[Keys.AUTO_SAVE] = d.autoSave
+            p[Keys.ONLY_SMALLER] = d.onlySmaller
+            p[Keys.KEEP_LOCATION] = d.keepLocation
+            p[Keys.SPEED_LEVEL] = d.speedLevel.coerceIn(0, 2)
+            p[Keys.RESIZE_PERCENT] = d.resizePercent.coerceIn(25, 100)
+            p[Keys.AVIF_GAINMAP_COMPATIBILITY] = d.avifGainmapCompatibility
+        }
+    }
 }
 
 fun ConversionDefaults.encode(): String = org.json.JSONObject().apply {
@@ -161,6 +187,7 @@ fun ConversionDefaults.encode(): String = org.json.JSONObject().apply {
     put("gainmapScale", gainmapScale); put("multiChannel", multiChannelGainmap); put("keepExif", keepExif)
     put("allowSdr", allowSdr); put("autoSave", autoSave); put("speed", speedLevel); put("resize", resizePercent)
     put("onlySmaller", onlySmaller); put("keepLocation", keepLocation)
+    put("avifGainmapCompatibility", avifGainmapCompatibility)
 }.toString()
 
 fun decodeDefaults(value: String): ConversionDefaults {
@@ -169,7 +196,9 @@ fun decodeDefaults(value: String): ConversionDefaults {
         gainmapQuality = j.getInt("gainmapQuality"), gainmapScale = j.getInt("gainmapScale"),
         multiChannelGainmap = j.getBoolean("multiChannel"), keepExif = j.getBoolean("keepExif"),
         allowSdr = j.getBoolean("allowSdr"), autoSave = j.getBoolean("autoSave"), speedLevel = j.getInt("speed"),
-        resizePercent = j.getInt("resize"), onlySmaller = j.optBoolean("onlySmaller", true), keepLocation = j.optBoolean("keepLocation", true))
+        resizePercent = j.getInt("resize"), onlySmaller = j.optBoolean("onlySmaller", true), keepLocation = j.optBoolean("keepLocation", true),
+        // Old queued jobs and history used pixel-exact encoding. Do not relabel them.
+        avifGainmapCompatibility = j.optBoolean("avifGainmapCompatibility", false))
 }
 
-fun ConversionDefaults.summary(): String = "${format.label} · 编码质量 $quality · ${if (resizePercent == 100) "原始尺寸" else "尺寸 $resizePercent%"} · Gain Map 原样保留 · ${if (autoSave) "自动保存" else "手动保存"}"
+fun ConversionDefaults.summary(): String = "${format.label} · 编码质量 $quality · ${if (resizePercent == 100) "原始尺寸" else "尺寸 $resizePercent%"} · ${if (format == OutputFormat.AVIF && avifGainmapCompatibility) "HDR 相册兼容" else "Gain Map 原样保留"} · ${if (autoSave) "自动保存" else "手动保存"}"

@@ -105,7 +105,8 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                                 UltraHdrBridge.nativeTranscode(input.fd, output.fd, options.format.codecId, quality,
                                     options.gainmapQuality, options.gainmapScale, options.multiChannelGainmap, options.keepExif,
                                     options.allowSdr, options.speedLevel, options.resizePercent,
-                                    Runtime.getRuntime().availableProcessors().coerceIn(2, 8), options.keepLocation, motionXmp, options.onlySmaller)
+                                    Runtime.getRuntime().availableProcessors().coerceIn(2, 8), options.keepLocation, motionXmp, options.onlySmaller,
+                                    avifGainmapCompatibility = options.avifGainmapCompatibility)
                             }
                         }
                     }
@@ -135,6 +136,9 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                         val why = "输出体积未比原图更小，为确保画质不劣化已保留原图"
                         repo.update(id) { it.copy(status = QueueStatus.SKIPPED, result = result, error = why) }
                         continue
+                    }
+                    if (verified.hasGainMap && options.format == OutputFormat.AVIF && options.avifGainmapCompatibility) {
+                        withContext(Dispatchers.IO) { AvifOutputValidation.requireReadableGainmap(file) }
                     }
                     val name = outputName(item.displayName, options.format.extension, id, item.createdAt, motionPhoto = liveAttached)
                     val liveSummary = if (motionInfo != null) {

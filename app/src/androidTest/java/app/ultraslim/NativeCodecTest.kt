@@ -3,11 +3,67 @@ package app.ultraslim
 import androidx.test.platform.app.InstrumentationRegistry
 import android.os.ParcelFileDescriptor
 import app.ultraslim.bridge.UltraHdrBridge
+import app.ultraslim.data.encode
 import java.io.File
 import org.junit.Test
 import org.junit.Assert.*
 
 class NativeCodecTest {
+    @Test fun compatibilityValidationRejectsAnSdrOnlyOutput() {
+        org.junit.Assume.assumeTrue(android.os.Build.VERSION.SDK_INT >= 34)
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val file = File(context.cacheDir, "missing-gainmap.jpg")
+        val bitmap = android.graphics.Bitmap.createBitmap(32, 32, android.graphics.Bitmap.Config.ARGB_8888)
+        try {
+            file.outputStream().use { bitmap.compress(android.graphics.Bitmap.CompressFormat.JPEG, 90, it) }
+            try {
+                app.ultraslim.convert.AvifOutputValidation.requireReadableGainmap(file)
+                fail("An SDR bitmap must not be accepted as verified HDR")
+            } catch (e: IllegalStateException) {
+                assertTrue(e.message.orEmpty().contains("HDR 增益图"))
+            }
+        } finally { bitmap.recycle(); file.delete() }
+    }
+    /** Optional camera sample placed in the QA app's private files directory. */
+    @Test fun avifCompatibilityCameraSampleThroughJni() {
+        org.junit.Assume.assumeTrue(InstrumentationRegistry.getArguments().getString("avifCameraSample") == "true")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val source = File(context.filesDir, "avif-camera-source.jpg")
+        assertTrue("Stage the camera sample in the QA app first", source.isFile)
+        val output = File(context.filesDir, "avif-camera-compatible.avif")
+        // Exercise the same persisted options and JNI argument as ConversionWorker.
+        val options = app.ultraslim.data.decodeDefaults(app.ultraslim.data.ConversionDefaults(avifGainmapCompatibility = true).encode())
+        assertTrue(options.avifGainmapCompatibility)
+        ParcelFileDescriptor.open(source, ParcelFileDescriptor.MODE_READ_ONLY).use { a ->
+            ParcelFileDescriptor.open(output, ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_TRUNCATE or ParcelFileDescriptor.MODE_READ_WRITE).use { b ->
+                val result = UltraHdrBridge.nativeTranscode(a.fd, b.fd, options.format.codecId, options.quality,
+                    options.gainmapQuality, options.gainmapScale, options.multiChannelGainmap, options.keepExif,
+                    options.allowSdr, options.speedLevel, options.resizePercent, 4, options.keepLocation,
+                    retrySmaller = options.onlySmaller, avifGainmapCompatibility = options.avifGainmapCompatibility)
+                assertTrue(result.error, result.isSuccess)
+                val input = UltraHdrBridge.nativeProbe(a.fd)
+                val probe = UltraHdrBridge.nativeProbe(b.fd)
+                assertTrue(probe.isSuccess && probe.hasGainMap)
+                assertEquals(input.gainmapWidth * input.gainmapHeight, probe.gainmapWidth * probe.gainmapHeight)
+                android.util.Log.i("UltraSlimVerify", "compatible AVIF bytes=${result.outputBytes} map=${probe.gainmapWidth}x${probe.gainmapHeight}")
+            }
+        }
+        // Platform readability is checked separately: older emulators can encode
+        // the same bytes while their system decoder has no AVIF gain-map support.
+    }
+
+    @Test fun avifCameraPlatformValidationMatchesDeviceCapability() {
+        val expected = InstrumentationRegistry.getArguments().getString("expectedAvifPlatformHdr")
+        org.junit.Assume.assumeTrue(expected == "true" || expected == "false")
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val output = File(context.filesDir, "avif-camera-compatible.avif")
+        assertTrue("Run the camera JNI test first", output.isFile)
+        var readable = true
+        try { app.ultraslim.convert.AvifOutputValidation.requireReadableGainmap(output) }
+        catch (e: IllegalStateException) { readable = false }
+        assertEquals(expected == "true", readable)
+    }
+
     @Test fun alignedGraphicsJniLoads() {
         // JNI_OnLoad registers the unchanged 1.0.1 API on the rebuilt native component.
         System.loadLibrary("androidx.graphics.path")

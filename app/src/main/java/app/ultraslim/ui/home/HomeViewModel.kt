@@ -487,11 +487,28 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     fun setMultiChannel(v: Boolean) = change { it.copy(multiChannelGainmap = v) }
     fun setKeepExif(v: Boolean) = change { it.copy(keepExif = v) }
     fun setKeepLocation(v: Boolean) = change { it.copy(keepLocation = v) }
+    fun setAvifGainmapCompatibility(v: Boolean) = change { it.copy(avifGainmapCompatibility = v) }
     fun setAllowSdr(v: Boolean) = change { it.copy(allowSdr = v) }
     fun setAutoSave(v: Boolean) = change { it.copy(autoSave = v) }
     fun setOnlySmaller(v: Boolean) = change { it.copy(onlySmaller = v) }
     fun setSpeedLevel(v: Int) = change { it.copy(speedLevel = v) }
     fun setResizePercent(v: Int) = change { it.copy(resizePercent = v) }
+
+    fun saveCurrentAsDefault() {
+        viewModelScope.launch {
+            settings.setDefaults(runDefaults.value)
+            _events.emit(HomeEvent.Info("已将当前配置保存为全局默认"))
+        }
+    }
+
+    fun resetToDefault() {
+        if (uiState.value.isConverting || starting) return
+        viewModelScope.launch {
+            val def = settings.defaults.first()
+            runDefaults.value = def
+            _events.emit(HomeEvent.Info("已恢复为全局默认配置"))
+        }
+    }
 
     // ---- internals ----
 

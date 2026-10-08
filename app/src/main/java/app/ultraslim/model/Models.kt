@@ -35,4 +35,5 @@ data class ConversionSettings(
     val allowSdr: Boolean = true,
     val speedLevel: Int = 1,
     val resizePercent: Int = 100,
+    val avifGainmapCompatibility: Boolean = true,
 )

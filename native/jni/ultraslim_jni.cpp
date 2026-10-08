@@ -40,7 +40,7 @@ JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeProbe(J
 JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeTranscode(
     JNIEnv* env, jclass /*unused*/, jint inFd, jint outFd, jint outCodec, jint quality,
     jint gainmapQuality, jint gainmapScale, jboolean multiChannelGainmap, jboolean keepExif,
-    jboolean allowSdrTranscode, jint speedLevel, jint resizePercent, jint codecThreads, jboolean keepLocation, jbyteArray xmp, jboolean retrySmaller) {
+    jboolean allowSdrTranscode, jint speedLevel, jint resizePercent, jint codecThreads, jboolean keepLocation, jbyteArray xmp, jboolean retrySmaller, jboolean avifGainmapCompatibility) {
   try {
     ultraslim::TranscodeOptions o;
     if (xmp) {
@@ -51,6 +51,7 @@ JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeTransco
       if (env->ExceptionCheck()) return nullptr;
     }
     o.retrySmaller = retrySmaller == JNI_TRUE;
+    o.avifGainmapCompatibility = avifGainmapCompatibility == JNI_TRUE;
     o.outCodec = outCodec;
     o.quality = quality;
     o.gainmapQuality = gainmapQuality;

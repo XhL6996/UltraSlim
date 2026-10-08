@@ -13,6 +13,21 @@ import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class PersistenceTest {
+    @Test fun avifCompatibilitySnapshotsKeepTheirMeaning() {
+        val defaults = ConversionDefaults()
+        assertTrue(defaults.avifGainmapCompatibility)
+        for (enabled in listOf(false, true)) {
+            val options = defaults.copy(avifGainmapCompatibility = enabled)
+            assertEquals(options, decodeDefaults(options.encode()))
+            assertEquals(enabled, options.toConversionSettings().avifGainmapCompatibility)
+            assertEquals(enabled, options.summary().contains("HDR 相册兼容"))
+        }
+        val oldSnapshot = org.json.JSONObject(defaults.encode()).apply { remove("avifGainmapCompatibility") }
+        val restored = decodeDefaults(oldSnapshot.toString())
+        assertFalse(restored.avifGainmapCompatibility)
+        assertTrue(restored.summary().contains("Gain Map 原样保留"))
+    }
+
     @Test fun migrateV1PreservesPendingHistory() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-test.db"

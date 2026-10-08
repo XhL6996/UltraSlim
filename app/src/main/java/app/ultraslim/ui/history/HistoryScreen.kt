@@ -2,6 +2,14 @@ package app.ultraslim.ui.history
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import app.ultraslim.ui.theme.Motion
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -26,6 +34,7 @@ import app.ultraslim.data.HistoryEntity
 import app.ultraslim.ui.appViewModelFactory
 import app.ultraslim.ui.components.*
 import app.ultraslim.util.*
+import java.time.LocalDate
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -41,6 +50,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
     var selected by remember { mutableStateOf(setOf<Long>()) }
     var confirmClear by remember { mutableStateOf(false) }
     var selecting by remember { mutableStateOf(false) }
+    var collapsedDates by remember { mutableStateOf(emptySet<LocalDate>()) }
     fun finishSelection() { selecting = false; selected = emptySet() }
     BackHandler(selecting && !state.busy) { finishSelection() }
     LaunchedEffect(vm) { vm.events.collect { snackbar.showSnackbar(it) } }
@@ -118,50 +128,127 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                     TextButton(enabled = !state.busy && visible.isNotEmpty(), onClick = {
                         selected = if (allSelected) emptySet() else visible.map { it.id }.toSet()
                     }) { Text(if (allSelected) "取消全选" else "全选当前页") }
-                } else if (visible.isNotEmpty()) Text("右滑日期标题可删除当天记录",
-                    style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                } else if (visible.isNotEmpty()) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            "点击日期可折叠 · 右滑可删除当天",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                        if (groups.size > 1) {
+                            val allCollapsed = collapsedDates.containsAll(groups.keys)
+                            TextButton(
+                                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 2.dp),
+                                onClick = {
+                                    collapsedDates = if (allCollapsed) emptySet<LocalDate>() else groups.keys
+                                }
+                            ) {
+                                Text(if (allCollapsed) "展开全部" else "折叠全部", style = MaterialTheme.typography.labelSmall)
+                            }
+                        }
+                    }
+                }
             }
             if (visible.isEmpty()) item { EmptyState(Icons.Rounded.History, "暂无此类记录", "完成的成品和保存状态会显示在这里") }
             groups.forEach { (date, records) ->
-                item(key = "date-$date") {
+                val isCollapsed = date in collapsedDates
+                item(key = "date-group-$date") {
                     val latestDelete by rememberUpdatedState({ vm.requestDeleteDate(date, filter) })
                     val swipe = rememberSwipeToDismissBoxState(confirmValueChange = {
                         if (it == SwipeToDismissBoxValue.StartToEnd) latestDelete()
                         false // Confirmation precedes deletion; cancellation leaves the header in place.
                     }, positionalThreshold = { it * 0.35f })
-                    SwipeToDismissBox(state = swipe, modifier = Modifier.testTag("history-date-$date"), enableDismissFromStartToEnd = !selecting && !state.busy,
-                        enableDismissFromEndToStart = false,
-                        backgroundContent = {
-                            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(16.dp)) {
-                                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                    Icon(Icons.Rounded.DeleteOutline, null)
-                                    Spacer(Modifier.width(8.dp)); Text("删除当天记录")
+                    Column(modifier = Modifier.fillMaxWidth().animateItem(placementSpec = Motion.itemPlacement())) {
+                        SwipeToDismissBox(state = swipe, modifier = Modifier.testTag("history-date-$date"), enableDismissFromStartToEnd = !selecting && !state.busy,
+                            enableDismissFromEndToStart = false,
+                            backgroundContent = {
+                                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(16.dp)) {
+                                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(Icons.Rounded.DeleteOutline, null)
+                                        Spacer(Modifier.width(8.dp)); Text("删除当天记录")
+                                    }
+                                }
+                            }) {
+                            Surface(
+                                color = if (isCollapsed) MaterialTheme.colorScheme.surfaceContainerLow else MaterialTheme.colorScheme.background,
+                                shape = RoundedCornerShape(14.dp),
+                                modifier = Modifier.fillMaxWidth().animateContentSize(animationSpec = Motion.accordion()),
+                            ) {
+                                BatchGroupHeader(
+                                    title = historyDateTitle(date),
+                                    count = records.size,
+                                    savedBytes = records.sumOf { it.inputBytes - it.outputBytes },
+                                    collapsible = true,
+                                    collapsed = isCollapsed,
+                                    onToggleCollapse = {
+                                        collapsedDates = if (isCollapsed) collapsedDates - date else collapsedDates + date
+                                    },
+                                    action = {
+                                        if (selecting) {
+                                            val ids = records.map { it.id }.toSet()
+                                            val allSelected = selected.containsAll(ids)
+                                            TextButton(enabled = !state.busy, onClick = {
+                                                selected = if (allSelected) selected - ids else selected + ids
+                                                if (isCollapsed) collapsedDates = collapsedDates - date
+                                            }) {
+                                                Text(if (allSelected) "取消当天" else "选择当天")
+                                            }
+                                        } else IconButton(onClick = { latestDelete() }, enabled = !state.busy) {
+                                            Icon(Icons.Rounded.DeleteOutline, "删除${historyDateTitle(date)}的记录")
+                                        }
+                                    }
+                                )
+                            }
+                        }
+                        AnimatedVisibility(
+                            visible = !isCollapsed,
+                            enter = expandVertically(
+                                animationSpec = Motion.accordion(),
+                                expandFrom = Alignment.Top,
+                                clip = true,
+                            ) + fadeIn(
+                                animationSpec = Motion.standard(),
+                            ) + slideInVertically(
+                                animationSpec = Motion.accordion(),
+                                initialOffsetY = { -it / 6 },
+                            ),
+                            exit = shrinkVertically(
+                                animationSpec = Motion.accordionExit(),
+                                shrinkTowards = Alignment.Top,
+                                clip = true,
+                            ) + fadeOut(
+                                animationSpec = Motion.exit(240),
+                            ) + slideOutVertically(
+                                animationSpec = Motion.accordionExit(),
+                                targetOffsetY = { -it / 6 },
+                            ),
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(top = 10.dp),
+                                verticalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                records.forEach { entity ->
+                                    val checked = entity.id in selected
+                                    HistoryRow(
+                                        entity = entity,
+                                        selecting = selecting,
+                                        checked = checked,
+                                        enabled = !state.busy,
+                                        onClick = {
+                                            if (selecting) selected = if (checked) selected - entity.id else selected + entity.id
+                                            else onOpenDetail(entity.id)
+                                        },
+                                    )
                                 }
                             }
-                        }) {
-                        Surface(color = MaterialTheme.colorScheme.background, modifier = Modifier.fillMaxWidth()) {
-                            BatchGroupHeader(title = historyDateTitle(date), count = records.size,
-                                savedBytes = records.sumOf { it.inputBytes - it.outputBytes }, action = {
-                                    if (selecting) {
-                                        val ids = records.map { it.id }.toSet()
-                                        val allSelected = selected.containsAll(ids)
-                                        TextButton(enabled = !state.busy, onClick = { selected = if (allSelected) selected - ids else selected + ids }) {
-                                            Text(if (allSelected) "取消当天" else "选择当天")
-                                        }
-                                    } else IconButton(onClick = { latestDelete() }, enabled = !state.busy) {
-                                        Icon(Icons.Rounded.DeleteOutline, "删除${historyDateTitle(date)}的记录")
-                                    }
-                                })
                         }
                     }
-                }
-                items(records, key = { it.id }) { entity ->
-                    val checked = entity.id in selected
-                    HistoryRow(entity, selecting, checked, !state.busy,
-                        onClick = {
-                            if (selecting) selected = if (checked) selected - entity.id else selected + entity.id
-                            else onOpenDetail(entity.id)
-                        }, modifier = Modifier.animateItem())
                 }
             }
             if (state.items.size < state.convertedCount) item {

@@ -183,7 +183,10 @@ ExternalProject_Add_Step(libheif patch_inputs
     INDEPENDENT TRUE
     DEPENDEES update DEPENDERS patch
     COMMAND ${CMAKE_COMMAND} -E true
-    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_libheif.sh)
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_libheif.sh
+            ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_gainmap_grid.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_avif_grid.py
+            ${CMAKE_CURRENT_SOURCE_DIR}/patches/libheif_pr1503.patch)
 
 # ---------------------------------------------------------------- libjxl (JPEG XL encoder/decoder)
 ExternalProject_Add(libjxl

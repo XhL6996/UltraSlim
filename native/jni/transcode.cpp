@@ -1131,6 +1131,7 @@ void configureEncoder(heif_encoder* encoder, int outCodec, int speedLevel, int t
 struct GainMapPayload {
   mutable std::vector<uint8_t> encodedJxl;
   bool cacheForRetry = false;
+  bool avifGainmapCompatibility = false;
   SdrImage image;
   std::vector<uint8_t> iso;
   int codec = 1;
@@ -1145,9 +1146,11 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
     err = "gain map 数据不完整";
     return 24;
   }
-  // The gain map is data, not a second photograph. Preserve its samples exactly.
+  // The default preserves samples exactly. Android MediaCodec misinterprets
+  // Identity/GBR as BT.601; the explicit compatibility mode supplies real YCbCr.
   const heif_encoder_descriptor* descriptor = nullptr;
   const bool avif = gm.codec == 2;
+  const bool compatibleRgb = avif && gm.multiChannel && gm.avifGainmapCompatibility;
   if (heif_context_get_encoder_descriptors(ctx, avif ? heif_compression_AV1 : heif_compression_HEVC,
           avif ? "aom" : "x265", &descriptor, 1) != 1) {
     err = "缺少无损 Gain Map 编码器"; return 24;
@@ -1181,6 +1184,15 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
     uint8_t* uDst = heif_image_get_plane(image, heif_channel_Cb, &uStride);
     uint8_t* vDst = heif_image_get_plane(image, heif_channel_Cr, &vStride);
     for (int y = 0; y < gm.image.height; ++y) {
+      if (compatibleRgb) {
+        // Keep every map pixel and all HDR metadata. Only the color
+        // representation changes; the resulting YCbCr planes encode losslessly.
+        for (int x = 0; x < gm.image.width; ++x) {
+          yuvPixel(gm.image.rgba.data() + (size_t(y) * gm.image.width + x) * 4,
+                   yDst[y * yStride + x], uDst[y * uStride + x], vDst[y * vStride + x]);
+        }
+        continue;
+      }
       int x = 0;
 #if defined(__ARM_NEON)
       for (; x + 16 <= gm.image.width; x += 16) {
@@ -1215,8 +1227,9 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
   nclx.version = 1;
   nclx.color_primaries = heif_color_primaries_unspecified;
   nclx.transfer_characteristics = heif_transfer_characteristic_unspecified;
-  nclx.matrix_coefficients = heif_matrix_coefficients_RGB_GBR;
-  nclx.full_range_flag = 1;
+  nclx.matrix_coefficients = compatibleRgb ? heif_matrix_coefficients_ITU_R_BT_601_6
+                                         : heif_matrix_coefficients_RGB_GBR;
+  nclx.full_range_flag = compatibleRgb ? 0 : 1;
   heif_image_set_nclx_color_profile(image, &nclx);
 
   heif_color_profile_nclx* owned = nullptr;
@@ -1274,8 +1287,12 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
   heif_context* ctx = heif_context_alloc();
   heif_encoder* encoder = nullptr;
   const heif_encoder_descriptor* descriptor = nullptr;
+  // Subsampled grids need even canvases. A clap on only the base also makes
+  // system gain-map readers reject the HDR association. For odd HDR dimensions,
+  // use AOM 4:4:4 so both images retain their exact geometry without a crop.
+  const bool oddHdrAvif = outCodec == 2 && gainmap != nullptr && ((img.width | img.height) & 1);
   heif_context_get_encoder_descriptors(ctx, outCodec == 2 ? heif_compression_AV1 : heif_compression_HEVC,
-      outCodec == 2 ? "svt" : "x265", &descriptor, 1);
+      outCodec == 2 ? (oddHdrAvif ? "aom" : "svt") : "x265", &descriptor, 1);
   heif_error e = descriptor ? heif_context_get_encoder(ctx, descriptor, &encoder) :
       heif_error{heif_error_Encoder_plugin_error, heif_suberror_Unspecified, "编码器不可用"};
   if (e.code != heif_error_Ok) {
@@ -1284,18 +1301,21 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
     return 20;
   }
   heif_encoder_set_lossy_quality(encoder, ultrahdr::remapQualityForLibheif(quality));
-  heif_encoder_set_parameter(encoder, "chroma", "420");
+  heif_encoder_set_parameter(encoder, "chroma", oddHdrAvif ? "444" : "420");
   configureEncoder(encoder, outCodec, speedLevel, threads);
+  if (oddHdrAvif && speedLevel == 2) heif_encoder_set_parameter_integer(encoder, "speed", 8);
 
   heif_image* himg = nullptr;
-  e = heif_image_create(img.width, img.height, heif_colorspace_YCbCr, heif_chroma_420, &himg);
+  e = heif_image_create(img.width, img.height, heif_colorspace_YCbCr,
+                        oddHdrAvif ? heif_chroma_444 : heif_chroma_420, &himg);
   if (e.code != heif_error_Ok) {
     err = std::string("创建图像失败: ") + e.message;
     heif_encoder_release(encoder);
     heif_context_free(ctx);
     return 21;
   }
-  const int cw = (img.width + 1) / 2, ch = (img.height + 1) / 2;
+  const int cw = oddHdrAvif ? img.width : (img.width + 1) / 2;
+  const int ch = oddHdrAvif ? img.height : (img.height + 1) / 2;
   if(heif_image_add_plane(himg, heif_channel_Y, img.width, img.height, 8).code!=heif_error_Ok ||
      heif_image_add_plane(himg, heif_channel_Cb, cw, ch, 8).code!=heif_error_Ok ||
      heif_image_add_plane(himg, heif_channel_Cr, cw, ch, 8).code!=heif_error_Ok) {
@@ -1308,7 +1328,15 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
   if (yDst == nullptr || uDst == nullptr || vDst == nullptr) {
     err="获取图像平面失败";heif_image_release(himg);heif_encoder_release(encoder);heif_context_free(ctx);return 31;
   }
-  rgbaToYuv420Direct(img, yDst, yStride, uDst, uStride, vDst, vStride, /*bt709=*/!use601);
+  if (oddHdrAvif) {
+    parallelRows(img.height, size_t(img.width) * img.height, [&](int begin, int end) {
+      for (int y = begin; y < end; ++y) for (int x = 0; x < img.width; ++x) {
+        const uint8_t* pixel = img.rgba.data() + (size_t(y) * img.width + x) * 4;
+        if (use601) yuvPixel(pixel, yDst[y*yStride+x], uDst[y*uStride+x], vDst[y*vStride+x]);
+        else yuvPixel709(pixel, yDst[y*yStride+x], uDst[y*uStride+x], vDst[y*vStride+x]);
+      }
+    });
+  } else rgbaToYuv420Direct(img, yDst, yStride, uDst, uStride, vDst, vStride, /*bt709=*/!use601);
   heif_color_primaries primaries = heif_color_primaries_ITU_R_BT_709_5;
   if (gamut == UHDR_CG_DISPLAY_P3) {
     primaries = heif_color_primaries_SMPTE_EG_432_1;
@@ -1917,6 +1945,7 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
   } else {
     GainMapPayload payload;
     payload.cacheForRetry = opt.retrySmaller;
+    payload.avifGainmapCompatibility = opt.avifGainmapCompatibility;
     payload.image = std::move(gm);
     payload.iso = std::move(iso);
     payload.codec = opt.outCodec;

@@ -1,5 +1,9 @@
 # OPPO JPG → AVIF：Android P3 色彩兼容性修复
 
+> 后续真机反馈发现第二个独立问题：P3 识别正确时，RGB gain map 仍被平台错误转换，
+> 因此本文的 SDR 验证不能代表 Google 相册 HDR 显示已修复。
+> 详见 [HDR 增益图兼容性追查](2026-10-08-avif-hdr-followup.md)。
+
 ## 复现与原因
 
 用户样本为 4416 × 5888 的 Display P3 JPEG，包含 2208 × 2944 三通道 gain map。

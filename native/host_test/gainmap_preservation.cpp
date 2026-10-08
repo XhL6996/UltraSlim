@@ -18,7 +18,7 @@ static void check(bool ok, const char* msg) { if(!ok){fprintf(stderr,"FAIL: %s\n
 static std::vector<uint8_t> readFile(const std::string& path) {
  FILE*f=fopen(path.c_str(),"rb");check(f,"open");fseek(f,0,SEEK_END);long n=ftell(f);rewind(f);std::vector<uint8_t>b(n);check(fread(b.data(),1,n,f)==size_t(n),"read");fclose(f);return b;
 }
-struct Map { int w=0,h=0; bool multi=false; std::vector<uint8_t> rgb,compressed,iso; uhdr_gainmap_metadata_t meta{}; };
+struct Map { int w=0,h=0,matrix=-1,fullRange=-1; bool multi=false; std::vector<uint8_t> rgb,compressed,iso; uhdr_gainmap_metadata_t meta{}; };
 static Map map(const std::string& path, bool jpeg) {
  Map r;auto bytes=readFile(path);auto*d=uhdr_create_decoder();uhdr_compressed_image_t src{};src.data=bytes.data();src.data_sz=src.capacity=bytes.size();
  check(uhdr_dec_set_image(d,&src).error_code==UHDR_CODEC_OK && uhdr_dec_probe(d).error_code==UHDR_CODEC_OK,"gain map recognized");
@@ -31,6 +31,8 @@ static Map map(const std::string& path, bool jpeg) {
  } else {
   auto*c=heif_context_alloc();check(heif_context_read_from_file(c,path.c_str(),nullptr).code==heif_error_Ok,"container read");heif_image_handle*b=nullptr,*g=nullptr;
   heif_context_get_primary_image_handle(c,&b);check(heif_image_handle_get_gain_map_image_handle(b,&g).code==heif_error_Ok,"map handle");
+  heif_color_profile_nclx* profile=nullptr;
+  if(heif_image_handle_get_nclx_color_profile(g,&profile).code==heif_error_Ok){r.matrix=profile->matrix_coefficients;r.fullRange=profile->full_range_flag;heif_nclx_color_profile_free(profile);}
   r.iso.resize(heif_image_handle_get_gain_map_metadata_size(b));heif_image_handle_get_gain_map_metadata(b,r.iso.data());
   heif_image*i=nullptr;check(heif_decode_image(g,&i,heif_colorspace_undefined,heif_chroma_undefined,nullptr).code==heif_error_Ok,"native map decode");r.multi=heif_image_get_chroma_format(i)!=heif_chroma_monochrome;heif_image_release(i);
   check(heif_decode_image(g,&i,heif_colorspace_RGB,heif_chroma_interleaved_RGB,nullptr).code==heif_error_Ok,"map RGB decode");
@@ -60,20 +62,20 @@ static void sameMetadata(const Map&a,const Map&b){
  for(int c=0;c<3;c++) {check(a.meta.min_content_boost[c]==b.meta.min_content_boost[c] && a.meta.max_content_boost[c]==b.meta.max_content_boost[c] && a.meta.gamma[c]==b.meta.gamma[c] && a.meta.offset_sdr[c]==b.meta.offset_sdr[c] && a.meta.offset_hdr[c]==b.meta.offset_hdr[c],"HDR channel parameters unchanged");}
  check(a.meta.hdr_capacity_min==b.meta.hdr_capacity_min&&a.meta.hdr_capacity_max==b.meta.hdr_capacity_max&&a.meta.use_base_cg==b.meta.use_base_cg,"HDR headroom and color space unchanged");
 }
-static void equal(const Map&a,const Map&b,int orientation=1){
+static void equal(const Map&a,const Map&b,int orientation=1,int maxDiff=0){
  check(a.multi==b.multi,"original channel count preserved");int w=orientation>=5?a.h:a.w,h=orientation>=5?a.w:a.h;check(w==b.w&&h==b.h,"original map dimensions/orientation preserved");
  for(int y=0;y<a.h;y++)for(int x=0;x<a.w;x++){
   int dx=x,dy=y;switch(orientation){case 2:dx=a.w-1-x;break;case 3:dx=a.w-1-x;dy=a.h-1-y;break;case 4:dy=a.h-1-y;break;case 5:dx=y;dy=x;break;case 6:dx=a.h-1-y;dy=x;break;case 7:dx=a.h-1-y;dy=a.w-1-x;break;case 8:dx=y;dy=a.w-1-x;break;}
   for(int c=0;c<3;c++){
    int diff = std::abs((int)a.rgb[(y*a.w+x)*3+c] - (int)b.rgb[(dy*w+dx)*3+c]);
-   int maxDiff = 0;
    if(diff > maxDiff){fprintf(stderr,"pixel %d,%d channel %d: %d -> %d\n",x,y,c,a.rgb[(y*a.w+x)*3+c],b.rgb[(dy*w+dx)*3+c]);check(false,"gain map pixel-exact preservation");}
   }
  }
  sameMetadata(a,b);
 }
-static void convert(const std::string& src,const std::string& dst,int codec,int resize=100,int speed=1,bool retry=false,int quality=90){
+static void convert(const std::string& src,const std::string& dst,int codec,int resize=100,int speed=1,bool retry=false,int quality=90,bool compatible=false){
  int a=open(src.c_str(),O_RDONLY),b=open(dst.c_str(),O_RDWR|O_CREAT|O_TRUNC,0600);ultraslim::TranscodeOptions o;o.outCodec=codec;o.codecThreads=2;o.resizePercent=resize;o.speedLevel=speed;o.retrySmaller=retry;o.quality=quality;
+ o.avifGainmapCompatibility=compatible;
  // Deliberately incompatible legacy settings must have no effect on preservation.
  o.gainmapScale=128;o.gainmapQuality=1;o.multiChannelGainmap=false;
  auto r=ultraslim::transcodeImage(a,b,o);close(a);close(b);if(r.errorCode)fprintf(stderr,"%s\n",r.error.c_str());check(r.errorCode==0,"preserving transcode");
@@ -97,12 +99,15 @@ static void highBitDepthFixture(const std::string& path,const std::vector<uint8_
 int main(int argc,char**argv){
  if(argc==3 && std::string(argv[1])=="--preview-fixture") {fixture(argv[2],true,1,1025,769,4096,3072,true);return 0;}
  if(argc==3 && std::string(argv[1])=="--benchmark-fixture") {fixture(argv[2],true,1,1025,769,4096,3072);return 0;}
- if(argc==4 && std::string(argv[1])=="--compare") {
+ if(argc==3 && std::string(argv[1])=="--grid-fixture") {fixture(argv[2],true,1,513,769,5001,513);return 0;}
+ if(argc==4 && (std::string(argv[1])=="--compare" || std::string(argv[1])=="--compare-compatible")) {
   auto bytes=readFile(argv[2]);const bool jpegIn=bytes[0]==0xff&&bytes[1]==0xd8;auto out=readFile(argv[3]);const bool jpegOut=out[0]==0xff&&out[1]==0xd8;
   int orientation=1;
   if(jpegIn&&!jpegOut) {auto*d=uhdr_create_decoder();uhdr_compressed_image_t src{};src.data=bytes.data();src.data_sz=src.capacity=bytes.size();uhdr_dec_set_image(d,&src);uhdr_dec_probe(d);auto*e=uhdr_dec_get_exif(d);if(e){std::vector<uint8_t>x((uint8_t*)e->data,(uint8_t*)e->data+e->data_sz);orientation=ultraslim::ExifEditor(x).orientation();}uhdr_release_decoder(d);}
-  auto a=map(argv[2],jpegIn),b=map(argv[3],jpegOut);equal(a,b,orientation);
-  printf("PASS: %dx%d %s gain map, orientation %d, exact pixels and HDR metadata\n",a.w,a.h,a.multi?"RGB":"mono",orientation);return 0;
+  auto a=map(argv[2],jpegIn),b=map(argv[3],jpegOut);
+  const int maxDiff=std::string(argv[1])=="--compare-compatible" && a.multi ? 3 : 0;
+  equal(a,b,orientation,maxDiff);
+  printf("PASS: %dx%d %s gain map, orientation %d, max pixel error <= %d/255 and exact HDR metadata\n",a.w,a.h,a.multi?"RGB":"mono",orientation,maxDiff);return 0;
  }
  check(argc==3,"output-dir and Apple fixture required");std::string root=argv[1];
  auto apple=map(argv[2],true);check(apple.meta.use_base_cg==1,"Apple maps use the base color space");
@@ -121,6 +126,13 @@ int main(int argc,char**argv){
   auto jpg=src+".jpg";convert(src,jpg,0);auto copied=map(jpg,true);equal(original,copied);check(scanData(original.compressed)==scanData(copied.compressed),"JPEG gain map encoded scan unchanged");
   for(int codec:{1,2}){
    auto dst=src+"-"+std::to_string(codec);convert(src,dst,codec);auto first=map(dst,false);equal(original,first,orientation);
+   // Compatibility is opt-in, AVIF RGB only. Check every pixel including odd
+   // edges and all EXIF orientations, with bounded RGB/YUV rounding only.
+   auto compat=dst+"-compat";convert(src,compat,codec,50,2,false,90,true);
+   const auto compatibleMap=map(compat,false);
+   equal(original,compatibleMap,orientation,codec==2&&multi?3:0);
+   check(compatibleMap.matrix==(codec==2&&multi?6:0),"compatible RGB uses BT.601; strict/mono stays Identity");
+   check(compatibleMap.fullRange==(codec==2&&multi?0:1),"gain-map range matches encoded samples");
    auto round=dst+"-round";convert(dst,round,codec==1?2:1,50);auto second=map(round,false);equal(first,second);check(first.iso==second.iso,"ISO metadata preserved byte-for-byte between containers");
   }
  }
@@ -155,6 +167,45 @@ int main(int argc,char**argv){
     convert(dst, dst + "-heic", 1); equal(original, map(dst + "-heic", false));
    } else equal(original, map(dst, false));
   }
+ }
+ // Retry must reuse the compatible YCbCr map, never a stale Identity map.
+ {
+  const auto src=root+"/large-1.jpg",dst=src+"-compat-retry";
+  convert(src,dst+"-first",2,100,2,false,90,true);
+  check(readFile(dst+"-first").size()>=readFile(src).size(),"compatibility fixture triggers retry");
+  convert(src,dst,2,100,2,true,90,true);
+  convert(src,dst+"-expected",2,100,2,false,85,true);
+  check(readFile(dst)==readFile(dst+"-expected"),"compatible cached retry equals independent encoding");
+  equal(map(src,true),map(dst,false),1,3);
+ }
+ // Tiles must form the exact canvas, including partial right/bottom tiles.
+ // A retry must not substitute the first tile for every other tile.
+ for(bool multi : {false,true}) for(int orientation : {1,6}) {
+  const auto src=root+"/grid-"+std::to_string(multi)+"-"+std::to_string(orientation)+".jpg";
+  fixture(src,multi,orientation,513,769);
+  const auto original=map(src,true);
+  for(bool compatible : {false,true}) {
+   const auto dst=src+(compatible?"-compatible.avif":"-strict.avif");
+   convert(src,dst,2,100,2,true,90,compatible);
+   equal(original,map(dst,false),orientation,compatible&&multi?3:0);
+   auto*ctx=heif_context_alloc();heif_image_handle *base=nullptr,*gm=nullptr;
+   check(heif_context_read_from_file(ctx,dst.c_str(),nullptr).code==heif_error_Ok,"grid container");
+   heif_context_get_primary_image_handle(ctx,&base);
+   check(heif_image_handle_get_gain_map_image_handle(base,&gm).code==heif_error_Ok,"grid map");
+   heif_image_tiling tiles{};
+   check(heif_image_handle_get_image_tiling(gm,0,&tiles).code==heif_error_Ok,"grid tiling");
+   check(tiles.num_columns==2&&tiles.num_rows==2&&tiles.tile_width==512&&tiles.tile_height==512,"bounded map tiles");
+   heif_image_handle_release(gm);heif_image_handle_release(base);heif_context_free(ctx);
+  }
+ }
+ // Both primary and gain map use grids; odd primary dimensions require clap.
+ {
+  const auto src=root+"/base-grid.jpg",dst=root+"/base-grid.avif";
+  fixture(src,true,1,513,769,5001,513);
+  convert(src,dst,2,100,2,false,90,true);
+  equal(map(src,true),map(dst,false),1,3);
+  int fd=open(dst.c_str(),O_RDONLY);auto probe=ultraslim::probeImage(fd);close(fd);
+  check(probe.errorCode==0&&probe.width==5001&&probe.height==513&&probe.hasGainMap,"odd grid canvas retains dimensions and HDR");
  }
  puts("PASS: mono/RGB maps, all 8 orientations, HEIC/AVIF cross-codec roundtrip, main resize, exact JPEG map bytes, exact map pixels and HDR metadata");
 }

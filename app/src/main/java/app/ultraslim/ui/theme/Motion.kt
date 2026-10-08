@@ -21,6 +21,12 @@ object Motion {
     /** 屏幕级过渡：导航切换（与 AppNavHost 的 TRANSITION_MS 一致）。 */
     const val Emphasized = 320
 
+    /** 分组折叠展开（手风琴）：让纵向形变有明确的物理轨迹，不易过快而产生闪烁感。 */
+    const val Accordion = 340
+
+    /** 折叠收起时长：稍短于展开，利落收纳。 */
+    const val AccordionExit = 300
+
     /** 标准缓动：进出场与形变。 */
     val StandardEasing = CubicBezierEasing(0.2f, 0f, 0f, 1f)
 
@@ -49,4 +55,8 @@ object Motion {
     fun <T> emphasized() = tween<T>(Emphasized, easing = StandardEasing)
 
     fun <T> exit(durationMillis: Int = Standard) = tween<T>(durationMillis, easing = ExitEasing)
+
+    fun <T> accordion() = tween<T>(Accordion, easing = StandardEasing)
+
+    fun <T> accordionExit() = tween<T>(AccordionExit, easing = ExitEasing)
 }

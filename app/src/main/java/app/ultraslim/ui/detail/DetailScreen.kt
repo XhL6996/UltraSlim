@@ -36,10 +36,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -48,18 +50,25 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.DragIndicator
+import androidx.compose.material.icons.rounded.FileDownload
+import androidx.compose.material.icons.rounded.Link
+import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.SaveAlt
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.TouchApp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -140,15 +149,108 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("转换结果") },
+                title = { Text("转换结果", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
                     }
                 },
+                actions = {
+                    if (state.entity != null) {
+                        var menu by remember { mutableStateOf(false) }
+                        Box {
+                            IconButton(onClick = { menu = true }) {
+                                Icon(Icons.Rounded.MoreVert, contentDescription = "更多操作")
+                            }
+                            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                                DropdownMenuItem(
+                                    text = { Text("导出到文件…") },
+                                    leadingIcon = { Icon(Icons.Rounded.FileDownload, null) },
+                                    onClick = {
+                                        menu = false
+                                        export.launch(state.entity?.displayName ?: "image.heic")
+                                    }
+                                )
+                                DropdownMenuItem(
+                                    text = { Text("重新关联原图…") },
+                                    leadingIcon = { Icon(Icons.Rounded.Link, null) },
+                                    onClick = {
+                                        menu = false
+                                        sourcePicker.launch(arrayOf("image/*"))
+                                    }
+                                )
+                                HorizontalDivider()
+                                DropdownMenuItem(
+                                    text = { Text("删除记录", color = MaterialTheme.colorScheme.error) },
+                                    leadingIcon = { Icon(Icons.Rounded.DeleteOutline, null, tint = MaterialTheme.colorScheme.error) },
+                                    onClick = {
+                                        menu = false
+                                        showDeleteConfirm = true
+                                    }
+                                )
+                            }
+                        }
+                    }
+                },
             )
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        bottomBar = {
+            state.entity?.let { entity ->
+                val saved = entity.outputUri.startsWith("content://")
+                Surface(
+                    color = MaterialTheme.colorScheme.surfaceContainer,
+                    tonalElevation = 3.dp,
+                    shadowElevation = 8.dp,
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .navigationBarsPadding()
+                            .padding(horizontal = 20.dp, vertical = 12.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (!saved && android.os.Build.VERSION.SDK_INT >= 29) {
+                            Button(
+                                onClick = { vm.saveToAlbum() },
+                                enabled = !state.saving,
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                shape = MaterialTheme.shapes.medium,
+                            ) {
+                                Icon(Icons.Rounded.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text(if (state.saving) "保存中…" else "保存到相册")
+                            }
+                        } else {
+                            Button(
+                                onClick = { viewInAlbum(context, entity) },
+                                modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                                shape = MaterialTheme.shapes.medium,
+                            ) {
+                                Icon(Icons.Rounded.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(8.dp))
+                                Text("在相册中查看")
+                            }
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                if (!OutputStore.share(context, listOf(entity))) {
+                                    android.widget.Toast.makeText(context, "分享失败：文件不可访问", android.widget.Toast.LENGTH_LONG).show()
+                                }
+                            },
+                            enabled = !state.saving,
+                            modifier = Modifier.weight(1f).heightIn(min = 48.dp),
+                            shape = MaterialTheme.shapes.medium,
+                        ) {
+                            Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("分享")
+                        }
+                    }
+                }
+            }
+        },
     ) { innerPadding ->
         val entity = state.entity
         if (entity == null) {
@@ -165,13 +267,6 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
         } else {
             DetailContent(
                 entity = entity,
-                saving = state.saving,
-                onSaveToAlbum = { vm.saveToAlbum() },
-                onRelink = { sourcePicker.launch(arrayOf("image/*")) },
-                onExport = { export.launch(state.entity?.displayName ?: "image.heic") },
-                onDelete = { showDeleteConfirm = true },
-                onBack = onBack,
-                context = context,
                 modifier = Modifier.padding(innerPadding),
             )
         }
@@ -204,13 +299,6 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
 @Composable
 private fun DetailContent(
     entity: HistoryEntity,
-    saving: Boolean,
-    onSaveToAlbum: () -> Unit,
-    onExport: () -> Unit,
-    onRelink: () -> Unit,
-    onDelete: () -> Unit,
-    onBack: () -> Unit,
-    context: Context,
     modifier: Modifier = Modifier,
 ) {
     val saved = entity.outputUri.startsWith("content://")
@@ -219,70 +307,60 @@ private fun DetailContent(
         modifier = modifier
             .fillMaxSize()
             .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp),
+            .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)) {
+        Card(
+            shape = RoundedCornerShape(20.dp),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+        ) {
             Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(if(entity.outputBytes < entity.inputBytes) "为这张照片省下" else "本次转换体积增加", style = MaterialTheme.typography.labelMedium)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                    Text(formatBytes(kotlin.math.abs(entity.inputBytes - entity.outputBytes)), style = MaterialTheme.typography.headlineLarge)
+                    Text(formatBytes(kotlin.math.abs(entity.inputBytes - entity.outputBytes)), style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
                     BadgeChip(formatSavedPercent(entity.inputBytes, entity.outputBytes), MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.primary)
                 }
                 Text("${formatBytes(entity.inputBytes)} → ${formatBytes(entity.outputBytes)} · ${entity.format}", style = MaterialTheme.typography.bodyMedium)
             }
         }
-        SectionHeader("看看细节", "拖动分界线对比，双指放大查看")
-        Text("此页为 SDR 预览；HDR 亮度请在兼容相册中查看。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+
+        SectionHeader("画质细节对比", "拖动分界线查看细节对比，双击 2.5x 放大，双指可捏合缩放")
+        Text("当前页面为 SDR 预览；完整 HDR 高动态亮度请在系统相册中查看。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         HeroCompareCard(entity = entity)
 
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            if (!saved && android.os.Build.VERSION.SDK_INT >= 29) {
-                FilledTonalButton(
-                    onClick = onSaveToAlbum,
-                    enabled = !saving,
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Rounded.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text(if (saving) "保存中…" else "保存到相册")
-                }
-            }
-            OutlinedButton(
-                onClick = { if(!OutputStore.share(context, listOf(entity))) android.widget.Toast.makeText(context, "分享失败：文件不可访问", android.widget.Toast.LENGTH_LONG).show() },
-                enabled = !saving,
-                modifier = Modifier.weight(1f),
-            ) {
-                Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(18.dp))
-                Spacer(Modifier.width(8.dp))
-                Text("分享")
-            }
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            TextButton(onClick = { viewInAlbum(context, entity) }, enabled = saved, modifier = Modifier.weight(1f)) { Text("在相册中查看") }
-            var menu by remember { mutableStateOf(false) }
-            Box(Modifier.weight(1f)) {
-                TextButton(onClick = { menu = true }, enabled = !saving) { Text("更多操作") }
-                androidx.compose.material3.DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("导出到文件") }, onClick = {menu=false;onExport()})
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("重新关联原图") }, onClick = {menu=false;onRelink()})
-                    androidx.compose.material3.DropdownMenuItem(text = { Text("删除记录") }, onClick = {menu=false;onDelete()})
-                }
-            }
-        }
         if (!saved) {
-            Text(
-                if(entity.saveState == "FAILED") "保存到相册失败，成品已在应用内保留，可重试、导出或分享。" else "成品已在应用内保留，可直接分享或导出。",
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            Surface(
+                shape = RoundedCornerShape(12.dp),
+                color = if (entity.saveState == "FAILED") MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.5f),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        if (entity.saveState == "FAILED") Icons.Rounded.DeleteOutline else Icons.Rounded.SaveAlt,
+                        null,
+                        Modifier.size(18.dp),
+                        tint = if (entity.saveState == "FAILED") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                    )
+                    Text(
+                        if (entity.saveState == "FAILED") "保存到相册失败；成品已在应用内保留，可点击底部重试或分享。" else "成品已在应用沙盒内保留，可点击下方按钮保存到系统相册。",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
         }
 
-        Text(entity.displayName, style = MaterialTheme.typography.titleSmall)
-        Text(entity.settingsSummary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            Text(entity.displayName, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+            Text(entity.settingsSummary, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
         MetadataCard(entity)
 
-        Spacer(Modifier.height(24.dp))
+        Spacer(Modifier.height(16.dp))
     }
 }
 

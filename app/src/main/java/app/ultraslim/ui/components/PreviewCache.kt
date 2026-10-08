@@ -141,4 +141,12 @@ internal object PreviewCache {
         val bytes = digest.digest("$maxDim\n$uriString".toByteArray(Charsets.UTF_8))
         return bytes.joinToString("") { "%02x".format(it) }
     }
+
+    fun clear(context: Context) {
+        synchronized(diskLock) {
+            memory.evictAll()
+            val dir = File(context.cacheDir, "previews")
+            dir.deleteRecursively()
+        }
+    }
 }
