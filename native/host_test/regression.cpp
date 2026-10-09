@@ -45,7 +45,12 @@ int main(int argc,char**argv){
  }
  o.outCodec=1;convert(dir+"/minnie-320x240-yuv-icc.jpg",out+"/icc.heic",o);check(!icc(out+"/icc.heic").empty(),"SDR ICC retained");
  convert(out+"/icc.heic",out+"/icc-round.heic",o);check(icc(out+"/icc.heic")==icc(out+"/icc-round.heic"),"ICC preserved byte-for-byte");
- // P3 must survive both the initial AVIF encode and a container-to-container retry.
+ // P3 must survive both initial HEIC/AVIF encode and container-to-container retry.
+ o.outCodec=1;
+ convert(dir+"/apple_gainmap_new.jpg",out+"/p3.heic",o);
+ check(!icc(out+"/p3.heic").empty(),"P3 HEIC ICC present");
+ convert(out+"/p3.heic",out+"/p3-round.heic",o);
+ check(icc(out+"/p3.heic")==icc(out+"/p3-round.heic"),"HEIC P3 ICC preserved byte-for-byte");
  o.outCodec=2;
  convert(dir+"/apple_gainmap_new.jpg",out+"/p3.avif",o);
  check(!icc(out+"/p3.avif").empty(),"P3 AVIF ICC present");

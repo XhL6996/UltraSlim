@@ -32,15 +32,21 @@ s = s.replace(old, new)
 if p.read_text() != s: p.write_text(s)
 PYCODE
 
-# Android AVIF decoders can replace an ICC profile with the following NCLX
-# association, then fall back to sRGB for SDR P3. Keep both profiles, but put
-# ICC last for AV1 items. This changes only property order, never pixel values.
+# Android decoders (both AVIF and HEIC) can replace an ICC profile with the following
+# NCLX association, then fall back to sRGB for SDR P3. Keep both profiles, but put
+# ICC last for AV1 (av1C) and HEVC (hvcC) items. This changes only property order, never pixel values.
 python3 - "$SRC/libheif/image-items/image_item.cc" <<'PYCODE'
 from pathlib import Path
 import sys
 p = Path(sys.argv[1]); s = p.read_text()
-marker = '// UltraSlim: AVIF ICC must follow NCLX for Android color management.'
-if marker not in s:
+marker = '// UltraSlim: AVIF/HEIC ICC must follow NCLX for Android color management.'
+old_marker = '// UltraSlim: AVIF ICC must follow NCLX for Android color management.'
+if old_marker in s:
+    s = s.replace(old_marker, marker)
+    s = s.replace('if (property->get_short_type() == fourcc("av1C")) icc_last = true;',
+                  'if (property->get_short_type() == fourcc("av1C") || property->get_short_type() == fourcc("hvcC")) icc_last = true;')
+    p.write_text(s)
+elif marker not in s:
     start = s.index('void ImageItem::add_color_profile(')
     end = s.index('\nvoid ImageItem::CodedImageData::append(', start)
     body = s[start:end]
@@ -53,7 +59,7 @@ if marker not in s:
     body = body.replace(block, '''    ''' + marker + '''
     bool icc_last = false;
     for (const auto& property : inout_codedImage.properties) {
-      if (property->get_short_type() == fourcc("av1C")) icc_last = true;
+      if (property->get_short_type() == fourcc("av1C") || property->get_short_type() == fourcc("hvcC")) icc_last = true;
     }
 ''' + block.replace('if (icc_profile)', 'if (icc_profile && !icc_last)'))
     tail = '    }\n  }\n}\n'
