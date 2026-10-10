@@ -45,6 +45,11 @@ data class TranscodeResult(
     val inputBytes: Long,
     val outputBytes: Long,
     val durationMs: Double,
+    /** 输出是否携带增益图；由编码器/写后校验直接给出，调用方无需再整读输出文件。 */
+    val hasGainMap: Boolean = false,
+    /** 输出是否携带 EXIF。 */
+    val hasExif: Boolean = false,
+    val maxContentBoost: Float = 1.0f,
 ) {
     val isSuccess: Boolean get() = errorCode == 0
 

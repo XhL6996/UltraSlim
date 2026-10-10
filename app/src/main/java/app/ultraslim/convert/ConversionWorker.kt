@@ -33,6 +33,8 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
         private const val NOTIFICATION_ID = 42
         private const val SUMMARY_ID = 43
         const val KEY_BATCH = "batch_id"
+        /** 温控自动重试上限；超出后停下等用户手动继续。 */
+        private const val MAX_THERMAL_RESUMES = 8
     }
     override suspend fun getForegroundInfo() = createForegroundInfo(0, "正在准备转换…", null, true)
 
@@ -42,13 +44,21 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
         repo.awaitReady()
         val batchId = inputData.getString(KEY_BATCH) ?: return Result.failure()
         val batch = app.database.taskDao().batch(batchId) ?: return Result.failure()
-        val options = decodeDefaults(batch.settings)
-        val json = JSONArray(batch.itemIds)
-        val ids = List(json.length()) { json.getString(it) }
         if (batch.cancelled) return Result.success()
+        // 损坏的批次快照必须显式失败并留下错误信息，不能在 checkpoint 循环外静默死亡。
+        val ids = runCatching { JSONArray(batch.itemIds).let { j -> List(j.length()) { j.getString(it) } } }.getOrDefault(emptyList())
+        val options = runCatching { decodeDefaults(batch.settings) }.getOrNull()
+        if (options == null) {
+            (ids.asSequence() + repo.queue.value.asSequence().filter { it.batchId == batchId }.map { it.id })
+                .distinct().forEach { id -> repo.update(id) { it.copy(status = QueueStatus.FAILED, error = "任务参数无法解析，请重新选择图片转换") } }
+            repo.flush()
+            return Result.failure()
+        }
         try { setForeground(getForegroundInfo()) } catch (e: Exception) {
             if (e is CancellationException) throw e
-            ids.forEach { id -> repo.update(id) { it.copy(status = QueueStatus.FAILED, error = "后台任务启动失败，请回到应用重试：${e.message}") } }
+            // 重试批次中已完成项不能被覆盖；只标记尚未落地的条目。
+            ids.forEach { id -> repo.update(id) { if (it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED) it
+                else it.copy(status = QueueStatus.FAILED, error = "后台任务启动失败，请回到应用重试：${e.message}") } }
             repo.flush()
             return Result.failure()
         }
@@ -61,7 +71,14 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                 currentCoroutineContext().ensureActive()
                 if (app.database.taskDao().batch(batchId)?.cancelled != false) break
                 if (Build.VERSION.SDK_INT >= 29 && app.getSystemService(android.os.PowerManager::class.java).currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_SEVERE) {
-                    repo.update(id) { it.copy(error = "设备温度较高，稍后自动重试") }; repo.flush(); return Result.retry()
+                    repo.update(id) { it.copy(error = "设备温度较高，稍后自动重试") }; repo.flush()
+                    // 无限 retry 会带着前台服务常驻；超过上限后停下，条目保持 READY 可从应用内继续。
+                    if (runAttemptCount >= MAX_THERMAL_RESUMES) {
+                        repo.update(id) { it.copy(error = "设备温度较高，已暂停；请稍后在应用内继续") }
+                        repo.flush()
+                        return Result.failure()
+                    }
+                    return Result.retry()
                 }
                 val item = repo.find(id) ?: continue // Removed pending items never run.
                 if (item.status == QueueStatus.DONE || item.status == QueueStatus.SKIPPED) continue
@@ -150,19 +167,16 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                         }
                     }
 
-                    val verified = withContext(Dispatchers.IO) {
-                        ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY).use {
-                            UltraHdrBridge.nativeProbe(it.fd)
-                        }
-                    }
-                    if (!verified.isSuccess || (probe.hasGainMap && !verified.hasGainMap) || (options.keepExif && probe.hasExif && !verified.hasExif)) { file.delete(); error("输出校验失败") }
+                    // 输出尺寸/EXIF/增益图元数据已随 TranscodeResult 返回，不再整读输出文件二次 probe。
+                    if (result.outputBytes <= 0 || (probe.hasGainMap && !result.hasGainMap) ||
+                        (options.keepExif && probe.hasExif && !result.hasExif)) { file.delete(); error("输出校验失败") }
                     if (options.onlySmaller && result.outputBytes >= result.inputBytes) {
                         file.delete()
                         val why = "输出体积未比原图更小，为确保画质不劣化已保留原图"
                         repo.update(id) { it.copy(status = QueueStatus.SKIPPED, result = result, error = why) }
                         continue
                     }
-                    if (verified.hasGainMap && ((options.format == OutputFormat.AVIF && options.avifGainmapCompatibility) ||
+                    if (result.hasGainMap && ((options.format == OutputFormat.AVIF && options.avifGainmapCompatibility) ||
                         (options.format == OutputFormat.HEIC && options.heicGainmapCompatibility))) {
                         withContext(Dispatchers.IO) { HdrOutputValidation.requireReadableGainmap(file) }
                     }
@@ -173,11 +187,11 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                     val summary = options.summary() + liveSummary
                     // Commit the durable private output first. Saving can be retried without encoding again.
                     var entity = HistoryEntity(displayName = name, inputUri = item.uri, outputUri = file.path,
-                        inputBytes = result.inputBytes, outputBytes = result.outputBytes, width = verified.width, height = verified.height,
-                        gainmapWidth = verified.gainmapWidth, gainmapHeight = verified.gainmapHeight, hadGainMap = verified.hasGainMap,
+                        inputBytes = result.inputBytes, outputBytes = result.outputBytes, width = result.width, height = result.height,
+                        gainmapWidth = result.gainmapWidth, gainmapHeight = result.gainmapHeight, hadGainMap = result.hasGainMap,
                         format = options.format.label, inputFormat = probe.containerLabel, durationMs = result.durationMs,
-                        maxContentBoost = verified.maxContentBoost, createdAt = if (item.createdAt > 0L) item.createdAt else System.currentTimeMillis(), status = HistoryEntity.STATUS_DONE,
-                        taskId = id, batchId = batchId, saveState = "PENDING", settingsSummary = summary, hasExif = verified.hasExif)
+                        maxContentBoost = result.maxContentBoost, createdAt = if (item.createdAt > 0L) item.createdAt else System.currentTimeMillis(), status = HistoryEntity.STATUS_DONE,
+                        taskId = id, batchId = batchId, saveState = "PENDING", settingsSummary = summary, hasExif = result.hasExif)
                     val historyId = withContext(NonCancellable) { app.database.historyDao().insert(entity) }
                     entity = entity.copy(id = historyId)
                     if (options.autoSave && app.database.taskDao().batch(batchId)?.cancelled == false) {
@@ -217,10 +231,13 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
             .setOngoing(true)
             .setProgress(100, progress, indeterminate)
             .build()
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            ForegroundInfo(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            ForegroundInfo(NOTIFICATION_ID, notification)
+        return when {
+            // mediaProcessing 与转码场景语义一致；dataSync 在 Android 15+ 受 6h/24h 限制且非本用途。
+            Build.VERSION.SDK_INT >= 35 ->
+                ForegroundInfo(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING)
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q ->
+                ForegroundInfo(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            else -> ForegroundInfo(NOTIFICATION_ID, notification)
         }
     }
 

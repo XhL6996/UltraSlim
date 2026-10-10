@@ -202,11 +202,16 @@ fun ConversionDefaults.encode(): String = org.json.JSONObject().apply {
 
 fun decodeDefaults(value: String): ConversionDefaults {
     val j = org.json.JSONObject(value)
-    return ConversionDefaults(format = OutputFormat.parse(j.getString("format")), quality = j.getInt("quality"),
-        gainmapQuality = j.getInt("gainmapQuality"), gainmapScale = j.getInt("gainmapScale"),
-        multiChannelGainmap = j.getBoolean("multiChannel"), keepExif = j.getBoolean("keepExif"),
-        allowSdr = j.getBoolean("allowSdr"), autoSave = j.getBoolean("autoSave"), speedLevel = j.getInt("speed"),
-        resizePercent = j.getInt("resize"), onlySmaller = j.optBoolean("onlySmaller", true), keepLocation = j.optBoolean("keepLocation", true),
+    val d = ConversionDefaults()
+    // opt 系列 + 数据类默认值：旧版本快照缺新字段时不致命，缺老字段也按默认解析，
+    // 避免批次在 worker 中静默死亡。仅两个兼容开关例外：旧快照缺字段按 false（像素精确语义）。
+    return ConversionDefaults(format = OutputFormat.parse(j.optString("format", d.format.name)),
+        quality = j.optInt("quality", d.quality), gainmapQuality = j.optInt("gainmapQuality", d.gainmapQuality),
+        gainmapScale = j.optInt("gainmapScale", d.gainmapScale),
+        multiChannelGainmap = j.optBoolean("multiChannel", d.multiChannelGainmap), keepExif = j.optBoolean("keepExif", d.keepExif),
+        allowSdr = j.optBoolean("allowSdr", d.allowSdr), autoSave = j.optBoolean("autoSave", d.autoSave),
+        speedLevel = j.optInt("speed", d.speedLevel), resizePercent = j.optInt("resize", d.resizePercent),
+        onlySmaller = j.optBoolean("onlySmaller", d.onlySmaller), keepLocation = j.optBoolean("keepLocation", d.keepLocation),
         // Old queued jobs and history used pixel-exact encoding. Do not relabel them.
         avifGainmapCompatibility = j.optBoolean("avifGainmapCompatibility", false),
         heicGainmapCompatibility = j.optBoolean("heicGainmapCompatibility", false))
