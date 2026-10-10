@@ -69,6 +69,14 @@ build-host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 - 历史按本地自然日分组，右滑日期标题确认删除；按日期查询包含当前分页外、同筛选条件的记录。只删除应用内成品及记录，已存相册图片不删除。
 - 交互测试可用 `-PultraslimDebugSuffix=.perfqa` 构建独立测试包，避免污染日常使用的历史。同步目录建议外置 `ULTRASLIM_BUILD_ROOT` 并使用 `-Pkotlin.incremental=false`。
 
+## 批量规模与防御性缺口（2026-10-10）
+
+- probe 次数收敛：`transcodeImage` 的输入 probe 把已初始化的 uhdr decoder 直接移交 `transcodeUnchecked`（JXL 分支复用 probe 结果，SDR 不再建 decoder）；rebuild 路径从内存缓冲校验输出，不再整读输出文件；`TranscodeResult` 携带 hasGainMap/hasExif/maxContentBoost，worker 不再对输出做第二次 probe。preserve 路径的输出元数据由 `tryReuseGainMap` 直接报告。
+- 所有解码路径共享 1 亿像素上限 `kMaxPixels`（JXL 此前缺失）；JXL box 上限为 `kMaxBoxBytes`。
+- 批次快照解析（decodeDefaults/JSONArray）必须容错：旧快照缺字段按默认值，损坏批次显式置 FAILED，不得在 checkpoint 循环外抛异常静默死亡。仅两个兼容开关例外：缺字段按 false（像素精确语义）。
+- 前台服务 API 35+ 用 `FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING`（manifest 同时声明 dataSync|mediaProcessing）；`setForeground` 失败只标记未完成项；温控重试有指数退避与 8 次上限，超限停回 READY 等手动继续。
+- 历史页展开态按行虚拟化（每条记录独立 LazyColumn item，折叠态不发射行）；首页队列流经 150ms 采样后再进 UI 状态；回收站原图解析（逐条 MediaStore 查询）只在 Default 线程做，组合期只读缓存。
+
 ## Apple Live Photo 导出（2026-10-10）
 
 - Android HEIC 成品详情菜单导出 ZIP（AppleLiveBundle/AppleLiveExporter），包内为照片、原视频与时间点；本身不是 Apple Live Photo。保留 Android 原有动态导出。

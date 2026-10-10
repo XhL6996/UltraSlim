@@ -5,13 +5,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
-import androidx.compose.animation.expandVertically
-import androidx.compose.animation.shrinkVertically
-import androidx.compose.animation.fadeIn
-import androidx.compose.animation.fadeOut
-import androidx.compose.animation.slideInVertically
-import androidx.compose.animation.slideOutVertically
 import app.ultraslim.ui.theme.Motion
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.*
@@ -47,6 +40,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
     val vm: HistoryViewModel = viewModel(factory = appViewModelFactory { HistoryViewModel(it) })
     val state by vm.uiState.collectAsStateWithLifecycle()
     val deleting by vm.deleteCandidates.collectAsStateWithLifecycle()
+    val trashableOriginals by vm.trashableOriginals.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
@@ -67,7 +61,10 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
     val visible = remember(state.items, filter) { state.items.filter { it.matchesHistoryFilter(filter) } }
     val selectedItems = visible.filter { it.id in selected }
     val pendingCount = selectedItems.count { it.saveState != "SAVED" }
-    LaunchedEffect(visible) { selected = selected.intersect(visible.map { it.id }.toSet()) }
+    LaunchedEffect(visible) {
+        selected = selected.intersect(visible.map { it.id }.toSet())
+        vm.ensureTrashableResolved(visible)
+    }
     val groups = remember(visible) { visible.groupBy { historyDate(it.createdAt) } }
     val railMode = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width /
         androidx.compose.ui.platform.LocalDensity.current.density >= 840
@@ -111,11 +108,11 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                                 }
                             }
                             if (MediaStoreTrashHelper.isTrashSupported) {
-                                val trashableUris = remember(selectedItems) { vm.getTrashableOriginalUris(selectedItems.map { it.id }.toSet()) }
-                                if (trashableUris.isNotEmpty()) {
+                                val trashableCount = selectedItems.count { it.id in trashableOriginals }
+                                if (trashableCount > 0) {
                                     FilledTonalButton(
                                         onClick = {
-                                            lastTrashCount = trashableUris.size
+                                            lastTrashCount = trashableCount
                                             val sender = vm.requestTrashSelected(selectedItems.map { it.id }.toSet())
                                             if (sender != null) trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
                                         },
@@ -123,7 +120,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                                     ) {
                                         Icon(Icons.Rounded.DeleteSweep, null, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(4.dp))
-                                        Text("原图移至回收站 (${trashableUris.size})")
+                                        Text("原图移至回收站 ($trashableCount)")
                                     }
                                 }
                             }
@@ -181,100 +178,73 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                 }
             }
             if (visible.isEmpty()) item { EmptyState(Icons.Rounded.History, "暂无此类记录", "完成的成品和保存状态会显示在这里") }
+            // 行级虚拟化：展开态的每条记录是独立 item；单个自然日 500 张也不会一次性组合。
             groups.forEach { (date, records) ->
                 val isCollapsed = date in collapsedDates
-                item(key = "date-group-$date") {
+                item(key = "date-group-$date", contentType = "history-header") {
                     val latestDelete by rememberUpdatedState({ vm.requestDeleteDate(date, filter) })
                     val swipe = rememberSwipeToDismissBoxState(confirmValueChange = {
                         if (it == SwipeToDismissBoxValue.StartToEnd) latestDelete()
                         false // Confirmation precedes deletion; cancellation leaves the header in place.
                     }, positionalThreshold = { it * 0.35f })
-                    Column(modifier = Modifier.fillMaxWidth().animateItem(placementSpec = Motion.itemPlacement())) {
-                        SwipeToDismissBox(state = swipe, modifier = Modifier.testTag("history-date-$date"), enableDismissFromStartToEnd = !selecting && !state.busy,
-                            enableDismissFromEndToStart = false,
-                            backgroundContent = {
-                                Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(16.dp)) {
-                                    Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(Icons.Rounded.DeleteOutline, null)
-                                        Spacer(Modifier.width(8.dp)); Text("删除当天记录")
-                                    }
+                    SwipeToDismissBox(state = swipe,
+                        modifier = Modifier.fillMaxWidth().animateItem(placementSpec = Motion.itemPlacement()).testTag("history-date-$date"),
+                        enableDismissFromStartToEnd = !selecting && !state.busy,
+                        enableDismissFromEndToStart = false,
+                        backgroundContent = {
+                            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(16.dp)) {
+                                Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Rounded.DeleteOutline, null)
+                                    Spacer(Modifier.width(8.dp)); Text("删除当天记录")
                                 }
-                            }) {
-                            Surface(
-                                color = if (isCollapsed) MaterialTheme.colorScheme.surfaceContainerLow else MaterialTheme.colorScheme.background,
-                                shape = RoundedCornerShape(14.dp),
-                                modifier = Modifier.fillMaxWidth().animateContentSize(animationSpec = Motion.accordion()),
-                            ) {
-                                BatchGroupHeader(
-                                    title = historyDateTitle(date),
-                                    count = records.size,
-                                    savedBytes = records.sumOf { it.inputBytes - it.outputBytes },
-                                    collapsible = true,
-                                    collapsed = isCollapsed,
-                                    onToggleCollapse = {
-                                        collapsedDates = if (isCollapsed) collapsedDates - date else collapsedDates + date
-                                    },
-                                    action = {
-                                        if (selecting) {
-                                            val ids = records.map { it.id }.toSet()
-                                            val allSelected = selected.containsAll(ids)
-                                            TextButton(enabled = !state.busy, onClick = {
-                                                selected = if (allSelected) selected - ids else selected + ids
-                                                if (isCollapsed) collapsedDates = collapsedDates - date
-                                            }) {
-                                                Text(if (allSelected) "取消当天" else "选择当天")
-                                            }
-                                        } else IconButton(onClick = { latestDelete() }, enabled = !state.busy) {
-                                            Icon(Icons.Rounded.DeleteOutline, "删除${historyDateTitle(date)}的记录")
-                                        }
-                                    }
-                                )
                             }
-                        }
-                        AnimatedVisibility(
-                            visible = !isCollapsed,
-                            enter = expandVertically(
-                                animationSpec = Motion.accordion(),
-                                expandFrom = Alignment.Top,
-                                clip = true,
-                            ) + fadeIn(
-                                animationSpec = Motion.standard(),
-                            ) + slideInVertically(
-                                animationSpec = Motion.accordion(),
-                                initialOffsetY = { -it / 6 },
-                            ),
-                            exit = shrinkVertically(
-                                animationSpec = Motion.accordionExit(),
-                                shrinkTowards = Alignment.Top,
-                                clip = true,
-                            ) + fadeOut(
-                                animationSpec = Motion.exit(240),
-                            ) + slideOutVertically(
-                                animationSpec = Motion.accordionExit(),
-                                targetOffsetY = { -it / 6 },
-                            ),
+                        }) {
+                        Surface(
+                            color = if (isCollapsed) MaterialTheme.colorScheme.surfaceContainerLow else MaterialTheme.colorScheme.background,
+                            shape = RoundedCornerShape(14.dp),
+                            modifier = Modifier.fillMaxWidth(),
                         ) {
-                            Column(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(top = 10.dp),
-                                verticalArrangement = Arrangement.spacedBy(10.dp),
-                            ) {
-                                records.forEach { entity ->
-                                    val checked = entity.id in selected
-                                    HistoryRow(
-                                        entity = entity,
-                                        selecting = selecting,
-                                        checked = checked,
-                                        enabled = !state.busy,
-                                        onClick = {
-                                            if (selecting) selected = if (checked) selected - entity.id else selected + entity.id
-                                            else onOpenDetail(entity.id)
-                                        },
-                                    )
+                            BatchGroupHeader(
+                                title = historyDateTitle(date),
+                                count = records.size,
+                                savedBytes = records.sumOf { it.inputBytes - it.outputBytes },
+                                collapsible = true,
+                                collapsed = isCollapsed,
+                                onToggleCollapse = {
+                                    collapsedDates = if (isCollapsed) collapsedDates - date else collapsedDates + date
+                                },
+                                action = {
+                                    if (selecting) {
+                                        val ids = records.map { it.id }.toSet()
+                                        val allSelected = selected.containsAll(ids)
+                                        TextButton(enabled = !state.busy, onClick = {
+                                            selected = if (allSelected) selected - ids else selected + ids
+                                            if (isCollapsed) collapsedDates = collapsedDates - date
+                                        }) {
+                                            Text(if (allSelected) "取消当天" else "选择当天")
+                                        }
+                                    } else IconButton(onClick = { latestDelete() }, enabled = !state.busy) {
+                                        Icon(Icons.Rounded.DeleteOutline, "删除${historyDateTitle(date)}的记录")
+                                    }
                                 }
-                            }
+                            )
                         }
+                    }
+                }
+                if (!isCollapsed) {
+                    items(records, key = { it.id }, contentType = { "history-row" }) { entity ->
+                        val checked = entity.id in selected
+                        HistoryRow(
+                            entity = entity,
+                            selecting = selecting,
+                            checked = checked,
+                            enabled = !state.busy,
+                            onClick = {
+                                if (selecting) selected = if (checked) selected - entity.id else selected + entity.id
+                                else onOpenDetail(entity.id)
+                            },
+                            modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast)),
+                        )
                     }
                 }
             }

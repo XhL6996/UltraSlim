@@ -53,6 +53,7 @@ import app.ultraslim.ui.components.*
 import app.ultraslim.ui.theme.Motion
 import app.ultraslim.util.*
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
@@ -111,6 +112,8 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
         else vm.startConversion()
     }
     var lastTrashCount by remember { mutableIntStateOf(0) }
+    val trashableOriginals by vm.trashableOriginalUris.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
     val trashBatchLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             vm.onBatchOriginalsTrashed(lastTrashCount)
@@ -132,7 +135,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             onOpenDetail(event.trialHistoryId)
                         }
                     } else {
-                        val trashable = if (MediaStoreTrashHelper.isTrashSupported) vm.getTrashableOriginalUris() else emptyList()
+                        val trashable = if (MediaStoreTrashHelper.isTrashSupported) vm.refreshAndGetTrashable() else emptyList()
                         val actionLabel = when {
                             event.failed > 0 -> "重试失败项"
                             trashable.isNotEmpty() -> "移入回收站 (${trashable.size})"
@@ -365,7 +368,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             ) {
                                 Column(Modifier.weight(1f)) {
                                     Text("处理列表", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                                    Text("${state.queue.size} 张 · ${formatBytes(state.queue.sumOf { it.sizeBytes })}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("${state.queue.size} 张 · ${formatBytes(state.totalQueueBytes)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                                     if (!state.isConverting && state.convertibleCount > 1) {
@@ -377,7 +380,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                             Text("先试转 1 张", style = MaterialTheme.typography.labelMedium)
                                         }
                                     }
-                                    val hasFailed = state.queue.any { it.status == QueueStatus.FAILED }
+                                    val hasFailed = state.hasFailed
                                     if (hasFailed) {
                                         AssistChip(
                                             onClick = vm::retryFailed,
@@ -472,16 +475,18 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                 Text("已完成 · ${finishedItems.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                     if (MediaStoreTrashHelper.isTrashSupported) {
-                                        val trashableUris = remember(finishedItems) { vm.getTrashableOriginalUris(finishedItems.map { it.id }) }
-                                        if (trashableUris.isNotEmpty()) {
+                                        if (trashableOriginals.isNotEmpty()) {
                                             TextButton(onClick = {
-                                                lastTrashCount = trashableUris.size
-                                                val sender = vm.requestTrashOriginals(finishedItems.map { it.id })
-                                                if (sender != null) trashBatchLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                                                val count = trashableOriginals.size
+                                                lastTrashCount = count
+                                                scope.launch {
+                                                    val sender = vm.requestTrashOriginals()
+                                                    if (sender != null) trashBatchLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                                                }
                                             }) {
                                                 Icon(Icons.Rounded.DeleteSweep, null, modifier = Modifier.size(16.dp))
                                                 Spacer(Modifier.width(4.dp))
-                                                Text("移入回收站 (${trashableUris.size})")
+                                                Text("移入回收站 (${trashableOriginals.size})")
                                             }
                                         }
                                     }

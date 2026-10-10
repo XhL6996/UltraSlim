@@ -8,6 +8,7 @@ import android.provider.MediaStore
 import android.provider.OpenableColumns
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import androidx.work.BackoffPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
@@ -34,6 +35,7 @@ import app.ultraslim.convert.MediaStoreTrashHelper
 import app.ultraslim.model.OutputFormat
 import app.ultraslim.ui.components.CompressionPreset
 import java.util.UUID
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -50,6 +52,8 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -73,6 +77,8 @@ data class HomeUiState(
     val totalSavedBytes: Long = 0L,
     val convertedCount: Int = 0,
     val isConverting: Boolean = false,
+    val totalQueueBytes: Long = 0L,
+    val hasFailed: Boolean = false,
 ) {
     val convertibleCount: Int
         get() = queue.count {
@@ -121,13 +127,20 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     private val probePermits = Semaphore(SCAN_PARALLELISM)
 
+    /** 可移入系统回收站的原图 URI（已完成且产出更小的条目）；Default 线程预解析。 */
+    private val _trashableOriginalUris = MutableStateFlow<List<Uri>>(emptyList())
+    val trashableOriginalUris: StateFlow<List<Uri>> = _trashableOriginalUris.asStateFlow()
+
     private val workRunning: Flow<Boolean> = workManager
         .getWorkInfosForUniqueWorkFlow(ConversionWorker.UNIQUE_WORK_NAME)
         .map { infos -> infos.any { it.state == WorkInfo.State.ENQUEUED || it.state == WorkInfo.State.RUNNING || it.state == WorkInfo.State.BLOCKED } }
         .distinctUntilChanged()
 
+    // 批次中每张图至少 3 次 repo.update；sample 把 UI 侧的全列表重算（过滤/分组/求和）
+    // 收敛到每个时间窗口一次，避免 500 张批次触发上千次 O(n log n) 分组。
+    @OptIn(kotlinx.coroutines.FlowPreview::class)
     val uiState: StateFlow<HomeUiState> = combine(
-        repo.queue,
+        repo.queue.sample(QUEUE_SAMPLE_MILLIS),
         runDefaults,
         dao.totalSaved(),
         dao.countDone(),
@@ -139,6 +152,8 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             totalSavedBytes = saved ?: 0L,
             convertedCount = count,
             isConverting = running || queue.any { it.status == QueueStatus.CONVERTING },
+            totalQueueBytes = queue.sumOf { it.sizeBytes },
+            hasFailed = queue.any { it.status == QueueStatus.FAILED },
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
 
@@ -148,6 +163,24 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             val latest = app.database.taskDao().latestBatch()
             activeBatch = latest?.id
             runDefaults.value = if (latest != null && repo.queue.value.any { it.batchId == latest.id && it.status !in listOf(QueueStatus.DONE, QueueStatus.FAILED, QueueStatus.SKIPPED) }) decodeDefaults(latest.settings) else settings.defaults.first()
+        }
+        // 回收站原图解析含逐条 MediaStore 查询，全部移到 Default 线程；
+        // 组合期与点击回调只读缓存结果。
+        viewModelScope.launch(Dispatchers.Default) {
+            repo.queue
+                .sample(TRASH_RESOLVE_SAMPLE_MILLIS)
+                .map { list -> list.filter { it.status == QueueStatus.DONE && it.result != null && it.result.outputBytes < it.result.inputBytes }.map { it.id } }
+                .distinctUntilChanged()
+                .collectLatest { ids ->
+                    val uris = mutableListOf<Uri>()
+                    for (id in ids) {
+                        coroutineContext.ensureActive()
+                        repo.find(id)?.let { item ->
+                            MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, Uri.parse(item.uri))?.let(uris::add)
+                        }
+                    }
+                    _trashableOriginalUris.value = uris.distinct()
+                }
         }
         viewModelScope.launch {
             repo.incoming.collect { uris ->
@@ -484,6 +517,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
                 activeBatch = batchId; cancelledRun = false; _stopping.value = false
                 val request = OneTimeWorkRequestBuilder<ConversionWorker>()
                     .setInputData(androidx.work.Data.Builder().putString(ConversionWorker.KEY_BATCH, batchId).build())
+                    .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
                     .build()
                 workManager.enqueueUniqueWork(ConversionWorker.UNIQUE_WORK_NAME, ExistingWorkPolicy.KEEP, request)
             } catch (e: Exception) { _events.emit(HomeEvent.Info("无法启动转换：${e.message}")) }
@@ -612,20 +646,18 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         )
     }
 
-    fun getTrashableOriginalUris(itemIds: Collection<String>? = null): List<Uri> {
-        val items = if (itemIds != null) {
-            repo.queue.value.filter { it.id in itemIds && it.status == QueueStatus.DONE && it.result != null && (it.result.outputBytes < it.result.inputBytes) }
-        } else {
-            repo.queue.value.filter { it.status == QueueStatus.DONE && it.result != null && (it.result.outputBytes < it.result.inputBytes) }
-        }
-        return items.mapNotNull {
-            val uri = Uri.parse(it.uri)
-            MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, uri)
-        }.distinct()
+    /** 在 Default 线程重新解析并缓存；批次结束的 snackbar 需要新鲜数据时调用。 */
+    suspend fun refreshAndGetTrashable(): List<Uri> = withContext(Dispatchers.Default) {
+        val uris = repo.queue.value
+            .filter { it.status == QueueStatus.DONE && it.result != null && it.result.outputBytes < it.result.inputBytes }
+            .mapNotNull { MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, Uri.parse(it.uri)) }
+            .distinct()
+        _trashableOriginalUris.value = uris
+        uris
     }
 
-    fun requestTrashOriginals(itemIds: Collection<String>? = null): android.content.IntentSender? {
-        val uris = getTrashableOriginalUris(itemIds)
+    suspend fun requestTrashOriginals(): android.content.IntentSender? {
+        val uris = refreshAndGetTrashable()
         if (uris.isEmpty()) {
             _events.tryEmit(HomeEvent.Info("未找到可移至回收站的原图（可能不在系统相册管理内）"))
             return null
@@ -643,5 +675,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     companion object {
         private const val SCAN_PARALLELISM = 2
+        private const val QUEUE_SAMPLE_MILLIS = 150L
+        private const val TRASH_RESOLVE_SAMPLE_MILLIS = 500L
     }
 }

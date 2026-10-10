@@ -111,16 +111,27 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
         }
     }
 
-    fun getTrashableOriginalUris(ids: Set<Long>): List<Uri> {
-        val selected = uiState.value.items.filter { it.id in ids }
-        return selected.mapNotNull {
-            val uri = Uri.parse(it.inputUri)
-            MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, uri)
-        }.distinct()
+    /** 原图 → MediaStore URI 的解析缓存（含逐条查询）；Default 线程解析，选择时只查表。 */
+    private val trashableCache = MutableStateFlow<Map<Long, Uri>>(emptyMap())
+    val trashableOriginals: StateFlow<Map<Long, Uri>> = trashableCache.asStateFlow()
+
+    /** 补齐缺缓存条目的解析；页面加载或筛选变化时调用，重复调用只解析增量。 */
+    fun ensureTrashableResolved(items: List<HistoryEntity>) {
+        val missing = items.filter { it.id !in trashableCache.value }.map { it.id to it.inputUri }
+        if (missing.isEmpty()) return
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+            val resolved = missing.mapNotNull { (id, uri) ->
+                MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, Uri.parse(uri))?.let { id to it }
+            }
+            trashableCache.update { it + resolved }
+        }
     }
 
+    private fun trashableOriginalUris(ids: Set<Long>): List<Uri> =
+        ids.mapNotNull { trashableCache.value[it] }
+
     fun requestTrashSelected(ids: Set<Long>): IntentSender? {
-        val uris = getTrashableOriginalUris(ids)
+        val uris = trashableOriginalUris(ids)
         if (uris.isEmpty()) {
             _events.tryEmit("所选照片的原图不在系统相册管理范围内")
             return null
