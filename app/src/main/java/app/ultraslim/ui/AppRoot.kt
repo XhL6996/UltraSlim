@@ -26,6 +26,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.navigation.NavGraph.Companion.findStartDestination
 import androidx.navigation.NavHostController
@@ -58,6 +59,8 @@ fun AppRoot() {
     val backStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute = backStackEntry?.destination?.route
     val isTopLevel = currentRoute in topLevelRoutes
+    // 历史选择模式有自己的底部操作栏，主导航先让位，避免双底栏。
+    var historySelecting by androidx.compose.runtime.saveable.rememberSaveable { androidx.compose.runtime.mutableStateOf(false) }
     val useRail = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width / androidx.compose.ui.platform.LocalDensity.current.density >= 840
 
     if (useRail) {
@@ -79,14 +82,14 @@ fun AppRoot() {
                 )
                 Spacer(Modifier.weight(1f))
             }
-            AppNavHost(navController = navController, modifier = Modifier.weight(1f))
+            AppNavHost(navController = navController, modifier = Modifier.weight(1f), onSelectingChange = { historySelecting = it })
         }
     } else {
         Scaffold(
             contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
             bottomBar = {
                 AnimatedVisibility(
-                    visible = isTopLevel,
+                    visible = isTopLevel && !historySelecting,
                     enter = slideInVertically(Motion.emphasized()) { it } + fadeIn(Motion.emphasized()),
                     exit = slideOutVertically(Motion.exit(Motion.Emphasized)) { it } + fadeOut(Motion.exit(Motion.Emphasized)),
                 ) {
@@ -107,13 +110,13 @@ fun AppRoot() {
                 }
             },
         ) { padding ->
-            AppNavHost(navController = navController, modifier = Modifier.padding(padding))
+            AppNavHost(navController = navController, modifier = Modifier.padding(padding), onSelectingChange = { historySelecting = it })
         }
     }
 }
 
 @Composable
-private fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier) {
+private fun AppNavHost(navController: NavHostController, modifier: Modifier = Modifier, onSelectingChange: (Boolean) -> Unit) {
     // 顶级 Tab 之间用 fade-through（轻微缩放淡换）；进出 设置/详情 保留横向推入。
     fun bothTopLevel(initial: androidx.navigation.NavBackStackEntry, target: androidx.navigation.NavBackStackEntry) =
         initial.destination.route in topLevelRoutes && target.destination.route in topLevelRoutes
@@ -163,6 +166,7 @@ private fun AppNavHost(navController: NavHostController, modifier: Modifier = Mo
         composable(Routes.HISTORY) {
             HistoryScreen(
                 onOpenDetail = { historyId -> navController.navigate(Routes.detail(historyId)) },
+                onSelectingChange = onSelectingChange,
             )
         }
         composable(Routes.SETTINGS) {

@@ -10,6 +10,9 @@ import app.ultraslim.convert.MediaStoreTrashHelper
 import app.ultraslim.convert.OutputStore
 import app.ultraslim.data.HistoryEntity
 import app.ultraslim.data.HistoryStats
+import kotlinx.coroutines.Job
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 
@@ -17,30 +20,48 @@ data class HistoryUiState(
     val items: List<HistoryEntity> = emptyList(),
     val totalSavedBytes: Long = 0,
     val convertedCount: Int = 0,
-    val busy: Boolean = false,
+    val busy: BusyState? = null,
     val stats: HistoryStats = HistoryStats(),
-)
+) {
+    val busyNow: Boolean get() = busy != null
+}
+
+/** 长时批量操作的进度；null = 空闲。 */
+data class BusyState(val label: String, val done: Int, val total: Int)
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
     private val dao = app.database.historyDao()
     private val limit = MutableStateFlow(100)
-    private val busy = MutableStateFlow(false)
+    /** DB 层筛选（""=全部，其余为 saveState 值），让筛选跨分页生效。 */
+    private val filter = MutableStateFlow("")
+
+    /** UI 侧 rememberSaveable 恢复后回填，保证筛选状态在页面往返后不丢。 */
+    fun setFilter(saveState: String) {
+        filter.value = saveState
+    }
+
+    private val busyState = MutableStateFlow<BusyState?>(null)
+    private var busyJob: Job? = null
     private val _events = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val events = _events.asSharedFlow()
     private val _deleteCandidates = MutableStateFlow<List<HistoryEntity>>(emptyList())
     val deleteCandidates = _deleteCandidates.asStateFlow()
+
+    fun cancelBusy() {
+        busyJob?.cancel()
+    }
 
     fun cancelDelete() {
         _deleteCandidates.value = emptyList()
     }
 
     fun requestDelete(ids: Set<Long>) {
-        if (!busy.value) _deleteCandidates.value = uiState.value.items.filter { it.id in ids }
+        if (busyState.value == null) _deleteCandidates.value = uiState.value.items.filter { it.id in ids }
     }
 
     fun requestDeleteDate(date: java.time.LocalDate, filter: String) {
-        if (busy.value) return
+        if (busyState.value != null) return
         viewModelScope.launch {
             val range = historyDateRange(date)
             _deleteCandidates.value = dao.inDateRange(range.first, range.last + 1)
@@ -49,11 +70,10 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     fun deleteConfirmed() {
-        if (busy.value) return
+        if (busyState.value != null) return
         val records = _deleteCandidates.value
         _deleteCandidates.value = emptyList()
-        busy.value = true
-        viewModelScope.launch {
+        busyJob = viewModelScope.launch {
             try {
                 val active = androidx.work.WorkManager.getInstance(app)
                     .getWorkInfosForUniqueWorkFlow(ConversionWorker.UNIQUE_WORK_NAME)
@@ -62,23 +82,33 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
                     _events.emit("请等待当前转换结束后删除记录")
                     return@launch
                 }
-                records.forEach { OutputStore.delete(app, it.id) }
+                busyState.value = BusyState("删除中", 0, records.size)
+                var processed = 0
+                for (entity in records) {
+                    coroutineContext.ensureActive()
+                    OutputStore.delete(app, entity.id)
+                    busyState.value = BusyState("删除中", ++processed, records.size)
+                }
                 _events.emit("已删除 ${records.size} 条记录，已保存到相册的图片不受影响")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                _events.emit("已停止删除；未删除的记录保持不变")
             } finally {
-                busy.value = false
+                busyState.value = null
+                busyJob = null
             }
         }
     }
 
     val uiState: StateFlow<HistoryUiState> = combine(
-        limit.flatMapLatest { dao.flowPage(it) },
+        combine(limit, filter) { l, f -> l to f }.flatMapLatest { (l, f) -> dao.flowPage(l, f) },
+        filter.flatMapLatest { f -> dao.flowCount(f) },
+        busyState,
         dao.flowStats(),
-        busy,
-    ) { items, stats, working ->
+    ) { items, count, working, stats ->
         HistoryUiState(
             items = items,
             totalSavedBytes = stats.totalSavedBytes,
-            convertedCount = stats.countDone,
+            convertedCount = count,
             busy = working,
             stats = stats,
         )
@@ -89,24 +119,32 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     fun saveSelected(ids: Set<Long>) {
-        if (busy.value) return
-        busy.value = true
-        viewModelScope.launch {
+        if (busyState.value != null) return
+        val targets = uiState.value.items.filter { it.id in ids && it.saveState != "SAVED" }
+        if (targets.isEmpty()) return
+        busyJob = viewModelScope.launch {
             var done = 0
             var failed = 0
             try {
-                uiState.value.items.filter { it.id in ids && it.saveState != "SAVED" }.forEach {
+                busyState.value = BusyState("保存中", 0, targets.size)
+                var processed = 0
+                for (entity in targets) {
+                    coroutineContext.ensureActive()
                     try {
-                        if (OutputStore.save(app, it).saveState == "SAVED") done++ else failed++
+                        if (OutputStore.save(app, entity).saveState == "SAVED") done++ else failed++
                     } catch (e: kotlinx.coroutines.CancellationException) {
                         throw e
                     } catch (e: Exception) {
                         failed++
                     }
+                    busyState.value = BusyState("保存中", ++processed, targets.size)
                 }
                 _events.emit("已保存 $done 张，失败 $failed 张；失败成品仍在应用内")
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                _events.emit("已停止保存；已完成的保存保持不变")
             } finally {
-                busy.value = false
+                busyState.value = null
+                busyJob = null
             }
         }
     }
@@ -148,9 +186,8 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     fun clearAll() {
-        if (busy.value) return
-        busy.value = true
-        viewModelScope.launch {
+        if (busyState.value != null) return
+        busyJob = viewModelScope.launch {
             try {
                 val active = androidx.work.WorkManager.getInstance(app)
                     .getWorkInfosForUniqueWorkFlow(ConversionWorker.UNIQUE_WORK_NAME)
@@ -159,13 +196,20 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
                     _events.emit("请等待当前转换结束后清空历史")
                     return@launch
                 }
+                busyState.value = BusyState("清空中", 0, 0)
                 val records = dao.all()
-                records.forEach { entity ->
+                var processed = 0
+                for (entity in records) {
+                    coroutineContext.ensureActive()
                     OutputStore.delete(app, entity.id)
+                    busyState.value = BusyState("清空中", ++processed, records.size)
                 }
                 app.conversionRepository.clearFinished()
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                _events.emit("已停止清空；未删除的记录保持不变")
             } finally {
-                busy.value = false
+                busyState.value = null
+                busyJob = null
             }
         }
     }

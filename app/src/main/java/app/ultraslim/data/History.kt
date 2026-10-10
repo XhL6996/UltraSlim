@@ -62,11 +62,12 @@ data class HistoryEntity(
 @Dao
 interface HistoryDao {
 
-    @Query("SELECT * FROM history ORDER BY createdAt DESC")
-    fun flowAll(): Flow<List<HistoryEntity>>
+    @Query("SELECT * FROM history WHERE :filter = '' OR saveState = :filter ORDER BY createdAt DESC LIMIT :limit")
+    fun flowPage(limit: Int, filter: String): Flow<List<HistoryEntity>>
 
-    @Query("SELECT * FROM history ORDER BY createdAt DESC LIMIT :limit")
-    fun flowPage(limit: Int): Flow<List<HistoryEntity>>
+    /** 与 [flowPage] 同筛选的计数，供"加载更多"页脚比较。 */
+    @Query("SELECT COUNT(*) FROM history WHERE :filter = '' OR saveState = :filter")
+    fun flowCount(filter: String): Flow<Int>
 
     @Query("SELECT * FROM history WHERE taskId = :taskId LIMIT 1")
     suspend fun byTask(taskId: String): HistoryEntity?

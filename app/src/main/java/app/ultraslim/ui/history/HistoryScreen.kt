@@ -15,6 +15,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -36,7 +38,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
+fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> Unit = {}) {
     val vm: HistoryViewModel = viewModel(factory = appViewModelFactory { HistoryViewModel(it) })
     val state by vm.uiState.collectAsStateWithLifecycle()
     val deleting by vm.deleteCandidates.collectAsStateWithLifecycle()
@@ -44,19 +46,30 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
-    var filter by remember { mutableStateOf("全部") }
-    var selected by remember { mutableStateOf(setOf<Long>()) }
+    // rememberSaveable：进详情再返回（或深色模式切换）后筛选/选择/折叠不丢。
+    var filter by rememberSaveable { mutableStateOf("全部") }
+    var selected by rememberSaveable(
+        stateSaver = listSaver(save = { it.toList() }, restore = { it.toSet() }),
+    ) { mutableStateOf(setOf<Long>()) }
     var confirmClear by remember { mutableStateOf(false) }
-    var selecting by remember { mutableStateOf(false) }
-    var collapsedDates by remember { mutableStateOf(emptySet<LocalDate>()) }
+    var selecting by rememberSaveable { mutableStateOf(false) }
+    var confirmBusyLeave by remember { mutableStateOf(false) }
+    var collapsedDates by rememberSaveable(
+        stateSaver = listSaver(save = { it.toList() }, restore = { it.toSet() }),
+    ) { mutableStateOf(emptySet<LocalDate>()) }
     var lastTrashCount by remember { mutableIntStateOf(0) }
+    LaunchedEffect(filter) { vm.setFilter(if (filter == "全部") "" else filter) }
+    LaunchedEffect(selecting) { onSelectingChange(selecting) }
     val trashLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             vm.onSelectedOriginalsTrashed(lastTrashCount)
         }
     }
     fun finishSelection() { selecting = false; selected = emptySet() }
-    BackHandler(selecting && !state.busy) { finishSelection() }
+    // busy 期间返回键不再直接退出页面：先问要不要停止当前操作。
+    BackHandler(enabled = selecting || state.busyNow) {
+        if (state.busyNow) confirmBusyLeave = true else finishSelection()
+    }
     LaunchedEffect(vm) { vm.events.collect { snackbar.showSnackbar(it) } }
     val visible = remember(state.items, filter) { state.items.filter { it.matchesHistoryFilter(filter) } }
     val selectedItems = visible.filter { it.id in selected }
@@ -78,12 +91,12 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                         style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }, actions = {
-                TextButton(onClick = { if (selecting) finishSelection() else selecting = true }, enabled = !state.busy) {
+                TextButton(onClick = { if (selecting) finishSelection() else selecting = true }, enabled = !state.busyNow) {
                     Text(if (selecting) "完成" else "选择")
                 }
                 var menu by remember { mutableStateOf(false) }
                 Box {
-                    IconButton(onClick = { menu = true }, enabled = !state.busy) { Icon(Icons.Rounded.MoreVert, "历史操作") }
+                    IconButton(onClick = { menu = true }, enabled = !state.busyNow) { Icon(Icons.Rounded.MoreVert, "历史操作") }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         if (selecting) DropdownMenuItem(text = { Text("删除所选记录") }, enabled = selectedItems.isNotEmpty(),
                             onClick = { menu = false; vm.requestDelete(selectedItems.map { it.id }.toSet()) })
@@ -103,8 +116,8 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                         .padding(horizontal = 16.dp, vertical = 8.dp)) {
                         FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (pendingCount > 0 && android.os.Build.VERSION.SDK_INT >= 29) {
-                                Button(onClick = { vm.saveSelected(selectedItems.map { it.id }.toSet()) }, enabled = !state.busy) {
-                                    Text(if (state.busy) "处理中…" else "保存 $pendingCount 张")
+                                Button(onClick = { vm.saveSelected(selectedItems.map { it.id }.toSet()) }, enabled = !state.busyNow) {
+                                    Text(if (state.busyNow) "处理中…" else "保存 $pendingCount 张")
                                 }
                             }
                             if (MediaStoreTrashHelper.isTrashSupported) {
@@ -116,7 +129,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                                             val sender = vm.requestTrashSelected(selectedItems.map { it.id }.toSet())
                                             if (sender != null) trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
                                         },
-                                        enabled = !state.busy,
+                                        enabled = !state.busyNow,
                                     ) {
                                         Icon(Icons.Rounded.DeleteSweep, null, modifier = Modifier.size(16.dp))
                                         Spacer(Modifier.width(4.dp))
@@ -126,9 +139,9 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                             }
                             OutlinedButton(onClick = {
                                 if (!OutputStore.share(context, selectedItems)) scope.launch { snackbar.showSnackbar("分享失败，文件不可访问") }
-                            }, enabled = !state.busy && selectedItems.isNotEmpty()) { Text("分享") }
+                            }, enabled = !state.busyNow && selectedItems.isNotEmpty()) { Text("分享") }
                             OutlinedButton(onClick = { vm.requestDelete(selectedItems.map { it.id }.toSet()) },
-                                enabled = !state.busy && selectedItems.isNotEmpty()) { Text("删除记录") }
+                                enabled = !state.busyNow && selectedItems.isNotEmpty()) { Text("删除记录") }
                         }
                     }
                 }
@@ -137,19 +150,19 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
     ) { padding ->
         LazyColumn(Modifier.fillMaxSize().padding(padding).testTag("history-list"),
             contentPadding = PaddingValues(start = 20.dp, top = 20.dp, end = 20.dp,
-                bottom = 20.dp + if (railMode && !selecting) WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp),
+                bottom = 20.dp + if (!selecting) WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
             item { StatsCard(state.stats) }
             item {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("全部", "待保存", "已保存", "保存失败").forEach { label ->
-                        FilterChip(selected = filter == label, enabled = !state.busy,
+                        FilterChip(selected = filter == label, enabled = !state.busyNow,
                             onClick = { filter = label; selected = emptySet() }, label = { Text(label) })
                     }
                 }
                 if (selecting) {
                     val allSelected = visible.isNotEmpty() && visible.all { it.id in selected }
-                    TextButton(enabled = !state.busy && visible.isNotEmpty(), onClick = {
+                    TextButton(enabled = !state.busyNow && visible.isNotEmpty(), onClick = {
                         selected = if (allSelected) emptySet() else visible.map { it.id }.toSet()
                     }) { Text(if (allSelected) "取消全选" else "全选当前页") }
                 } else if (visible.isNotEmpty()) {
@@ -178,6 +191,19 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                 }
             }
             if (visible.isEmpty()) item { EmptyState(Icons.Rounded.History, "暂无此类记录", "完成的成品和保存状态会显示在这里") }
+            // 长操作进度：独立于选择栏，批量保存/删除/清空都显示 x/y 且可停止。
+            state.busy?.let { b ->
+                item(key = "busy-banner") {
+                    Surface(shape = RoundedCornerShape(14.dp), color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth()) {
+                        Row(Modifier.padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            if (b.total > 0) LinearProgressIndicator(progress = { b.done.toFloat() / b.total }, modifier = Modifier.weight(1f))
+                            else LinearProgressIndicator(Modifier.weight(1f))
+                            Text("${b.label} ${b.done}/${b.total}", style = MaterialTheme.typography.labelMedium)
+                            TextButton(onClick = vm::cancelBusy) { Text("停止") }
+                        }
+                    }
+                }
+            }
             // 行级虚拟化：展开态的每条记录是独立 item；单个自然日 500 张也不会一次性组合。
             groups.forEach { (date, records) ->
                 val isCollapsed = date in collapsedDates
@@ -189,7 +215,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                     }, positionalThreshold = { it * 0.35f })
                     SwipeToDismissBox(state = swipe,
                         modifier = Modifier.fillMaxWidth().animateItem(placementSpec = Motion.itemPlacement()).testTag("history-date-$date"),
-                        enableDismissFromStartToEnd = !selecting && !state.busy,
+                        enableDismissFromStartToEnd = !selecting && !state.busyNow,
                         enableDismissFromEndToStart = false,
                         backgroundContent = {
                             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(16.dp)) {
@@ -217,13 +243,13 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                                     if (selecting) {
                                         val ids = records.map { it.id }.toSet()
                                         val allSelected = selected.containsAll(ids)
-                                        TextButton(enabled = !state.busy, onClick = {
+                                        TextButton(enabled = !state.busyNow, onClick = {
                                             selected = if (allSelected) selected - ids else selected + ids
                                             if (isCollapsed) collapsedDates = collapsedDates - date
                                         }) {
                                             Text(if (allSelected) "取消当天" else "选择当天")
                                         }
-                                    } else IconButton(onClick = { latestDelete() }, enabled = !state.busy) {
+                                    } else IconButton(onClick = { latestDelete() }, enabled = !state.busyNow) {
                                         Icon(Icons.Rounded.DeleteOutline, "删除${historyDateTitle(date)}的记录")
                                     }
                                 }
@@ -238,7 +264,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
                             entity = entity,
                             selecting = selecting,
                             checked = checked,
-                            enabled = !state.busy,
+                            enabled = !state.busyNow,
                             onClick = {
                                 if (selecting) selected = if (checked) selected - entity.id else selected + entity.id
                                 else onOpenDetail(entity.id)
@@ -262,6 +288,11 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit) {
         text = { Text("删除全部转换记录和未保存的应用内成品。已保存到相册的图片不受影响。") },
         confirmButton = { TextButton(onClick = { confirmClear = false; finishSelection(); vm.clearAll() }) { Text("清空") } },
         dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("取消") } })
+    if (confirmBusyLeave) AlertDialog(onDismissRequest = { confirmBusyLeave = false },
+        title = { Text("要停止当前操作吗？") },
+        text = { Text(state.busy?.let { "${it.label} ${it.done}/${it.total}。停止后已完成的保持不变，未处理的会被跳过。" } ?: "") },
+        confirmButton = { TextButton(onClick = { confirmBusyLeave = false; vm.cancelBusy() }) { Text("停止", color = MaterialTheme.colorScheme.error) } },
+        dismissButton = { TextButton(onClick = { confirmBusyLeave = false }) { Text("继续") } })
 }
 
 @Composable
@@ -279,7 +310,8 @@ internal fun HistoryRow(entity: HistoryEntity, selecting: Boolean, checked: Bool
                 Text("${entity.format} · ${entity.width} × ${entity.height}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.height(6.dp))
                 Text("${formatBytes(entity.inputBytes)} → ${formatBytes(entity.outputBytes)}", style = MaterialTheme.typography.titleSmall)
-                Text("体积 ${formatSavedPercent(entity.inputBytes, entity.outputBytes)}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary)
+                Text("体积 ${formatSavedPercent(entity.inputBytes, entity.outputBytes)}", style = MaterialTheme.typography.labelMedium,
+                    color = if (entity.outputBytes > entity.inputBytes) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
                 Text(when (entity.saveState) { "SAVED" -> "已保存到相册"; "FAILED" -> "保存失败 · 可重试 / 导出"; else -> "待保存 · 可直接分享" },
                     style = MaterialTheme.typography.labelSmall, color = if (entity.saveState == "FAILED") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
             }
