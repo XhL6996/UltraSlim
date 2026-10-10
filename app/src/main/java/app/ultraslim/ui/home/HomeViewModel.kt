@@ -364,14 +364,21 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         }
     }
 
-    private suspend fun filterHdr(candidates: List<Uri>): List<Uri> {
-        val found = mutableListOf<Uri>()
-        candidates.forEachIndexed { index, uri ->
-            coroutineContext.ensureActive()
-            if (probeHasGainMap(uri)) found += uri
-            _scanProgress.value = "已检查 ${index + 1}/${candidates.size}，找到 ${found.size} 张 HDR"
-        }
-        return found
+    // 并发受 probePermits 限流；结果按输入顺序收集，进度随完成数推进。
+    private suspend fun filterHdr(candidates: List<Uri>): List<Uri> = coroutineScope {
+        if (candidates.isEmpty()) return@coroutineScope emptyList()
+        val checked = java.util.concurrent.atomic.AtomicInteger()
+        val foundCount = java.util.concurrent.atomic.AtomicInteger()
+        val hits = candidates.map { uri ->
+            async {
+                val hit = probeHasGainMap(uri)
+                checked.incrementAndGet()
+                if (hit) foundCount.incrementAndGet()
+                _scanProgress.value = "已检查 ${checked.get()}/${candidates.size}，找到 ${foundCount.get()} 张 HDR"
+                hit
+            }
+        }.awaitAll()
+        hits.mapIndexed { index, hit -> if (hit) candidates[index] else null }.filterNotNull()
     }
 
     /** 可访问图片，按最新在前；bucketId 非空时只取该相册。跳过我们自己的输出目录，无数量上限。 */
@@ -674,7 +681,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     companion object {
-        private const val SCAN_PARALLELISM = 2
+        private const val SCAN_PARALLELISM = 4
         private const val QUEUE_SAMPLE_MILLIS = 150L
         private const val TRASH_RESOLVE_SAMPLE_MILLIS = 500L
     }

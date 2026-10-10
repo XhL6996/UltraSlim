@@ -2,18 +2,33 @@ package app.ultraslim.data
 
 import android.content.Context
 import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.emptyPreferences
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
 import app.ultraslim.model.ConversionSettings
 import app.ultraslim.model.OutputFormat
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import java.io.File
 
-private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
+// preferencesDataStore 委托不支持 corruptionHandler。设置文件损坏时按空配置恢复，
+// 否则 collectors 会停在假默认值且无任何提示。路径与官方委托一致，保证旧安装可读。
+private object SettingsStoreHolder {
+    @Volatile private var instance: DataStore<Preferences>? = null
+
+    fun get(context: Context): DataStore<Preferences> = instance ?: synchronized(this) {
+        instance ?: PreferenceDataStoreFactory.create(
+            corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+        ) { File(context.filesDir, "datastore/settings.preferences_pb") }.also { instance = it }
+    }
+}
+
+private fun Context.settingsStore(): DataStore<Preferences> = SettingsStoreHolder.get(this)
 
 enum class ThemeMode(val id: String) {
     SYSTEM("system"),
@@ -86,7 +101,7 @@ class SettingsRepository(private val context: Context) {
         val HEIC_GAINMAP_COMPATIBILITY = booleanPreferencesKey("heic_gainmap_compatibility")
     }
 
-    val defaults: Flow<ConversionDefaults> = context.settingsDataStore.data.map { p ->
+    val defaults: Flow<ConversionDefaults> = context.settingsStore().data.map { p ->
         ConversionDefaults(
             format = OutputFormat.parse(p[Keys.OUTPUT_FORMAT]),
             quality = p[Keys.QUALITY] ?: 92,
@@ -105,7 +120,7 @@ class SettingsRepository(private val context: Context) {
         )
     }
 
-    val theme: Flow<ThemeSettings> = context.settingsDataStore.data.map { p ->
+    val theme: Flow<ThemeSettings> = context.settingsStore().data.map { p ->
         ThemeSettings(
             themeMode = ThemeMode.fromId(p[Keys.THEME_MODE]),
             dynamicColor = p[Keys.DYNAMIC_COLOR] ?: true,
@@ -113,66 +128,66 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun setOutputFormat(format: OutputFormat) {
-        context.settingsDataStore.edit { it[Keys.OUTPUT_FORMAT] = format.extension }
+        context.settingsStore().edit { it[Keys.OUTPUT_FORMAT] = format.extension }
     }
 
     suspend fun setQuality(quality: Int) {
-        context.settingsDataStore.edit { it[Keys.QUALITY] = quality.coerceIn(50, 100) }
+        context.settingsStore().edit { it[Keys.QUALITY] = quality.coerceIn(50, 100) }
     }
 
     suspend fun setGainmapQuality(quality: Int) {
-        context.settingsDataStore.edit { it[Keys.GAINMAP_QUALITY] = quality.coerceIn(30, 90) }
+        context.settingsStore().edit { it[Keys.GAINMAP_QUALITY] = quality.coerceIn(30, 90) }
     }
 
     suspend fun setGainmapScale(scale: Int) {
-        context.settingsDataStore.edit { it[Keys.GAINMAP_SCALE] = scale }
+        context.settingsStore().edit { it[Keys.GAINMAP_SCALE] = scale }
     }
 
     suspend fun setMultiChannelGainmap(enabled: Boolean) {
-        context.settingsDataStore.edit { it[Keys.MULTI_CHANNEL] = enabled }
+        context.settingsStore().edit { it[Keys.MULTI_CHANNEL] = enabled }
     }
 
     suspend fun setKeepExif(keep: Boolean) {
-        context.settingsDataStore.edit { it[Keys.KEEP_EXIF] = keep }
+        context.settingsStore().edit { it[Keys.KEEP_EXIF] = keep }
     }
 
     suspend fun setAllowSdr(allow: Boolean) {
-        context.settingsDataStore.edit { it[Keys.ALLOW_SDR] = allow }
+        context.settingsStore().edit { it[Keys.ALLOW_SDR] = allow }
     }
 
     suspend fun setThemeMode(mode: ThemeMode) {
-        context.settingsDataStore.edit { it[Keys.THEME_MODE] = mode.id }
+        context.settingsStore().edit { it[Keys.THEME_MODE] = mode.id }
     }
 
     suspend fun setDynamicColor(enabled: Boolean) {
-        context.settingsDataStore.edit { it[Keys.DYNAMIC_COLOR] = enabled }
+        context.settingsStore().edit { it[Keys.DYNAMIC_COLOR] = enabled }
     }
 
     suspend fun setAutoSave(enabled: Boolean) {
-        context.settingsDataStore.edit { it[Keys.AUTO_SAVE] = enabled }
+        context.settingsStore().edit { it[Keys.AUTO_SAVE] = enabled }
     }
 
-    suspend fun setOnlySmaller(value: Boolean) { context.settingsDataStore.edit { it[Keys.ONLY_SMALLER] = value } }
-    suspend fun setKeepLocation(value: Boolean) { context.settingsDataStore.edit { it[Keys.KEEP_LOCATION] = value } }
+    suspend fun setOnlySmaller(value: Boolean) { context.settingsStore().edit { it[Keys.ONLY_SMALLER] = value } }
+    suspend fun setKeepLocation(value: Boolean) { context.settingsStore().edit { it[Keys.KEEP_LOCATION] = value } }
 
     suspend fun setSpeedLevel(level: Int) {
-        context.settingsDataStore.edit { it[Keys.SPEED_LEVEL] = level.coerceIn(0, 2) }
+        context.settingsStore().edit { it[Keys.SPEED_LEVEL] = level.coerceIn(0, 2) }
     }
 
     suspend fun setResizePercent(percent: Int) {
-        context.settingsDataStore.edit { it[Keys.RESIZE_PERCENT] = percent.coerceIn(25, 100) }
+        context.settingsStore().edit { it[Keys.RESIZE_PERCENT] = percent.coerceIn(25, 100) }
     }
 
     suspend fun setHeicGainmapCompatibility(enabled: Boolean) {
-        context.settingsDataStore.edit { it[Keys.HEIC_GAINMAP_COMPATIBILITY] = enabled }
+        context.settingsStore().edit { it[Keys.HEIC_GAINMAP_COMPATIBILITY] = enabled }
     }
 
     suspend fun setAvifGainmapCompatibility(enabled: Boolean) {
-        context.settingsDataStore.edit { it[Keys.AVIF_GAINMAP_COMPATIBILITY] = enabled }
+        context.settingsStore().edit { it[Keys.AVIF_GAINMAP_COMPATIBILITY] = enabled }
     }
 
     suspend fun setDefaults(d: ConversionDefaults) {
-        context.settingsDataStore.edit { p ->
+        context.settingsStore().edit { p ->
             p[Keys.OUTPUT_FORMAT] = d.format.extension
             p[Keys.QUALITY] = d.quality.coerceIn(50, 100)
             p[Keys.GAINMAP_QUALITY] = d.gainmapQuality.coerceIn(30, 90)

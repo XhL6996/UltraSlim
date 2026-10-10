@@ -9,6 +9,8 @@ import java.util.zip.ZipOutputStream
 /** Transport package for the Mac importer. It is not itself an Apple Live Photo. */
 internal object AppleLiveBundle {
     fun write(channel: FileChannel, info: MotionPhotoInfo, output: OutputStream, checkCancelled: () -> Unit = {}) {
+        // 与 Mac 导入器（LivePhotoImport.extract 上限）对齐，避免导出成功但 Mac 拒收。
+        require(info.videoLength <= 1024L * 1024 * 1024) { "动态视频超过 1GB，Mac 导入器无法处理" }
         require(MotionPhotoContainer.validVideo(channel, info.videoOffset, info.videoLength)) { "动态视频不完整" }
         require(info.videoOffset + info.videoLength == channel.size()) { "动态视频位置不正确" }
         // Only HEIC output is supported. Locate the final mpvd structurally, including extended headers.
@@ -27,6 +29,7 @@ internal object AppleLiveBundle {
             pos += size
         }
         require(stillLength > 0) { "未找到 HEIC 动态视频，请重新转换原图" }
+        require(stillLength <= 512L * 1024 * 1024) { "照片超过 512MB，Mac 导入器无法处理" }
         ZipOutputStream(output).use { zip ->
             zip.setLevel(0) // media is already compressed
             fun text(name: String, value: String) { zip.putNextEntry(ZipEntry(name)); zip.write(value.toByteArray()); zip.closeEntry() }

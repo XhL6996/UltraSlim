@@ -82,7 +82,8 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
     /** Copies a cache-file output into the album and updates the record. */
     fun saveToAlbum() {
         val entity = uiState.value.entity ?: return
-        if (entity.outputUri.startsWith("content://") || saving.value) return
+        if (saving.value) { _events.tryEmit(DetailEvent.Message("正在处理中，请稍候")); return }
+        if (entity.outputUri.startsWith("content://")) return
         viewModelScope.launch {
             saving.value = true
             try {
@@ -98,7 +99,7 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
 
     fun exportAppleLiveTo(uri: Uri) {
         val entity = uiState.value.entity ?: return
-        if (saving.value) return
+        if (saving.value) { _events.tryEmit(DetailEvent.Message("正在处理中，请稍候")); return }
         saving.value = true
         viewModelScope.launch {
             try {
@@ -116,6 +117,7 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
 
     fun exportTo(uri: Uri) {
         val entity = uiState.value.entity ?: return
+        if (saving.value) { _events.tryEmit(DetailEvent.Message("正在处理中，请稍候")); return }
         viewModelScope.launch {
             saving.value = true
             try {

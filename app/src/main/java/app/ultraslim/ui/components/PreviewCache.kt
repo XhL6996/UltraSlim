@@ -25,7 +25,8 @@ internal object PreviewCache {
 
     private val diskLock = Any()
     private val requestLocks = Array(32) { kotlinx.coroutines.sync.Mutex() }
-    private val decodeSlots = kotlinx.coroutines.sync.Semaphore(1)
+    // 只串行化原生解码（整读输入文件 + 解码缓冲），磁盘命中路径不经过这里。
+    private val decodeSlots = kotlinx.coroutines.sync.Semaphore(2)
     private val resolutions = listOf(128, 384, 512, 1600, 4096)
 
     suspend fun load(context: Context, uriString: String, requestedDim: Int): Bitmap? {
@@ -36,21 +37,21 @@ internal object PreviewCache {
         // 1. Fast-path: In-memory cache hit (no locks, no semaphore)
         memory.get(key)?.let { return it }
 
-        // 2. Disk cache check (only diskLock, does not block on native decode semaphore)
+        // 2. Disk cache：锁内只做内存/文件 stat，BitmapFactory 解码在锁外，
+        //    避免滚动列表时把所有并发加载串行化。
         val dir = File(context.cacheDir, "previews")
         val file = File(dir, "$key.jpg")
-        synchronized(diskLock) {
-            memory.get(key)?.let { return it }
-            readCached(file, key)?.let { return it }
-            // Detail previews can supply list thumbnails without decoding the original again.
-            for (dimension in resolutions.filter { it > maxDim }) {
-                val largerKey = cacheKey("$uriString:$version:v5", dimension)
-                val larger = memory.get(largerKey) ?: readCached(File(dir, "$largerKey.jpg"), largerKey) ?: continue
+        synchronized(diskLock) { memory.get(key)?.let { return it } }
+        readCached(file, key)?.let { return it }
+        // Detail previews can supply list thumbnails without decoding the original again.
+        for (dimension in resolutions.filter { it > maxDim }) {
+            val largerKey = cacheKey("$uriString:$version:v5", dimension)
+            (memory.get(largerKey) ?: readCached(File(dir, "$largerKey.jpg"), largerKey))?.let { larger ->
                 val edge = maxOf(larger.width, larger.height)
                 val bitmap = if (edge <= maxDim) larger else Bitmap.createScaledBitmap(larger,
                     (larger.width.toLong() * maxDim / edge).toInt().coerceAtLeast(1),
                     (larger.height.toLong() * maxDim / edge).toInt().coerceAtLeast(1), true)
-                memory.put(key, bitmap)
+                synchronized(diskLock) { memory.put(key, bitmap) }
                 return bitmap
             }
         }
@@ -75,7 +76,7 @@ internal object PreviewCache {
         }
     }
 
-    // Caller holds diskLock. Corrupt entries are removed and decoded again on demand.
+    // Decoded outside diskLock; corrupt entries are removed and decoded again on demand.
     private fun readCached(file: File, key: String): Bitmap? {
         if (!file.isFile || file.length() == 0L) return null
         val bitmap = BitmapFactory.decodeFile(file.absolutePath)
