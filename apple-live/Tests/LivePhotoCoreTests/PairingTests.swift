@@ -1,0 +1,51 @@
+import XCTest
+import ImageIO
+import CoreGraphics
+import UniformTypeIdentifiers
+@testable import LivePhotoCore
+
+final class PairingTests: XCTestCase {
+    func testPresentationTimestampIsNotOffsetTwice() throws {
+        XCTAssertEqual(try LivePhotoImport.photoTime(timestampUs:3_000_000,start:2,duration:4),3)
+        XCTAssertEqual(try LivePhotoImport.photoTime(timestampUs:-1,start:2,duration:4),4)
+        XCTAssertThrowsError(try LivePhotoImport.photoTime(timestampUs:1_000_000,start:2,duration:4))
+    }
+    func testMetadataPairingKeepsCodedItemsForImageWithoutExif() throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true); defer { try? FileManager.default.removeItem(at:dir) }
+        let source=dir.appendingPathComponent("source.heic"),target=dir.appendingPathComponent("paired.heic")
+        let context=CGContext(data:nil,width:64,height:48,bitsPerComponent:8,bytesPerRow:0,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue)!
+        context.setFillColor(CGColor(red:0.1,green:0.7,blue:0.3,alpha:1)); context.fill(CGRect(x:0,y:0,width:64,height:48))
+        let destination=CGImageDestinationCreateWithURL(source as CFURL,UTType.heic.identifier as CFString,1,nil)!
+        CGImageDestinationAddImage(destination,context.makeImage()!,nil); XCTAssertTrue(CGImageDestinationFinalize(destination))
+        let before=try Data(contentsOf:source)
+        try HEICPairing.write(source:source,destination:target,identifier:UUID().uuidString)
+        let after=try Data(contentsOf:target)
+        for b in try HEICPairing.boxes(before,0,before.count) where b.type != "meta" { XCTAssertEqual(before[b.start..<b.end],after[b.start..<b.end]) }
+        XCTAssertEqual(before,try Data(contentsOf:source))
+        let tagged=CGImageSourceCreateWithURL(target as CFURL,nil)!
+        XCTAssertNotNil(CGImageSourceCreateImageAtIndex(tagged,0,nil))
+        let properties=CGImageSourceCopyPropertiesAtIndex(tagged,0,nil) as! [String:Any]
+        let exif=properties[kCGImagePropertyExifDictionary as String] as! [String:Any]
+        XCTAssertEqual(exif[kCGImagePropertyExifPixelXDimension as String] as? Int,64)
+        XCTAssertEqual(exif[kCGImagePropertyExifPixelYDimension as String] as? Int,48)
+    }
+    func testMalformedBoxesAndIlocFailWithoutOutOfBounds() throws {
+        for n in 0..<7 { XCTAssertThrowsError(try HEICPairing.boxes(Data(repeating:0,count:n+1),0,n+1)) }
+        XCTAssertThrowsError(try HEICPairing.boxes(Data([255,255,255,255,109,101,116,97]),0,8))
+        XCTAssertThrowsError(try HEICPairing.uint(Data([0]),0,16))
+        XCTAssertThrowsError(try HEICPairing.locations(Data([1,0,0,0,0x44,0x40,0,1]),HEICPairing.Box(start:0,end:8,header:0,type:"iloc")))
+    }
+    func testExistingHDRFixtureIsNotReencoded() throws {
+        guard let path=ProcessInfo.processInfo.environment["ULTRASLIM_LIVE_HEIC_FIXTURE"] else { throw XCTSkip("Set ULTRASLIM_LIVE_HEIC_FIXTURE for real HDR fixture") }
+        let source=URL(fileURLWithPath:path), target=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString+".heic")
+        defer { try? FileManager.default.removeItem(at:target) }
+        try HEICPairing.write(source:source,destination:target,identifier:UUID().uuidString)
+        let before=try Data(contentsOf:source),after=try Data(contentsOf:target)
+        for b in try HEICPairing.boxes(before,0,before.count) where b.type != "meta" { XCTAssertEqual(before[b.start..<b.end],after[b.start..<b.end]) }
+        let s=CGImageSourceCreateWithURL(source as CFURL,nil)!,t=CGImageSourceCreateWithURL(target as CFURL,nil)!
+        let gm=CGImageSourceCopyAuxiliaryDataInfoAtIndex(s,0,kCGImageAuxiliaryDataTypeISOGainMap) as? [String:Any]
+        let next=CGImageSourceCopyAuxiliaryDataInfoAtIndex(t,0,kCGImageAuxiliaryDataTypeISOGainMap) as? [String:Any]
+        XCTAssertNotNil(gm); XCTAssertEqual(gm?[kCGImageAuxiliaryDataInfoData as String] as? Data,next?[kCGImageAuxiliaryDataInfoData as String] as? Data)
+    }
+}

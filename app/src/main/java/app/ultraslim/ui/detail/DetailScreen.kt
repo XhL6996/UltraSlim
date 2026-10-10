@@ -137,6 +137,15 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     var showDeleteConfirm by remember { mutableStateOf(false) }
+    var showAppleExport by remember { mutableStateOf(false) }
+    val appleExport = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { it?.let(vm::exportAppleLiveTo) }
+    if (showAppleExport) AlertDialog(
+        onDismissRequest = { showAppleExport = false },
+        title = { Text("导出 Apple Live Photo") },
+        text = { Text("将 HEIC 成品中的照片和动态视频打包。请在 Mac 上用 UltraSlim Live 打开 ZIP，检查预览后导入「照片」。开启 iCloud 照片即可同步到 iPhone。\n\n直接将 ZIP 或 HEIC 保存到 iPhone 不会自动变为 Live Photo。") },
+        confirmButton = { TextButton(onClick = { showAppleExport = false; appleExport.launch("AppleLive_${state.entity?.displayName?.substringBeforeLast('.') ?: "photo"}.zip") }) { Text("导出给 Mac") } },
+        dismissButton = { TextButton(onClick = { showAppleExport = false }) { Text("取消") } },
+    )
     val sourcePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { it?.let(vm::relinkSource) }
     val export = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument(OutputFormat.parse(state.entity?.format).mimeType)) { it?.let(vm::exportTo) }
     val trashLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
@@ -184,6 +193,12 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                                         menu = false
                                         export.launch(state.entity?.displayName ?: "image.heic")
                                     }
+                                )
+                                if (state.entity?.format.equals("HEIC", ignoreCase = true)) DropdownMenuItem(
+                                    text = { Text("导出 Apple Live Photo…") },
+                                    enabled = !state.saving,
+                                    leadingIcon = { Icon(Icons.Rounded.PhotoLibrary, null) },
+                                    onClick = { menu = false; showAppleExport = true },
                                 )
                                 if (state.canTrashOriginal) {
                                     DropdownMenuItem(

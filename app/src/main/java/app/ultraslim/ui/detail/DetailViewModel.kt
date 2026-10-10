@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.ultraslim.UltraSlimApp
+import app.ultraslim.convert.AppleLiveExporter
 import app.ultraslim.convert.InputStore
 import app.ultraslim.convert.MediaStoreTrashHelper
 import app.ultraslim.convert.OutputStore
@@ -92,6 +93,24 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
             } finally {
                 saving.value = false
             }
+        }
+    }
+
+    fun exportAppleLiveTo(uri: Uri) {
+        val entity = uiState.value.entity ?: return
+        if (saving.value) return
+        saving.value = true
+        viewModelScope.launch {
+            try {
+                AppleLiveExporter.export(app, entity, uri)
+                _events.emit(DetailEvent.Message("已导出。请在 Mac 上用 UltraSlim Live 打开 ZIP 并导入「照片」"))
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                runCatching { android.provider.DocumentsContract.deleteDocument(app.contentResolver, uri) }
+                throw e
+            } catch (e: Exception) {
+                runCatching { android.provider.DocumentsContract.deleteDocument(app.contentResolver, uri) }
+                _events.emit(DetailEvent.Message("Apple Live Photo 导出失败：${e.message}"))
+            } finally { saving.value = false }
         }
     }
 
