@@ -139,7 +139,7 @@ interface TaskDao {
     @Query("UPDATE batches SET cancelled = 1 WHERE id = :id") suspend fun cancel(id: String)
 }
 
-@Database(entities = [HistoryEntity::class, QueueItem::class, BatchEntity::class], version = 3, exportSchema = true)
+@Database(entities = [HistoryEntity::class, QueueItem::class, BatchEntity::class], version = 4, exportSchema = true)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun historyDao(): HistoryDao
     abstract fun taskDao(): TaskDao
@@ -162,6 +162,14 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_history_createdAt ON history(createdAt)")
                 db.execSQL("CREATE INDEX IF NOT EXISTS index_history_status ON history(status)")
+            }
+        }
+        // TranscodeResult 增加输出元数据字段（probe 收敛），tasks 的 result_ 列随之扩展。
+        val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE tasks ADD COLUMN result_hasGainMap INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tasks ADD COLUMN result_hasExif INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("ALTER TABLE tasks ADD COLUMN result_maxContentBoost REAL NOT NULL DEFAULT 1.0")
             }
         }
     }
