@@ -30,6 +30,37 @@ final class PairingTests: XCTestCase {
         XCTAssertEqual(exif[kCGImagePropertyExifPixelXDimension as String] as? Int,64)
         XCTAssertEqual(exif[kCGImagePropertyExifPixelYDimension as String] as? Int,48)
     }
+    /** App 产出的 HEIC 常态自带 Exif item：配对走「替换 extents + 保留 cdsc」分支。 */
+    func testMetadataPairingReplacesExistingExifItemWithoutReencode() throws {
+        let dir=FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at:dir,withIntermediateDirectories:true); defer { try? FileManager.default.removeItem(at:dir) }
+        let source=dir.appendingPathComponent("source.heic"),target=dir.appendingPathComponent("paired.heic")
+        let context=CGContext(data:nil,width:64,height:48,bitsPerComponent:8,bytesPerRow:0,space:CGColorSpaceCreateDeviceRGB(),bitmapInfo:CGImageAlphaInfo.noneSkipLast.rawValue)!
+        context.setFillColor(CGColor(red:0.4,green:0.2,blue:0.8,alpha:1)); context.fill(CGRect(x:0,y:0,width:64,height:48))
+        let destination=CGImageDestinationCreateWithURL(source as CFURL,UTType.heic.identifier as CFString,1,nil)!
+        let properties:[String:Any]=[kCGImagePropertyExifDictionary as String:[kCGImagePropertyExifUserComment as String:"ultraslim-pairing-regression"]]
+        CGImageDestinationAddImage(destination,context.makeImage()!,properties as CFDictionary); XCTAssertTrue(CGImageDestinationFinalize(destination))
+        // 前置确认：源文件确实携带 Exif item，否则测的不是 keepExif 分支。
+        let sourceImage=CGImageSourceCreateWithURL(source as CFURL,nil)!
+        let sourceProps=CGImageSourceCopyPropertiesAtIndex(sourceImage,0,nil) as! [String:Any]
+        XCTAssertNotNil(sourceProps[kCGImagePropertyExifDictionary as String])
+        let before=try Data(contentsOf:source)
+        // 生产路径的标识符是 UUID（36 字符）；短字符串会被 ImageIO 用 '.' 填充到 32 字节，
+        // write() 内部的逐字校验会因此拒绝，所以这里必须用与 App 相同形态的标识符。
+        let identifier=UUID().uuidString
+        try HEICPairing.write(source:source,destination:target,identifier:identifier)
+        let after=try Data(contentsOf:target)
+        for b in try HEICPairing.boxes(before,0,before.count) where b.type != "meta" { XCTAssertEqual(before[b.start..<b.end],after[b.start..<b.end]) }
+        XCTAssertEqual(before,try Data(contentsOf:source))
+        let tagged=CGImageSourceCreateWithURL(target as CFURL,nil)!
+        XCTAssertNotNil(CGImageSourceCreateImageAtIndex(tagged,0,nil))
+        let props=CGImageSourceCopyPropertiesAtIndex(tagged,0,nil) as! [String:Any]
+        let exif=props[kCGImagePropertyExifDictionary as String] as! [String:Any]
+        XCTAssertEqual(exif[kCGImagePropertyExifUserComment as String] as? String,"ultraslim-pairing-regression")
+        XCTAssertEqual(exif[kCGImagePropertyExifPixelXDimension as String] as? Int,64)
+        XCTAssertEqual(exif[kCGImagePropertyExifPixelYDimension as String] as? Int,48)
+        XCTAssertEqual((props[kCGImagePropertyMakerAppleDictionary as String] as? [String:Any])?["17"] as? String,identifier)
+    }
     func testMalformedBoxesAndIlocFailWithoutOutOfBounds() throws {
         for n in 0..<7 { XCTAssertThrowsError(try HEICPairing.boxes(Data(repeating:0,count:n+1),0,n+1)) }
         XCTAssertThrowsError(try HEICPairing.boxes(Data([255,255,255,255,109,101,116,97]),0,8))
