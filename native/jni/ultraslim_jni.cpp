@@ -18,12 +18,14 @@ jobject toProbeResult(JNIEnv* env, const ultraslim::ProbeResult& r) {
 
 jobject toTranscodeResult(JNIEnv* env, const ultraslim::TranscodeResult& r) {
   jclass cls = env->FindClass("app/ultraslim/bridge/TranscodeResult");
-  jmethodID ctor = env->GetMethodID(cls, "<init>", "(ILjava/lang/String;ZIIIIJJD)V");
+  jmethodID ctor = env->GetMethodID(cls, "<init>", "(ILjava/lang/String;ZIIIIJJDZZF)V");
   jstring err = env->NewStringUTF(r.error.c_str());
   return env->NewObject(cls, ctor, r.errorCode, err,
                         r.inputHadGainMap ? JNI_TRUE : JNI_FALSE, r.width, r.height,
                         r.gainmapWidth, r.gainmapHeight, static_cast<jlong>(r.inputBytes),
-                        static_cast<jlong>(r.outputBytes), static_cast<jdouble>(r.durationMs));
+                        static_cast<jlong>(r.outputBytes), static_cast<jdouble>(r.durationMs),
+                        r.hasGainMap ? JNI_TRUE : JNI_FALSE, r.hasExif ? JNI_TRUE : JNI_FALSE,
+                        r.maxContentBoost);
 }
 
 }  // namespace

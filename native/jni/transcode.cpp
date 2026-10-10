@@ -44,6 +44,12 @@ extern "C" void ultraslim_heif_gainmap_retry_cache(int enabled);
 namespace ultraslim {
 namespace {
 
+// Hard pixel ceiling shared by every decoder path (base image, gain map, preview,
+// SDR/JXL). Oversized input must fail with an error code instead of OOM-killing.
+constexpr int64_t kMaxPixels = 100000000;
+// Upper bound for a single decoded metadata box (Exif / jhgm).
+constexpr uint64_t kMaxBoxBytes = 100ull * 1024 * 1024;
+
 struct GainMapRetryScope {
   explicit GainMapRetryScope(bool enabled) { ultraslim_heif_gainmap_retry_cache(enabled); }
   ~GainMapRetryScope() { ultraslim_heif_gainmap_retry_cache(0); }
@@ -325,7 +331,7 @@ bool decodeJpegSdr(const std::vector<uint8_t>& data, SdrImage& out, std::string&
   out.width = static_cast<int>(cinfo.output_width);
   out.height = static_cast<int>(cinfo.output_height);
   const size_t stride = static_cast<size_t>(out.width) * 4;
-  if (out.width <= 0 || out.height <= 0 || int64_t(out.width)*out.height > 100000000) { jpeg_destroy_decompress(&cinfo); err="图片尺寸超出限制"; return false; }
+  if (out.width <= 0 || out.height <= 0 || int64_t(out.width)*out.height > kMaxPixels) { jpeg_destroy_decompress(&cinfo); err="图片尺寸超出限制"; return false; }
   out.rgba.resize(stride * static_cast<size_t>(out.height));
   while (cinfo.output_scanline < cinfo.output_height) {
     JSAMPROW row = out.rgba.data() + static_cast<size_t>(cinfo.output_scanline) * stride;
@@ -416,7 +422,7 @@ bool decodeHeifHandle(heif_image_handle* handle, SdrImage& out, std::string& err
   out.height = heif_image_get_height(himg, heif_channel_interleaved);
   int srcStride = 0;
   const uint8_t* plane = heif_image_get_plane_readonly(himg, heif_channel_interleaved, &srcStride);
-  if (plane == nullptr || out.width <= 0 || out.height <= 0 || int64_t(out.width)*out.height > 100000000) {
+  if (plane == nullptr || out.width <= 0 || out.height <= 0 || int64_t(out.width)*out.height > kMaxPixels) {
     heif_image_release(himg);
     err = "HEIF 解码结果为空";
     return false;
@@ -452,7 +458,7 @@ bool copyNativeGainMap(heif_image* image, SdrImage& out) {
   if (!mono && !(identity && heif_image_get_chroma_format(image) == heif_chroma_444)) return false;
   out.width = heif_image_get_primary_width(image);
   out.height = heif_image_get_primary_height(image);
-  if (out.width <= 0 || out.height <= 0 || int64_t(out.width) * out.height > 100000000) return false;
+  if (out.width <= 0 || out.height <= 0 || int64_t(out.width) * out.height > kMaxPixels) return false;
   int ys = 0, us = 0, vs = 0;
   const auto* y = heif_image_get_plane_readonly(image, heif_channel_Y, &ys);
   const auto* u = mono ? y : heif_image_get_plane_readonly(image, heif_channel_Cb, &us);
@@ -589,7 +595,7 @@ bool probeJxl(const std::vector<uint8_t>& data, ProbeResult& r) {
         }
         if (memcmp(currBoxType, "jhgm", 4) == 0) {
           uint64_t raw_size = 0;
-          if (JxlDecoderGetBoxSizeContents(dec, &raw_size) == JXL_DEC_SUCCESS && raw_size > 0 && raw_size < 100 * 1024 * 1024) {
+          if (JxlDecoderGetBoxSizeContents(dec, &raw_size) == JXL_DEC_SUCCESS && raw_size > 0 && raw_size < kMaxBoxBytes) {
             currBoxData.resize(static_cast<size_t>(raw_size));
           } else {
             currBoxData.resize(64 * 1024);
@@ -701,6 +707,10 @@ bool decodeJxlToSdr(const std::vector<uint8_t>& data, SdrImage& out,
         err = "获取 JXL 基本信息失败";
         break;
       }
+      if (int64_t(info.xsize) * info.ysize > kMaxPixels) {
+        err = "图片尺寸超出限制";
+        break;
+      }
       out.colorChannels = info.num_color_channels;
       out.width = info.xsize;
       out.height = info.ysize;
@@ -729,7 +739,7 @@ bool decodeJxlToSdr(const std::vector<uint8_t>& data, SdrImage& out,
       if (JxlDecoderGetBoxType(dec, currBoxType, JXL_TRUE) == JXL_DEC_SUCCESS) {
         if (memcmp(currBoxType, "Exif", 4) == 0 || (outJhgm && memcmp(currBoxType, "jhgm", 4) == 0)) {
           uint64_t raw_size = 0;
-          if (JxlDecoderGetBoxSizeContents(dec, &raw_size) == JXL_DEC_SUCCESS && raw_size > 0 && raw_size < 100 * 1024 * 1024) {
+          if (JxlDecoderGetBoxSizeContents(dec, &raw_size) == JXL_DEC_SUCCESS && raw_size > 0 && raw_size < kMaxBoxBytes) {
             currBoxData.resize(static_cast<size_t>(raw_size));
           } else {
             currBoxData.resize(64 * 1024);
@@ -1649,7 +1659,8 @@ int encodeJxl(const SdrImage& base, int quality, bool keepExif, int outFd,
 // ------------------------------------------------------------------- uhdr HDR
 
 // Probes with the uhdr decoder; returns true when the image parses and carries a gain map.
-bool probeWithUhdr(const std::vector<uint8_t>& data, ProbeResult* probe, TranscodeResult* tr) {
+bool probeWithUhdr(const std::vector<uint8_t>& data, ProbeResult* probe, TranscodeResult* tr,
+                   DecoderPtr* outDecoder = nullptr) {
   DecoderPtr dec(uhdr_create_decoder());
   if (!dec) return false;
   uhdr_compressed_image_t img {};
@@ -1666,6 +1677,7 @@ bool probeWithUhdr(const std::vector<uint8_t>& data, ProbeResult* probe, Transco
   const int gh = uhdr_dec_get_gainmap_height(dec.get());
   const bool hasGainMap = gw > 0 && gh > 0;
   if (!hasGainMap) return false;
+  if (outDecoder != nullptr) *outDecoder = std::move(dec);
   if (probe != nullptr) {
     probe->width = w;
     probe->height = h;
@@ -1989,12 +2001,26 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
   r.gainmapWidth = outGmW;
   r.gainmapHeight = outGmH;
   r.inputHadGainMap = true;
+  // 输出的增益图元数据与输入一致，直接报告而非整读输出文件再 probe。
+  r.hasGainMap = true;
+  r.hasExif = !base.exif.empty();
+  if (meta != nullptr) {
+    r.maxContentBoost = meta->max_content_boost[0];
+  } else if (!iso.empty()) {
+    ultrahdr::uhdr_gainmap_metadata_frac frac {};
+    if (ultrahdr::uhdr_gainmap_metadata_frac::decodeGainmapMetadata(iso, &frac).error_code == UHDR_CODEC_OK) {
+      ultrahdr::uhdr_gainmap_metadata_ext_t ext {};
+      if (ultrahdr::uhdr_gainmap_metadata_frac::gainmapMetadataFractionToFloat(&frac, &ext).error_code == UHDR_CODEC_OK) {
+        r.maxContentBoost = ext.max_content_boost[0];
+      }
+    }
+  }
   return 0;
 }
 
 }  // namespace
 
-ProbeResult probeImageMemory(const std::vector<uint8_t>& data) {
+ProbeResult probeImageMemory(const std::vector<uint8_t>& data, DecoderPtr* outDecoder = nullptr) {
   ProbeResult r;
   if (data.empty()) {
     r.errorCode = 1;
@@ -2014,7 +2040,7 @@ ProbeResult probeImageMemory(const std::vector<uint8_t>& data) {
     }
     return r;
   }
-  if (probeWithUhdr(data, &r, nullptr)) {
+  if (probeWithUhdr(data, &r, nullptr, outDecoder)) {
     if (r.container != 0) { int w, h; probeHeifDims(data, w, h, r.hasExif); }
     return r;  // gain map image
   }
@@ -2067,7 +2093,8 @@ ProbeResult probeImage(int fd) {
   return probeImageMemory(data);
 }
 
-static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, int outFd, const TranscodeOptions& options) {
+static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, DecoderPtr probedDec,
+                                          const ProbeResult& probe, int outFd, const TranscodeOptions& options) {
   TranscodeResult r;
   const auto start = std::chrono::steady_clock::now();
   ultraslim_codec_speed_level = options.speedLevel;
@@ -2086,33 +2113,33 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, int outFd, 
     return r;
   }
 
+  // transcodeImage 已对整份输入做过 probe；此处只补齐转码必需的解析，
+  // 不再重复跑一遍完整 probe。HDR 输入的 uhdr decoder 由 probe 直接移交。
   DecoderPtr dec;
   if (container == 3) {
-    ProbeResult pr;
-    pr.container = 3;
-    if (!probeJxl(data, pr)) {
-      r.errorCode = 4;
-      r.error = "解析 JXL 图像失败";
-      return r;
-    }
-    r.width = pr.width;
-    r.height = pr.height;
-    if (pr.hasGainMap) {
+    r.width = probe.width;
+    r.height = probe.height;
+    if (probe.hasGainMap) {
       r.inputHadGainMap = true;
-      r.gainmapWidth = pr.gainmapWidth;
-      r.gainmapHeight = pr.gainmapHeight;
+      r.gainmapWidth = probe.gainmapWidth;
+      r.gainmapHeight = probe.gainmapHeight;
     }
   } else {
-    dec.reset(uhdr_create_decoder());
-    uhdr_compressed_image_t img {};
-    img.data = data.data();
-    img.data_sz = img.capacity = data.size();
-    img.cg = UHDR_CG_UNSPECIFIED;
-    img.ct = UHDR_CT_UNSPECIFIED;
-    img.range = UHDR_CR_UNSPECIFIED;
-    const bool probed = dec && uhdr_dec_set_image(dec.get(), &img).error_code == UHDR_CODEC_OK &&
-                        uhdr_dec_probe(dec.get()).error_code == UHDR_CODEC_OK;
-    if (probed) {
+    if (!probedDec && probe.hasGainMap) {
+      dec.reset(uhdr_create_decoder());
+      uhdr_compressed_image_t img {};
+      img.data = data.data();
+      img.data_sz = img.capacity = data.size();
+      img.cg = UHDR_CG_UNSPECIFIED;
+      img.ct = UHDR_CT_UNSPECIFIED;
+      img.range = UHDR_CR_UNSPECIFIED;
+      const bool ok = dec && uhdr_dec_set_image(dec.get(), &img).error_code == UHDR_CODEC_OK &&
+                      uhdr_dec_probe(dec.get()).error_code == UHDR_CODEC_OK;
+      if (!ok) dec.reset();
+    } else {
+      dec = std::move(probedDec);
+    }
+    if (dec) {
       const int gw = uhdr_dec_get_gainmap_width(dec.get());
       const int gh = uhdr_dec_get_gainmap_height(dec.get());
       if (gw > 0 && gh > 0) {
@@ -2125,6 +2152,9 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, int outFd, 
     }
   }
 
+  // rebuild 路径的编码结果仍驻留内存，直接从缓冲校验；其余路径从输出 fd 校验。
+  ProbeResult memVerified;
+  bool verifiedInMemory = false;
   if (r.inputHadGainMap) {
     const int srcW = r.width;
     const int srcH = r.height;
@@ -2269,6 +2299,9 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, int outFd, 
       return r;
     }
     r.outputBytes = static_cast<long>(out->data_sz);
+    const auto* encodedData = static_cast<const uint8_t*>(out->data);
+    memVerified = probeImageMemory(std::vector<uint8_t>(encodedData, encodedData + out->data_sz));
+    verifiedInMemory = true;
   } else {
     // ---------------- SDR path: decode with libjpeg/libheif, encode with libheif
     if (!options.allowSdrTranscode) {
@@ -2331,12 +2364,15 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, int outFd, 
     if (fstat(outFd, &st) == 0) r.outputBytes = static_cast<long>(st.st_size);
   }
 
-  const ProbeResult verified = probeImage(outFd);
+  const ProbeResult verified = verifiedInMemory ? memVerified : probeImage(outFd);
   if (verified.errorCode != 0 || (r.inputHadGainMap && !verified.hasGainMap)) {
     r.errorCode = 25; r.error = "输出校验失败：图像或 Gain Map 不完整"; return r;
   }
   r.width = verified.width; r.height = verified.height;
   r.gainmapWidth = verified.gainmapWidth; r.gainmapHeight = verified.gainmapHeight;
+  r.hasGainMap = verified.hasGainMap;
+  r.hasExif = verified.hasExif;
+  r.maxContentBoost = verified.maxContentBoost;
   r.durationMs =
       std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
   return r;
@@ -2349,14 +2385,15 @@ TranscodeResult transcodeImage(int inFd, int outFd, const TranscodeOptions& opti
     if (data.empty()) {
       TranscodeResult r; r.errorCode = 1; r.error = "无法读取图片数据"; return r;
     }
-    auto p = probeImageMemory(data);
-    if (p.errorCode || p.width <= 0 || p.height <= 0 || static_cast<int64_t>(p.width) * p.height > 100000000) {
+    DecoderPtr probeDecoder;
+    auto p = probeImageMemory(data, &probeDecoder);
+    if (p.errorCode || p.width <= 0 || p.height <= 0 || static_cast<int64_t>(p.width) * p.height > kMaxPixels) {
       TranscodeResult r; r.errorCode = 26; r.error = p.errorCode ? p.error : "图片超过安全解码限制（1 亿像素）"; return r;
     }
     if(options.xmp.size()>1024*1024||options.outCodec<0||options.outCodec>3||options.quality<1||options.quality>100||options.gainmapQuality<1||options.gainmapQuality>100||options.gainmapScale<1||options.gainmapScale>128||options.resizePercent<1||options.resizePercent>100||options.speedLevel<0||options.speedLevel>2) {
       TranscodeResult r;r.errorCode=30;r.error="转码参数超出范围";return r;
     }
-    return transcodeUnchecked(std::move(data), outFd, options);
+    return transcodeUnchecked(std::move(data), std::move(probeDecoder), p, outFd, options);
   } catch (const std::exception& e) {
     TranscodeResult r; r.errorCode = 27; r.error = std::string("转码资源不足或数据异常: ") + e.what(); return r;
   }

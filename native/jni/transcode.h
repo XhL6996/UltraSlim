@@ -48,6 +48,11 @@ struct TranscodeResult {
   int errorCode = 0;
   std::string error;
   bool inputHadGainMap = false;
+  // Output properties from the post-encode verification (or the writer itself on
+  // the preserve path), so callers never re-read the output file to learn them.
+  bool hasGainMap = false;
+  bool hasExif = false;
+  float maxContentBoost = 1.0f;
   int width = 0;
   int height = 0;
   int gainmapWidth = 0;
