@@ -201,8 +201,15 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     fun addItems(uris: List<Uri>) {
         if (uris.isEmpty()) return
-        viewModelScope.launch { repo.awaitReady(); addItemsInternal(uris) }
+        importJob = viewModelScope.launch { repo.awaitReady(); addItemsInternal(uris) }
     }
+
+    /** 误选大相册时可以中止导入；已导入完成的条目保留。 */
+    fun cancelImport() {
+        importJob?.cancel()
+    }
+
+    private var importJob: Job? = null
 
     /** 相册（图集）信息，用于批量导入。 */
     data class AlbumBucket(val id: String, val name: String, val count: Int, val coverUri: String, val latestModified: Long)
@@ -269,7 +276,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     /** 把整个相册的照片加入处理列表（自动去重；单次上限 1000 张）。 */
     fun importAlbum(album: AlbumBucket) {
-        viewModelScope.launch {
+        importJob = viewModelScope.launch {
             val uris = withContext(Dispatchers.IO) { queryImages(album.id) }
             if (uris.isEmpty()) { _events.emit(HomeEvent.Info("这个相册没有照片")); return@launch }
             val capped = if (uris.size > 1000) {
@@ -350,7 +357,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
                 val hdrUris = if (candidates.isEmpty()) emptyList() else filterHdr(candidates)
                 val added = if (hdrUris.isEmpty()) 0 else addItemsInternal(hdrUris)
                 when {
-                    hdrUris.isEmpty() -> _events.emit(HomeEvent.Info("$scopeLabel 中没有找到 HDR 照片"))
+                    hdrUris.isEmpty() -> _events.emit(HomeEvent.Info("${scopeLabel}没有找到 HDR 照片"))
                     added == 0 -> _events.emit(HomeEvent.Info("发现的 HDR 图片已在队列中"))
                     else -> _events.emit(HomeEvent.Info("发现 $added 张 HDR 图片，已加入队列"))
                 }
@@ -452,6 +459,11 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     fun removeItem(id: String) {
         repo.remove(id)
+    }
+
+    /** 滑动移除后的撤销：按 URI 去重放回队列。 */
+    fun restoreItems(items: List<QueueItem>) {
+        repo.addAll(items)
     }
 
     fun removeBatch(itemIds: List<String>) {

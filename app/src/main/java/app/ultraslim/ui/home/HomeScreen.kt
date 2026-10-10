@@ -31,6 +31,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -86,12 +87,13 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             batchIdSelector = { it.batchId },
         )
     }
-    var confirmClear by remember { mutableStateOf<String?>(null) }  // "pending" | "all"
+    var confirmClear by rememberSaveable { mutableStateOf<String?>(null) }  // "pending" | "all"
+    var confirmRemoveIds by remember { mutableStateOf<List<String>?>(null) }
     val context = LocalContext.current
     val snackbar = remember { SnackbarHostState() }
-    var optionsExpanded by remember { mutableStateOf(false) }
-    var showAlbums by remember { mutableStateOf(false) }
-    var hdrOnly by remember { mutableStateOf(false) }
+    var optionsExpanded by rememberSaveable { mutableStateOf(false) }
+    var showAlbums by rememberSaveable { mutableStateOf(false) }
+    var hdrOnly by rememberSaveable { mutableStateOf(false) }
     val albums by vm.albums.collectAsStateWithLifecycle()
     val loadingAlbums by vm.loadingAlbums.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { vm.addItems(it) }
@@ -249,7 +251,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             onClick = { if (state.isConverting) vm.cancelConversion() else start() },
                             modifier = Modifier
                                 .weight(1f)
-                                .height(48.dp),
+                                .heightIn(min = 48.dp),
                             shape = RoundedCornerShape(12.dp),
                             enabled = !stopping && (state.isConverting || state.convertibleCount > 0),
                         ) {
@@ -297,7 +299,8 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                     contentPadding = PaddingValues(
                         start = 20.dp, top = 20.dp, end = 20.dp,
                         // rail 模式且队列为空时没有底部操作栏，补上导航条避让。
-                        bottom = 20.dp + if (railLayout && state.queue.isEmpty()) WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp,
+                        // 底部操作栏隐藏（队列为空）时一律补导航条避让，不限分栏模式。
+                        bottom = 20.dp + if (state.queue.isEmpty()) WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp,
                     ),
                     verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     item(key = "import-hero") {
@@ -333,6 +336,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                     Spacer(Modifier.width(12.dp))
                                     Text(if (scanning) scanProgress else importProgress, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                                     if (scanning) TextButton(onClick = vm::cancelScan) { Text("停止") }
+                                    else if (importing) TextButton(onClick = vm::cancelImport) { Text("停止") }
                                 }
                             }
                         }
@@ -375,7 +379,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                         OutlinedButton(
                                             onClick = vm::tryOne,
                                             contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                            modifier = Modifier.height(32.dp),
+                                            modifier = Modifier.heightIn(min = 40.dp),
                                         ) {
                                             Text("先试转 1 张", style = MaterialTheme.typography.labelMedium)
                                         }
@@ -440,22 +444,29 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                     BatchGroupHeader(
                                         title = "${group.title} 导入",
                                         count = group.items.size,
-                                        statusSummary = "待处理",
-                                        action = {
-                                            IconButton(
-                                                onClick = { vm.removeBatch(group.items.map { it.id }) },
-                                                modifier = Modifier.size(32.dp),
-                                            ) {
-                                                Icon(Icons.Rounded.Close, "移除此批", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                            }
+                                        statusSummary = "待处理",                                    action = {
+                                        IconButton(
+                                            onClick = {
+                                                if (group.items.size >= 20) confirmRemoveIds = group.items.map { it.id }
+                                                else vm.removeBatch(group.items.map { it.id })
+                                            },
+                                        ) {
+                                            Icon(Icons.Rounded.Close, "移除此批", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                         }
+                                    }
                                     )
                                 }
                             }
                             items(group.items, key = { it.id }) { item ->
                                 QueueRow(
                                     item,
-                                    onRemove = { vm.removeItem(item.id) },
+                                    onRemove = {
+                                        vm.removeItem(item.id)
+                                        scope.launch {
+                                            val r = snackbar.showSnackbar("已移除「${item.displayName}」", actionLabel = "撤销", duration = SnackbarDuration.Short)
+                                            if (r == SnackbarResult.ActionPerformed) vm.restoreItems(listOf(item))
+                                        }
+                                    },
                                     onRetry = { vm.retryItem(item.id) },
                                     onOpen = { item.historyId?.let(onOpenDetail) },
                                     modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast))
@@ -517,8 +528,10 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                     },
                                     action = {
                                         IconButton(
-                                            onClick = { vm.removeBatch(group.items.map { it.id }) },
-                                            modifier = Modifier.size(32.dp),
+                                            onClick = {
+                                                if (group.items.size >= 20) confirmRemoveIds = group.items.map { it.id }
+                                                else vm.removeBatch(group.items.map { it.id })
+                                            },
                                         ) {
                                             Icon(Icons.Rounded.Close, "清除此批", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
                                         }
@@ -528,7 +541,13 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             items(group.items, key = { it.id }) { item ->
                                 QueueRow(
                                     item,
-                                    onRemove = { vm.removeItem(item.id) },
+                                    onRemove = {
+                                        vm.removeItem(item.id)
+                                        scope.launch {
+                                            val r = snackbar.showSnackbar("已移除「${item.displayName}」", actionLabel = "撤销", duration = SnackbarDuration.Short)
+                                            if (r == SnackbarResult.ActionPerformed) vm.restoreItems(listOf(item))
+                                        }
+                                    },
                                     onRetry = { vm.retryItem(item.id) },
                                     onOpen = { item.historyId?.let(onOpenDetail) },
                                     modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast))
@@ -680,6 +699,15 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             text = { Text("列表记录会被移除；已保存到相册的成品不受影响，原图始终保留。") },
             confirmButton = { TextButton(onClick = { confirmClear = null; if (what == "pending") vm.clearPending() else vm.clearAll() }) { Text("清除", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { confirmClear = null }) { Text("取消") } },
+        )
+    }
+    confirmRemoveIds?.let { ids ->
+        AlertDialog(
+            onDismissRequest = { confirmRemoveIds = null },
+            title = { Text("移除这批 ${ids.size} 张记录？") },
+            text = { Text("列表记录会被移除；已保存到相册的成品不受影响，原图始终保留。") },
+            confirmButton = { TextButton(onClick = { confirmRemoveIds = null; vm.removeBatch(ids) }) { Text("移除", color = MaterialTheme.colorScheme.error) } },
+            dismissButton = { TextButton(onClick = { confirmRemoveIds = null }) { Text("取消") } },
         )
     }
 }
@@ -920,9 +948,9 @@ private fun ImportHero(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                FeatureLabel(Icons.Rounded.AutoAwesome, "ISO 21496-1")
-                FeatureLabel(Icons.Rounded.Speed, "NEON 加速")
-                FeatureLabel(Icons.Rounded.Security, "离线处理")
+                FeatureLabel(Icons.Rounded.AutoAwesome, "保留 HDR 亮度")
+                FeatureLabel(Icons.Rounded.Speed, "硬件加速")
+                FeatureLabel(Icons.Rounded.Security, "离线处理，不出网络")
             }
         }
     }
