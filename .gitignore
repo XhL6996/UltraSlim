@@ -19,3 +19,6 @@
 .kotlin/
 /build-host-dbg/
 .zcode/
+/apple-live/.build/
+/apple-live/dist/
+.codex/
