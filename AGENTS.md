@@ -74,6 +74,7 @@ build-host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 - probe 次数收敛：`transcodeImage` 的输入 probe 把已初始化的 uhdr decoder 直接移交 `transcodeUnchecked`（JXL 分支复用 probe 结果，SDR 不再建 decoder）；rebuild 路径从内存缓冲校验输出，不再整读输出文件；`TranscodeResult` 携带 hasGainMap/hasExif/maxContentBoost，worker 不再对输出做第二次 probe。preserve 路径的输出元数据由 `tryReuseGainMap` 直接报告。
 - 所有解码路径共享 1 亿像素上限 `kMaxPixels`（JXL 此前缺失）；JXL box 上限为 `kMaxBoxBytes`。
 - 批次快照解析（decodeDefaults/JSONArray）必须容错：旧快照缺字段按默认值，损坏批次显式置 FAILED，不得在 checkpoint 循环外抛异常静默死亡。仅两个兼容开关例外：缺字段按 false（像素精确语义）。
+- Room 迁移加列的写法：带 Kotlin 默认值的字段（如 TranscodeResult 的新字段），期望 schema 是**可空且无 DEFAULT**（读 NULL 回退 Kotlin 默认值）；写 `NOT NULL DEFAULT 0` 会过不了迁移校验、真机升级即崩。此缺陷只有设备测试能拦——JVM 单测与 host ctest 都覆盖不到。
 - 前台服务 API 35+ 用 `FOREGROUND_SERVICE_TYPE_MEDIA_PROCESSING`（manifest 同时声明 dataSync|mediaProcessing）；`setForeground` 失败只标记未完成项；温控重试有指数退避与 8 次上限，超限停回 READY 等手动继续。
 - 历史页展开态按行虚拟化（每条记录独立 LazyColumn item，折叠态不发射行）；首页队列流经 150ms 采样后再进 UI 状态；回收站原图解析（逐条 MediaStore 查询）只在 Default 线程做，组合期只读缓存。
 - HDR 扫描（整库/相册）经 `probePermits` 并发（4 路），probe 是轻量头部解析不是编码；PreviewCache 解码在 diskLock 之外、原生解码槽位 2。转码写盘路径必须检查 flush/close（stdio 缓冲写失败到 close 才暴露），readAll/writeAll 对 EINTR 重试。`apple-live` 本机跑 `swift test` 必须外置 scratch 目录（`--scratch-path /tmp/...`），iCloud 同步目录的 FileProvider xattr 会让 codesign 拒绝测试包；native/deps 依赖声明必须带 URL_HASH（改版本时重新计算 SHA256）。
