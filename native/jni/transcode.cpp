@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <csetjmp>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -137,7 +138,9 @@ std::vector<uint8_t> readAll(int fd) {
     out.resize(static_cast<size_t>(st.st_size));
     size_t total = 0;
     while (total < out.size()) {
-      ssize_t n = read(fd, out.data() + total, out.size() - total);
+      ssize_t n;
+      // EINTR 重试：进程收到 SIGQUIT（如 ANR dump）等信号会打断一次 read，误判为读取失败。
+      do { n = read(fd, out.data() + total, out.size() - total); } while (n < 0 && errno == EINTR);
       if (n <= 0) break;
       total += static_cast<size_t>(n);
     }
@@ -145,8 +148,10 @@ std::vector<uint8_t> readAll(int fd) {
     return out;
   }
   uint8_t chunk[1 << 16];
-  ssize_t n;
-  while ((n = read(fd, chunk, sizeof(chunk))) > 0) {
+  while (true) {
+    ssize_t n;
+    do { n = read(fd, chunk, sizeof(chunk)); } while (n < 0 && errno == EINTR);
+    if (n <= 0) break;
     if (out.size() + n > 256u * 1024 * 1024) return {};
     out.insert(out.end(), chunk, chunk + n);
   }
@@ -157,7 +162,8 @@ bool writeAll(int fd, const void* data, size_t size) {
   const uint8_t* p = static_cast<const uint8_t*>(data);
   size_t left = size;
   while (left > 0) {
-    ssize_t n = write(fd, p, left);
+    ssize_t n;
+    do { n = write(fd, p, left); } while (n < 0 && errno == EINTR);
     if (n <= 0) return false;
     p += n;
     left -= static_cast<size_t>(n);
@@ -987,8 +993,13 @@ int encodeJpegSdr(const SdrImage& img, int quality, bool keepExif, int outFd, st
   }
   jpeg_finish_compress(&cinfo);
   jpeg_destroy_compress(&cinfo);
-  fflush(f);
-  fclose(f);  // closes only the dup'd fd
+  // stdio 缓冲的写失败要到 flush/close 才暴露；不检查会静默产出截断文件。
+  const int flushed = fflush(f);
+  const int closed = fclose(f);  // closes only the dup'd fd
+  if (flushed != 0 || closed != 0) {
+    err = std::string("写入输出文件失败：") + strerror(errno);
+    return 30;
+  }
   return 0;
 }
 
@@ -1202,8 +1213,10 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
     if (gm.multiChannel) {
       rgbaToYuv420Direct(gm.image, yp, ys, up, us, vp, vs, false);
     } else {
-      for (int y = 0; y < gm.image.height; ++y)
-        rgbaToGrayFast(gm.image.rgba.data() + size_t(y) * gm.image.width * 4, yp + y * ys, gm.image.width);
+      parallelRows(gm.image.height, size_t(gm.image.width) * gm.image.height, [&](int yBegin, int yEnd) {
+        for (int y = yBegin; y < yEnd; ++y)
+          rgbaToGrayFast(gm.image.rgba.data() + size_t(y) * gm.image.width * 4, yp + y * ys, gm.image.width);
+      });
       for (int y = 0; y < (gm.image.height + 1) / 2; ++y) {
         memset(up + y * us, 128, (gm.image.width + 1) / 2);
         memset(vp + y * vs, 128, (gm.image.width + 1) / 2);
@@ -1218,45 +1231,50 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
     uint8_t* yDst = heif_image_get_plane(image, heif_channel_Y, &yStride);
     uint8_t* uDst = heif_image_get_plane(image, heif_channel_Cb, &uStride);
     uint8_t* vDst = heif_image_get_plane(image, heif_channel_Cr, &vStride);
-    for (int y = 0; y < gm.image.height; ++y) {
-      if (compatibleRgb) {
-        // Keep every map pixel and all HDR metadata. Only the color
-        // representation changes; the resulting YCbCr planes encode losslessly.
-        for (int x = 0; x < gm.image.width; ++x) {
-          yuvPixel(gm.image.rgba.data() + (size_t(y) * gm.image.width + x) * 4,
-                   yDst[y * yStride + x], uDst[y * uStride + x], vDst[y * vStride + x]);
+    // 各线程写互不重叠的行段；相机尺寸增益图可省上百毫秒。
+    parallelRows(gm.image.height, size_t(gm.image.width) * gm.image.height, [&](int yBegin, int yEnd) {
+      for (int y = yBegin; y < yEnd; ++y) {
+        if (compatibleRgb) {
+          // Keep every map pixel and all HDR metadata. Only the color
+          // representation changes; the resulting YCbCr planes encode losslessly.
+          for (int x = 0; x < gm.image.width; ++x) {
+            yuvPixel(gm.image.rgba.data() + (size_t(y) * gm.image.width + x) * 4,
+                     yDst[y * yStride + x], uDst[y * uStride + x], vDst[y * vStride + x]);
+          }
+          continue;
         }
-        continue;
-      }
-      int x = 0;
+        int x = 0;
 #if defined(__ARM_NEON)
-      for (; x + 16 <= gm.image.width; x += 16) {
-        auto rgba = vld4q_u8(gm.image.rgba.data() + (size_t(y) * gm.image.width + x) * 4);
-        vst1q_u8(yDst + y * yStride + x, rgba.val[1]);
-        vst1q_u8(uDst + y * uStride + x, rgba.val[2]);
-        vst1q_u8(vDst + y * vStride + x, rgba.val[0]);
-      }
+        for (; x + 16 <= gm.image.width; x += 16) {
+          auto rgba = vld4q_u8(gm.image.rgba.data() + (size_t(y) * gm.image.width + x) * 4);
+          vst1q_u8(yDst + y * yStride + x, rgba.val[1]);
+          vst1q_u8(uDst + y * uStride + x, rgba.val[2]);
+          vst1q_u8(vDst + y * vStride + x, rgba.val[0]);
+        }
 #endif
-      for (; x < gm.image.width; ++x) {
-        const size_t idx = (size_t(y) * gm.image.width + x) * 4;
-        const int r = gm.image.rgba[idx];
-        const int g = gm.image.rgba[idx + 1];
-        const int b = gm.image.rgba[idx + 2];
-        // Identity matrix: store G/B/R without rounding or color conversion.
-        yDst[y * yStride + x] = g;
-        uDst[y * uStride + x] = b;
-        vDst[y * vStride + x] = r;
+        for (; x < gm.image.width; ++x) {
+          const size_t idx = (size_t(y) * gm.image.width + x) * 4;
+          const int r = gm.image.rgba[idx];
+          const int g = gm.image.rgba[idx + 1];
+          const int b = gm.image.rgba[idx + 2];
+          // Identity matrix: store G/B/R without rounding or color conversion.
+          yDst[y * yStride + x] = g;
+          uDst[y * uStride + x] = b;
+          vDst[y * vStride + x] = r;
+        }
       }
-    }
+    });
   } else {
     e = heif_image_add_plane(image, heif_channel_Y, gm.image.width, gm.image.height, 8);
     if (e.code != heif_error_Ok) { err = e.message; return 24; }
     int stride = 0;
     uint8_t* dst = heif_image_get_plane(image, heif_channel_Y, &stride);
-    for (int y = 0; y < gm.image.height; ++y) {
-      rgbaToGrayFast(gm.image.rgba.data() + size_t(y) * gm.image.width * 4,
-                     dst + y * stride, gm.image.width);
-    }
+    parallelRows(gm.image.height, size_t(gm.image.width) * gm.image.height, [&](int yBegin, int yEnd) {
+      for (int y = yBegin; y < yEnd; ++y) {
+        rgbaToGrayFast(gm.image.rgba.data() + size_t(y) * gm.image.width * 4,
+                       dst + y * stride, gm.image.width);
+      }
+    });
   }
   heif_color_profile_nclx nclx {};
   nclx.version = 1;
@@ -2223,6 +2241,9 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, DecoderPtr 
       r.error = "解码结果为空";
       return r;
     }
+    // 解码完成后压缩输入不再被读取；提前释放，重建/编码期间少驻留一份完整输入。
+    data.clear();
+    data.shrink_to_fit();
     raw->range = UHDR_CR_FULL_RANGE;  // encoder expects full-range RGB
     r.width = static_cast<int>(raw->w);
     r.height = static_cast<int>(raw->h);
@@ -2327,6 +2348,9 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, DecoderPtr 
       r.error = err;
       return r;
     }
+    // 像素/EXIF/ICC 都已复制进 sdr；提前释放，编码期间少驻留一份完整输入。
+    data.clear();
+    data.shrink_to_fit();
     if (options.resizePercent < 100) {
       const int basisW = srcW > 0 ? srcW : sdr.width;
       const int basisH = srcH > 0 ? srcH : sdr.height;
