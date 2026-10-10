@@ -35,6 +35,7 @@ endif()
 # ---------------------------------------------------------------- libjpeg-turbo
 ExternalProject_Add(libjpeg-turbo
     URL https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.1/libjpeg-turbo-3.1.1.tar.gz
+    URL_HASH SHA256=aadc97ea91f6ef078b0ae3a62bba69e008d9a7db19b34e4ac973b19b71b4217c
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
                -DENABLE_SHARED=OFF
                -DENABLE_STATIC=ON
@@ -63,6 +64,7 @@ set(X265_ASM_INJECT "${CMAKE_ASM_FLAGS} ${X265_ARM_FLAGS}")
 set(X265_ENABLE_ASSEMBLY OFF)
 ExternalProject_Add(x265
     URL https://bitbucket.org/multicoreware/x265_git/downloads/x265_4.1.tar.gz
+    URL_HASH SHA256=a31699c6a89806b74b0151e5e6a7df65de4b49050482fe5ebf8a4379d7af8f29
     SOURCE_SUBDIR source
     PATCH_COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_x265.sh <SOURCE_DIR> "${X265_ASM_INJECT}"
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
@@ -81,6 +83,7 @@ ExternalProject_Add(x265
 # ---------------------------------------------------------------- aom (AV1 decoder + lossless 4:4:4 gain map encoder)
 ExternalProject_Add(aom
     URL https://storage.googleapis.com/aom-releases/libaom-3.12.1.tar.gz
+    URL_HASH SHA256=9e9775180dec7dfd61a79e00bda3809d43891aee6b2e331ff7f26986207ea22e
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
                -DENABLE_TESTS=0
                -DENABLE_DOCS=0
@@ -98,6 +101,7 @@ ExternalProject_Add(aom
 # ---------------------------------------------------------------- svt-av1 (fast AV1 encoder)
 ExternalProject_Add(svt-av1
     URL https://gitlab.com/AOMediaCodec/SVT-AV1/-/archive/v3.0.0/SVT-AV1-v3.0.0.tar.gz
+    URL_HASH SHA256=7c5c357388859d15ba2b9b139c24e17ad6b84b94ca9b281921a6f0b839e78ebc
     PATCH_COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_svt.sh <SOURCE_DIR>
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
                -DBUILD_APPS=OFF
@@ -114,6 +118,7 @@ if(DEFINED ANDROID_ABI)
 endif()
 ExternalProject_Add(dav1d
     URL https://code.videolan.org/videolan/dav1d/-/archive/1.5.1/dav1d-1.5.1.tar.gz
+    URL_HASH SHA256=fa635e2bdb25147b1384007c83e15de44c589582bb3b9a53fc1579cb9d74b695
     CONFIGURE_COMMAND meson setup <BINARY_DIR> <SOURCE_DIR>
         --buildtype release --default-library static --prefix=${DEPS_PREFIX}
         -Denable_tests=false -Denable_tools=false -Dbitdepths=8
@@ -124,6 +129,7 @@ ExternalProject_Add(dav1d
 # ---------------------------------------------------------------- libde265 (HEVC decoder)
 ExternalProject_Add(libde265
     URL https://github.com/strukturag/libde265/releases/download/v1.0.16/libde265-1.0.16.tar.gz
+    URL_HASH SHA256=b92beb6b53c346db9a8fae968d686ab706240099cdd5aff87777362d668b0de7
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
                -DENABLE_SDL=OFF
                -DENABLE_DECODER=OFF
@@ -135,6 +141,7 @@ ExternalProject_Add(libde265
 ExternalProject_Add(libheif
     DEPENDS x265 aom libde265 dav1d svt-av1
     URL https://github.com/strukturag/libheif/archive/4a3f74bc593ebfc29becc1ed5dd0a61cc66d40e1.tar.gz
+    URL_HASH SHA256=b497316d557b8a5683066b446dc0df500a6d19da36ecf03753f40f22ac4c05d3
     PATCH_COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/patches/patch_libheif.sh <SOURCE_DIR> ${CMAKE_CURRENT_SOURCE_DIR}/patches/libheif_pr1503.patch
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
                -DCMAKE_PREFIX_PATH=${DEPS_PREFIX}
