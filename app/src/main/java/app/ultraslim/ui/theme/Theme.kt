@@ -1,6 +1,8 @@
 package app.ultraslim.ui.theme
 
 import android.os.Build
+import androidx.activity.SystemBarStyle
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.*
@@ -58,5 +60,17 @@ fun AppTheme(themeMode: ThemeMode = ThemeMode.SYSTEM, dynamicColor: Boolean = fa
     val colors = if(dynamicColor && Build.VERSION.SDK_INT >= 31) {
         if(dark) dynamicDarkColorScheme(LocalContext.current) else dynamicLightColorScheme(LocalContext.current)
     } else if(dark) DarkColors else LightColors
+    // 状态栏/手势条图标颜色跟随应用主题：enableEdgeToEdge 默认跟系统，
+    // 用户强制浅色/深色时会出现白图标贴浅底。
+    val view = androidx.compose.ui.platform.LocalView.current
+    if (!view.isInEditMode) {
+        androidx.compose.runtime.SideEffect {
+            val activity = view.context as? androidx.activity.ComponentActivity ?: return@SideEffect
+            val style = SystemBarStyle.auto(
+                android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
+            ) { dark }
+            activity.enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+        }
+    }
     MaterialTheme(colorScheme = colors, shapes = AppShapes, typography = AppTypography, content = content)
 }

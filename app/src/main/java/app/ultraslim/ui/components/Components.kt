@@ -10,8 +10,10 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
@@ -50,6 +52,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.draw.rotate
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
@@ -154,7 +157,7 @@ fun StatsCard(
                 if (stats.countDone > 0 && stats.totalInputBytes > 0) {
                     val percent = (stats.savedPercent * 100).toInt()
                     BadgeChip(
-                        text = if (percent >= 0) "-$percent%" else "+${-percent}%",
+                        text = if (percent >= 0) "\u2212$percent%" else "+${-percent}%",
                         containerColor = MaterialTheme.colorScheme.surface,
                         contentColor = MaterialTheme.colorScheme.primary,
                     )
@@ -217,24 +220,11 @@ fun StatsCard(
                 }
                 Column(horizontalAlignment = Alignment.End) {
                     Text("Ultra HDR 增益图", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
-                    Text(if (stats.gainmapCount > 0) "${stats.gainmapCount} 张保留" else "高动态完整", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
+                    Text(if (stats.gainmapCount > 0) "${stats.gainmapCount} 张保留" else "无 HDR 记录", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 }
             }
         }
     }
-}
-
-@Composable
-fun StatsCard(totalSavedBytes: Long, convertedCount: Int, modifier: Modifier = Modifier) {
-    StatsCard(
-        stats = app.ultraslim.data.HistoryStats(
-            countDone = convertedCount,
-            totalInputBytes = if (totalSavedBytes > 0) totalSavedBytes * 2 else 0,
-            totalOutputBytes = if (totalSavedBytes > 0) totalSavedBytes else 0,
-            gainmapCount = convertedCount,
-        ),
-        modifier = modifier,
-    )
 }
 
 @Composable
@@ -338,7 +328,9 @@ fun SwitchRow(
     enabled: Boolean = true,
 ) {
     Row(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .toggleable(value = checked, enabled = enabled, role = Role.Switch, onValueChange = onCheckedChange),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(modifier = Modifier.weight(1f).padding(end = 16.dp)) {
@@ -351,7 +343,7 @@ fun SwitchRow(
                 )
             }
         }
-        Switch(checked = checked, onCheckedChange = onCheckedChange, enabled = enabled)
+        Switch(checked = checked, onCheckedChange = null, enabled = enabled)
     }
 }
 
@@ -828,7 +820,14 @@ fun UltraAsyncImage(
                 when (s) {
                     is NativeDecoded.Ready -> AsyncImage(model = s.bitmap, contentDescription = contentDescription, contentScale = contentScale, modifier = Modifier.fillMaxSize())
                     NativeDecoded.Loading -> CircularProgressIndicator(Modifier.size(24.dp))
-                    NativeDecoded.Failed -> Text("图片不可访问\n请检查文件或重新授权", style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center)
+                    NativeDecoded.Failed -> BoxWithConstraints(Modifier.fillMaxSize()) {
+                        ImageFallbackPlaceholder()
+                        // 小缩略图放不下两行说明，只给 BrokenImage 图标。
+                        if (maxWidth >= 220.dp && maxHeight >= 140.dp) {
+                            Text("图片不可访问\n请检查文件或重新授权", style = MaterialTheme.typography.labelSmall, textAlign = TextAlign.Center,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.align(Alignment.Center).padding(12.dp))
+                        }
+                    }
                 }
             }
         }
