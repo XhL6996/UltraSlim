@@ -363,7 +363,10 @@ private fun DetailContent(
                 Text(if(entity.outputBytes < entity.inputBytes) "为这张照片省下" else "本次转换体积增加", style = MaterialTheme.typography.labelMedium)
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                     Text(formatBytes(kotlin.math.abs(entity.inputBytes - entity.outputBytes)), style = MaterialTheme.typography.headlineLarge, fontWeight = FontWeight.Bold)
-                    BadgeChip(formatSavedPercent(entity.inputBytes, entity.outputBytes), MaterialTheme.colorScheme.surface, MaterialTheme.colorScheme.primary)
+                    val grew = entity.outputBytes > entity.inputBytes
+                    BadgeChip(formatSavedPercent(entity.inputBytes, entity.outputBytes),
+                        if (grew) MaterialTheme.colorScheme.errorContainer else MaterialTheme.colorScheme.surface,
+                        if (grew) MaterialTheme.colorScheme.onErrorContainer else MaterialTheme.colorScheme.primary)
                 }
                 Text("${formatBytes(entity.inputBytes)} → ${formatBytes(entity.outputBytes)} · ${entity.format}", style = MaterialTheme.typography.bodyMedium)
             }
@@ -425,7 +428,7 @@ private fun DetailContent(
             }
         }
 
-        SectionHeader("画质细节对比", "拖动分界线查看细节对比，双击 2.5x 放大，双指可捏合缩放")
+        SectionHeader("画质细节对比", "拖动分界线查看对比；双击 2.5× 放大；双指可捏合缩放")
         Text("当前页面为 SDR 预览；完整 HDR 高动态亮度请在系统相册中查看。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         HeroCompareCard(entity = entity)
 
@@ -467,9 +470,9 @@ private fun DetailContent(
 
 @Composable
 private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier) {
-    var compareMode by remember { mutableIntStateOf(0) } // 0: 卷帘, 1: 按住
+    var compareMode by androidx.compose.runtime.saveable.rememberSaveable { mutableIntStateOf(0) } // 0: 卷帘, 1: 按住
     var isHoldingOriginal by remember { mutableStateOf(false) }
-    var fraction by remember { mutableFloatStateOf(0.5f) }
+    var fraction by androidx.compose.runtime.saveable.rememberSaveable { mutableFloatStateOf(0.5f) }
     var viewSize by remember { mutableStateOf(IntSize(1, 1)) }
     var zoomScale by remember { mutableFloatStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
@@ -567,7 +570,7 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
                 contentDescription = "压缩后 SDR",
                 contentScale = ContentScale.Fit,
                 forceSdr = true,
-                maxDim = if(zoomScale > 1f) 4096 else 1600,
+                maxDim = if(zoomScale > 1f) 2048 else 1600,
                 modifier = Modifier.fillMaxSize(),
             )
 
@@ -578,7 +581,7 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
                 contentDescription = "原图 SDR",
                 contentScale = ContentScale.Fit,
                 forceSdr = true,
-                maxDim = if(zoomScale > 1f) 4096 else if(outputLong in 1 until 1600) outputLong else 1600,
+                maxDim = if(zoomScale > 1f) 2048 else if(outputLong in 1 until 1600) outputLong else 1600,
                 modifier = Modifier.fillMaxSize().drawWithContent {
                     clipRect(right = size.width * effectiveFraction) { this@drawWithContent.drawContent() }
                 },
@@ -617,7 +620,7 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
                 CompareLabel("压缩后", Modifier.align(Alignment.TopEnd).padding(12.dp))
             } else {
                 CompareLabel(
-                    text = if (isHoldingOriginal) "原图 (查看中)" else "压缩后",
+                    text = if (isHoldingOriginal) "原图（查看中）" else "压缩后",
                     modifier = Modifier.align(Alignment.TopStart).padding(12.dp),
                     active = isHoldingOriginal,
                 )
@@ -651,7 +654,7 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
                         zoomScale = 1f
                         panOffset = Offset.Zero
                     },
-                    label = { Text(String.format(java.util.Locale.ROOT, "%.1fx 复位", zoomScale)) },
+                    label = { Text(String.format(java.util.Locale.ROOT, "%.1f× 复位", zoomScale)) },
                 )
             }
         }
@@ -662,11 +665,6 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
                 value = fraction,
                 onValueChange = { fraction = it },
                 valueRange = 0f..1f,
-            )
-            Text(
-                "左右拖动分割线 · 双击 2.5x 放大 · 捏合缩放",
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                style = MaterialTheme.typography.labelSmall,
             )
         } else {
             Row(
@@ -758,20 +756,8 @@ private fun MetadataCard(entity: HistoryEntity) {
                 )
             }
             InfoRow("耗时", formatDuration(entity.durationMs))
-            InfoRow("输出 EXIF", if(entity.hasExif) "已保留" else "无 / 旧记录未校验")
+            InfoRow("输出 EXIF", if(entity.hasExif) "已保留" else "未保留")
         }
-    }
-}
-
-private fun shareImage(context: Context, entity: HistoryEntity) {
-    runCatching {
-        val uri = Uri.parse(entity.outputUri)
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = OutputFormat.parse(entity.format).mimeType
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(Intent.createChooser(intent, "分享图片"))
     }
 }
 
