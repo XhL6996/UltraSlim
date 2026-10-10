@@ -32,6 +32,8 @@ Gitea 工作流 `.gitea/workflows/verify.yml` 使用 `macos-arm64` 自托管 run
 
 1.2.2 将大增益图和大 AVIF 主图分块存储，避免系统解码器的输入缓冲和分辨率限制，不缩小图像。保存兼容 HDR AVIF 前，API 34+ 会检查本机系统是否读到增益图；不支持时明确失败，不把缺少 HDR 的系统解码结果当成功。旧相册文件需要从原图重新转换。跨平台证据和未覆盖范围见 [批次验证报告](docs/2026-10-08-color-batch-audit.md)。
 
+“HEIC 相册兼容”默认开启，与 AVIF 开关独立。兼容路径使用 HEVC YCbCr 4:2:0：单通道值原样放入 Y，彩色增益图存在色度采样与舍入损失；尺寸和 HDR 参数不变，**不是 RGB 逐值无损**。API 34+ 在保存前检查系统能否读取 HDR，失败时保留原图、不发布成品。主图超过 4096 像素采用分块，解决超大 HEIC 解码失败。此前导出的文件需从原图重新转换。验证范围见 [HEIC 修复报告](docs/2026-10-09-heic-fix-validation.md)。
+
 HEIC 增益图使用 x265 无损编码；严格模式下 HEIC/AVIF 彩色增益图采用 4:4:4 identity GBR，保留解码像素和解释参数。AVIF 主图仍使用 SVT-AV1。HEIC/AVIF HDR → JPEG 无法无损承载增益图时明确拒绝，需选择 HEIC/AVIF；不会悄悄重建或降为 SDR。当前增益图编码链路为 8 位；输入超过 8 位时明确停止转换，避免截断精度。
 
 界面不再提供 Gain Map 质量、缩放和通道开关。默认主图编码质量 92、原始分辨率、仅保留更小结果；既有用户明确设置仍保留。编码质量 100 是编码器参数，不等于无损，不保证比已经压缩过的原图更小。三个主图预设不再暗中缩小分辨率。
@@ -59,3 +61,7 @@ ARM64 构建启用 x265 的 PIC-safe NEON intrinsic 路径，SVT-AV1 编入 NEON
 ## 验证范围
 
 见 [性能与历史页修复记录](docs/2026-10-08-performance-history.md) 和 [原有验收记录](docs/2026-10-06-validation.md)。真机 HDR 显示、长时间热稳态、超高像素压力测试仍需目标硬件验证。
+
+### 导出给 Apple「照片」
+
+HEIC 动态成品详情 → 更多 → **导出 Apple Live Photo…**，将 ZIP 交给配套的 Mac **UltraSlim Live** 导入器。PhotoKit 检查通过后可预览并导入「照片」，再通过 iCloud 照片同步到 iPhone。直接传输 Android 动态 HEIC 不会自动变为 Apple Live Photo。参见 [Mac 工具与使用说明](apple-live/README.md)。
