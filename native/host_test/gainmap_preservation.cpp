@@ -73,9 +73,10 @@ static void equal(const Map&a,const Map&b,int orientation=1,int maxDiff=0){
  }
  sameMetadata(a,b);
 }
-static void convert(const std::string& src,const std::string& dst,int codec,int resize=100,int speed=1,bool retry=false,int quality=90,bool compatible=false){
+static void convert(const std::string& src,const std::string& dst,int codec,int resize=100,int speed=1,bool retry=false,int quality=90,bool compatible=false,bool heicCompatible=false){
  int a=open(src.c_str(),O_RDONLY),b=open(dst.c_str(),O_RDWR|O_CREAT|O_TRUNC,0600);ultraslim::TranscodeOptions o;o.outCodec=codec;o.codecThreads=2;o.resizePercent=resize;o.speedLevel=speed;o.retrySmaller=retry;o.quality=quality;
  o.avifGainmapCompatibility=compatible;
+ o.heicGainmapCompatibility=heicCompatible;
  // Deliberately incompatible legacy settings must have no effect on preservation.
  o.gainmapScale=128;o.gainmapQuality=1;o.multiChannelGainmap=false;
  auto r=ultraslim::transcodeImage(a,b,o);close(a);close(b);if(r.errorCode)fprintf(stderr,"%s\n",r.error.c_str());check(r.errorCode==0,"preserving transcode");
@@ -135,6 +136,34 @@ int main(int argc,char**argv){
    check(compatibleMap.fullRange==(codec==2&&multi?0:1),"gain-map range matches encoded samples");
    auto round=dst+"-round";convert(dst,round,codec==1?2:1,50);auto second=map(round,false);equal(first,second);check(first.iso==second.iso,"ISO metadata preserved byte-for-byte between containers");
   }
+ }
+ // HEIC compatibility must retain mono values and HDR metadata across all
+ // orientations, odd dimensions and main-image resizing. RGB 4:2:0 is lossy,
+ // but must not permute channels or systematically shift their mean values.
+ for(bool multi:{false,true}) for(int orientation=1;orientation<=8;orientation++) {
+  auto src=root+"/original-"+std::to_string(multi)+"-"+std::to_string(orientation)+".jpg";
+  auto dst=src+"-heic-compatible";
+  convert(src,dst,1,50,2,false,90,false,true);
+  auto a=map(src,true),b=map(dst,false);
+  check(b.matrix==6 && b.fullRange==(multi?0:1),"HEIC map matrix/range matches its actual samples");
+  check(b.w==(orientation>=5?a.h:a.w) && b.h==(orientation>=5?a.w:a.h),"compatible HEIC retains map canvas and orientation");
+  sameMetadata(a,b);
+  if(!multi) { b.multi=false; equal(a,b,orientation); }
+  else {
+   for(int c=0;c<3;c++) {
+    double before=0,after=0;
+    for(size_t i=c;i<a.rgb.size();i+=3){before+=a.rgb[i];after+=b.rgb[i];}
+    check(std::abs(before-after)/(a.w*a.h)<3,"compatible RGB map keeps channel averages");
+   }
+  }
+ }
+ // Switching compatibility must never reuse a cached strict map, or vice versa.
+ for(bool multi:{false,true}) {
+  auto src=root+"/original-"+std::to_string(multi)+"-1.jpg",dst=src+"-heic-retry";
+  convert(src,dst,1,100,2,true,90,false,true);
+  convert(src,dst+"-expected",1,100,2,false,85,false,true);
+  check(readFile(dst)==readFile(dst+"-expected"),"HEIC compatible retry matches independent encode");
+  auto strict=dst+"-strict";convert(src,strict,1);equal(map(src,true),map(strict,false));
  }
  // A camera-size map must take the same strictly lossless path as a thumbnail.
  for(bool multi:{false,true}) {
@@ -197,6 +226,20 @@ int main(int argc,char**argv){
    check(tiles.num_columns==2&&tiles.num_rows==2&&tiles.tile_width==512&&tiles.tile_height==512,"bounded map tiles");
    heif_image_handle_release(gm);heif_image_handle_release(base);heif_context_free(ctx);
   }
+ }
+ // HEVC primary grids must retain exact dimensions and HDR association too.
+ for(int width:{5000,5001}) {
+  auto src=root+"/heic-grid-"+std::to_string(width)+".jpg",dst=src+".heic";
+  fixture(src,false,1,513,769,width,514);
+  convert(src,dst,1,100,2,false,92,false,true);
+  auto original=map(src,true),result=map(dst,false);result.multi=false;equal(original,result);
+  int fd=open(dst.c_str(),O_RDONLY);auto probe=ultraslim::probeImage(fd);close(fd);
+  check(probe.errorCode==0 && probe.width==width && probe.height==514 && probe.hasGainMap,"HEIC grid retains dimensions and HDR");
+  auto*ctx=heif_context_alloc();heif_image_handle*base=nullptr;
+  check(heif_context_read_from_file(ctx,dst.c_str(),nullptr).code==heif_error_Ok,"HEIC grid read");
+  heif_context_get_primary_image_handle(ctx,&base);heif_image_tiling tiles{};
+  check(heif_image_handle_get_image_tiling(base,0,&tiles).code==heif_error_Ok && tiles.num_columns==3 && tiles.tile_width==2048,"HEIC large primary uses bounded cells");
+  heif_image_handle_release(base);heif_context_free(ctx);
  }
  // Both primary and gain map use grids; odd primary dimensions require clap.
  {

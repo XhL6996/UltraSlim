@@ -14,7 +14,7 @@ namespace {
 void printUsage(const char* prog) {
   fprintf(stderr,
           "usage: %s <input> <output.(heic|avif|jpg|jxl)> [quality=90] [gainmapScale=4] [gainmapQuality=60]"
-          " [speed=1] [resize=100] [preserve=1] [threads=0] [retry=0] [avifCompatibility=0]\n",
+          " [speed=1] [resize=100] [preserve=1] [threads=0] [retry=0] [avifCompatibility=0] [heicCompatibility=0]\n",
           prog);
 }
 
@@ -105,6 +105,7 @@ int main(int argc, char** argv) {
 
   if (argc > 10) o.retrySmaller = atoi(argv[10]) != 0;
   if (argc > 11) o.avifGainmapCompatibility = atoi(argv[11]) != 0;
+  if (argc > 12) o.heicGainmapCompatibility = atoi(argv[12]) != 0;
 
   int outFd = open(output, O_RDWR | O_CREAT | O_TRUNC, 0644);
   if (outFd < 0) {

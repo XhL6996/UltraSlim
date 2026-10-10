@@ -1,4 +1,4 @@
-"""Store large AVIF primary images as baseline-sized grid cells, at full resolution."""
+"""Store large HEIC/AVIF primary images as baseline-sized grid cells, at full resolution."""
 from pathlib import Path
 import sys
 
@@ -16,6 +16,10 @@ p = Path(sys.argv[1]) / 'libheif/api/libheif/heif.cc'
 s = p.read_text()
 marker = '// UltraSlim: bound AVIF primary dimensions for platform decoders.'
 if marker in s:
+    # Upgrade installed dependencies as well as fresh builds.
+    s = s.replace('encoder->plugin->compression_format != heif_compression_AV1 ||',
+                  '(encoder->plugin->compression_format != heif_compression_AV1 &&\n         encoder->plugin->compression_format != heif_compression_HEVC) ||')
+    p.write_text(s)
     sys.exit(0)
 old = '''  auto encodingResult = ctx->context->encode_image(input_image->image,
                                      encoder,
@@ -24,7 +28,8 @@ old = '''  auto encodingResult = ctx->context->encode_image(input_image->image,
 new = '''  // UltraSlim: bound AVIF primary dimensions for platform decoders.
   auto encodingResult = [&]() -> Result<std::shared_ptr<ImageItem>> {
     const auto& pixels = input_image->image;
-    if (encoder->plugin->compression_format != heif_compression_AV1 ||
+    if ((encoder->plugin->compression_format != heif_compression_AV1 &&
+         encoder->plugin->compression_format != heif_compression_HEVC) ||
         (pixels->get_width() <= 4096 && pixels->get_height() <= 4096) ||
         pixels->has_alpha() || options.image_orientation != heif_orientation_normal) {
       return ctx->context->encode_image(pixels, encoder, options, heif_image_input_class_normal);

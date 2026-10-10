@@ -27,6 +27,9 @@ struct TranscodeOptions {
   // Explicit AVIF RGB-map compatibility: full-resolution BT.601 4:4:4, with
   // RGB/YUV rounding. False keeps the original pixel-exact GBR representation.
   bool avifGainmapCompatibility = false;
+  // HEIC uses BT.601 4:2:0 for platform HDR decoding. RGB chroma is lossy;
+  // mono values use full-range Y with neutral chroma and remain exact.
+  bool heicGainmapCompatibility = false;
   bool retrySmaller = false; // One base-quality retry, reusing decoded pixels and lossless gain map.
   int gainmapQuality = 60;
   int gainmapScale = 4;

@@ -371,6 +371,7 @@ class OptionsCallbacks(
     val onOnlySmallerChange: (Boolean) -> Unit = {},
     val onKeepLocationChange: (Boolean) -> Unit = {},
     val onAvifGainmapCompatibilityChange: (Boolean) -> Unit = {},
+    val onHeicGainmapCompatibilityChange: (Boolean) -> Unit = {},
     val onSaveAsDefault: (() -> Unit)? = null,
     val onResetToDefault: (() -> Unit)? = null,
 )
@@ -518,7 +519,7 @@ fun ConversionOptionsPanel(
             }
             val formatTip = when (defaults.format) {
                 OutputFormat.AVIF -> "AVIF：现代 AV1 编码，体积超小；实况照片将导出为静止 HDR"
-                OutputFormat.HEIC -> "HEIC：高效 HEVC 编码，支持保留实况照片；系统相册普遍支持"
+                OutputFormat.HEIC -> "HEIC：高效 HEVC 编码，支持保留实况照片；HDR 显示取决于相册支持"
                 OutputFormat.JXL -> "JXL：JPEG XL 现代格式，保留极致微观纹理与无损级色彩"
                 OutputFormat.JPEG -> "JPEG：经典通用格式，最大兼容性，体积缩减相对有限"
             }
@@ -543,20 +544,22 @@ fun ConversionOptionsPanel(
                 shape = MaterialTheme.shapes.medium,
             ) {
                 Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    val compatibleHeic = defaults.format == OutputFormat.HEIC && defaults.heicGainmapCompatibility
                     val compatibleAvif = defaults.format == OutputFormat.AVIF && defaults.avifGainmapCompatibility
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         Icon(Icons.Rounded.Tune, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onPrimaryContainer)
                         Text(
-                            if (compatibleAvif) "HDR · 相册兼容模式" else "Gain Map · 原样保留",
+                            if (compatibleAvif || compatibleHeic) "HDR · 相册兼容模式" else "Gain Map · 原样保留",
                             style = MaterialTheme.typography.titleSmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
                         )
                     }
                     Text(
                         when {
-                            compatibleAvif -> "保留 HDR 效果、增益图尺寸与参数；转换兼顾主流系统相册解析。"
+                            compatibleHeic -> "保留增益图尺寸与 HDR 参数；彩色增益图采用色度采样，不是逐像素无损。"
+                            compatibleAvif -> "保留增益图尺寸与 HDR 参数；彩色增益图转换存在舍入误差。"
                             defaults.format == OutputFormat.JPEG -> "复用 JPEG 原始增益图流；其它 HDR 源图推荐 HEIC / AVIF / JXL。"
-                            else -> "增益图独立无损编码，不缩小、不重新计算；高光质感 100% 保留。"
+                            else -> "增益图逐值保留，不缩小、不重新计算；部分相册可能无法正确显示 HDR。"
                         },
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
@@ -577,9 +580,18 @@ fun ConversionOptionsPanel(
             if (defaults.format == OutputFormat.AVIF) {
                 SwitchRow(
                     title = "AVIF 相册兼容",
-                    hint = "针对部分手机相册避免色彩偏差；关闭则保持 RGB 逐像素直写",
+                    hint = "彩色增益图转换存在舍入误差；关闭后部分相册可能偏色",
                     checked = defaults.avifGainmapCompatibility,
                     onCheckedChange = callbacks.onAvifGainmapCompatibilityChange,
+                    enabled = enabled,
+                )
+            }
+            if (defaults.format == OutputFormat.HEIC) {
+                SwitchRow(
+                    title = "HEIC 相册兼容",
+                    hint = "保留增益图尺寸与 HDR 参数，彩色增益图色度有损；关闭后部分相册可能偏色或不显示 HDR",
+                    checked = defaults.heicGainmapCompatibility,
+                    onCheckedChange = callbacks.onHeicGainmapCompatibilityChange,
                     enabled = enabled,
                 )
             }

@@ -5,8 +5,8 @@ import android.os.Build
 import java.io.File
 import java.io.IOException
 
-/** Catch platform HDR decode failures before publishing a compatible AVIF. */
-internal object AvifOutputValidation {
+/** Catch platform HDR decode failures before publishing a compatible HEIC/AVIF. */
+internal object HdrOutputValidation {
     fun requireReadableGainmap(file: File) {
         if (Build.VERSION.SDK_INT < 34) return // Gainmap API is unavailable.
         val bitmap = try {
@@ -16,7 +16,7 @@ internal object AvifOutputValidation {
                 decoder.setTargetSampleSize(maxOf(1, (edge + 1599) / 1600))
             }
         } catch (e: IOException) {
-            throw IllegalStateException("当前系统无法解码导出的 AVIF，文件未保存。可改用 JPEG 保留原始增益图。", e)
+            throw IllegalStateException("当前系统无法解码导出的 HDR 图片，文件未保存。可改用 JPEG 保留原始增益图。", e)
         }
         try {
             check(bitmap.hasGainmap()) {

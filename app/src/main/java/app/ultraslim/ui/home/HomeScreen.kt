@@ -176,6 +176,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             onOnlySmallerChange = vm::setOnlySmaller,
             onKeepLocationChange = vm::setKeepLocation,
             onAvifGainmapCompatibilityChange = vm::setAvifGainmapCompatibility,
+            onHeicGainmapCompatibilityChange = vm::setHeicGainmapCompatibility,
             onSaveAsDefault = vm::saveCurrentAsDefault,
             onResetToDefault = vm::resetToDefault,
         )

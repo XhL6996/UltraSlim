@@ -28,6 +28,19 @@ class PersistenceTest {
         assertTrue(restored.summary().contains("Gain Map 原样保留"))
     }
 
+    @Test fun heicCompatibilityIsIndependentAndOldSnapshotsStayStrict() {
+        val defaults = ConversionDefaults(format = app.ultraslim.model.OutputFormat.HEIC)
+        assertTrue(defaults.heicGainmapCompatibility)
+        for (heic in listOf(false, true)) for (avif in listOf(false, true)) {
+            val options = defaults.copy(heicGainmapCompatibility = heic, avifGainmapCompatibility = avif)
+            assertEquals(options, decodeDefaults(options.encode()))
+            assertEquals(heic, options.toConversionSettings().heicGainmapCompatibility)
+            assertEquals(heic, options.summary().contains("HDR 相册兼容"))
+        }
+        val old = org.json.JSONObject(defaults.encode()).apply { remove("heicGainmapCompatibility") }
+        assertFalse(decodeDefaults(old.toString()).heicGainmapCompatibility)
+    }
+
     @Test fun migrateV1PreservesPendingHistory() = runBlocking {
         val context = ApplicationProvider.getApplicationContext<Context>()
         val name = "migration-test.db"

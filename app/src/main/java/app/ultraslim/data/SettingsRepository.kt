@@ -46,6 +46,7 @@ data class ConversionDefaults(
     val speedLevel: Int = 1,
     val resizePercent: Int = 100,
     val avifGainmapCompatibility: Boolean = true,
+    val heicGainmapCompatibility: Boolean = true,
 ) {
     fun toConversionSettings(): ConversionSettings =
         ConversionSettings(
@@ -60,6 +61,7 @@ data class ConversionDefaults(
             speedLevel = speedLevel,
             resizePercent = resizePercent,
             avifGainmapCompatibility = avifGainmapCompatibility,
+            heicGainmapCompatibility = heicGainmapCompatibility,
         )
 }
 
@@ -81,6 +83,7 @@ class SettingsRepository(private val context: Context) {
         val SPEED_LEVEL = intPreferencesKey("speed_level")
         val RESIZE_PERCENT = intPreferencesKey("resize_percent")
         val AVIF_GAINMAP_COMPATIBILITY = booleanPreferencesKey("avif_gainmap_compatibility")
+        val HEIC_GAINMAP_COMPATIBILITY = booleanPreferencesKey("heic_gainmap_compatibility")
     }
 
     val defaults: Flow<ConversionDefaults> = context.settingsDataStore.data.map { p ->
@@ -98,6 +101,7 @@ class SettingsRepository(private val context: Context) {
             speedLevel = p[Keys.SPEED_LEVEL] ?: 1,
             resizePercent = p[Keys.RESIZE_PERCENT] ?: 100,
             avifGainmapCompatibility = p[Keys.AVIF_GAINMAP_COMPATIBILITY] ?: true,
+            heicGainmapCompatibility = p[Keys.HEIC_GAINMAP_COMPATIBILITY] ?: true,
         )
     }
 
@@ -159,6 +163,10 @@ class SettingsRepository(private val context: Context) {
         context.settingsDataStore.edit { it[Keys.RESIZE_PERCENT] = percent.coerceIn(25, 100) }
     }
 
+    suspend fun setHeicGainmapCompatibility(enabled: Boolean) {
+        context.settingsDataStore.edit { it[Keys.HEIC_GAINMAP_COMPATIBILITY] = enabled }
+    }
+
     suspend fun setAvifGainmapCompatibility(enabled: Boolean) {
         context.settingsDataStore.edit { it[Keys.AVIF_GAINMAP_COMPATIBILITY] = enabled }
     }
@@ -178,6 +186,7 @@ class SettingsRepository(private val context: Context) {
             p[Keys.SPEED_LEVEL] = d.speedLevel.coerceIn(0, 2)
             p[Keys.RESIZE_PERCENT] = d.resizePercent.coerceIn(25, 100)
             p[Keys.AVIF_GAINMAP_COMPATIBILITY] = d.avifGainmapCompatibility
+            p[Keys.HEIC_GAINMAP_COMPATIBILITY] = d.heicGainmapCompatibility
         }
     }
 }
@@ -188,6 +197,7 @@ fun ConversionDefaults.encode(): String = org.json.JSONObject().apply {
     put("allowSdr", allowSdr); put("autoSave", autoSave); put("speed", speedLevel); put("resize", resizePercent)
     put("onlySmaller", onlySmaller); put("keepLocation", keepLocation)
     put("avifGainmapCompatibility", avifGainmapCompatibility)
+    put("heicGainmapCompatibility", heicGainmapCompatibility)
 }.toString()
 
 fun decodeDefaults(value: String): ConversionDefaults {
@@ -198,7 +208,8 @@ fun decodeDefaults(value: String): ConversionDefaults {
         allowSdr = j.getBoolean("allowSdr"), autoSave = j.getBoolean("autoSave"), speedLevel = j.getInt("speed"),
         resizePercent = j.getInt("resize"), onlySmaller = j.optBoolean("onlySmaller", true), keepLocation = j.optBoolean("keepLocation", true),
         // Old queued jobs and history used pixel-exact encoding. Do not relabel them.
-        avifGainmapCompatibility = j.optBoolean("avifGainmapCompatibility", false))
+        avifGainmapCompatibility = j.optBoolean("avifGainmapCompatibility", false),
+        heicGainmapCompatibility = j.optBoolean("heicGainmapCompatibility", false))
 }
 
-fun ConversionDefaults.summary(): String = "${format.label} · 编码质量 $quality · ${if (resizePercent == 100) "原始尺寸" else "尺寸 $resizePercent%"} · ${if (format == OutputFormat.AVIF && avifGainmapCompatibility) "HDR 相册兼容" else "Gain Map 原样保留"} · ${if (autoSave) "自动保存" else "手动保存"}"
+fun ConversionDefaults.summary(): String = "${format.label} · 编码质量 $quality · ${if (resizePercent == 100) "原始尺寸" else "尺寸 $resizePercent%"} · ${if ((format == OutputFormat.AVIF && avifGainmapCompatibility) || (format == OutputFormat.HEIC && heicGainmapCompatibility)) "HDR 相册兼容" else "Gain Map 原样保留"} · ${if (autoSave) "自动保存" else "手动保存"}"

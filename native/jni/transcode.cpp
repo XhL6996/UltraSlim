@@ -1132,6 +1132,7 @@ struct GainMapPayload {
   mutable std::vector<uint8_t> encodedJxl;
   bool cacheForRetry = false;
   bool avifGainmapCompatibility = false;
+  bool heicGainmapCompatibility = false;
   SdrImage image;
   std::vector<uint8_t> iso;
   int codec = 1;
@@ -1150,7 +1151,8 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
   // Identity/GBR as BT.601; the explicit compatibility mode supplies real YCbCr.
   const heif_encoder_descriptor* descriptor = nullptr;
   const bool avif = gm.codec == 2;
-  const bool compatibleRgb = avif && gm.multiChannel && gm.avifGainmapCompatibility;
+  const bool compatibleHeic = !avif && gm.heicGainmapCompatibility;
+  const bool compatibleRgb = gm.multiChannel && (avif ? gm.avifGainmapCompatibility : compatibleHeic);
   if (heif_context_get_encoder_descriptors(ctx, avif ? heif_compression_AV1 : heif_compression_HEVC,
           avif ? "aom" : "x265", &descriptor, 1) != 1) {
     err = "缺少无损 Gain Map 编码器"; return 24;
@@ -1166,15 +1168,38 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
   }
   e = heif_encoder_set_lossless(mapEncoder, 1);
   if (e.code != heif_error_Ok) { err = e.message; return 24; }
-  heif_encoder_set_parameter(mapEncoder, "chroma", "444");
+  heif_encoder_set_parameter(mapEncoder, "chroma", compatibleHeic ? "420" : "444");
   heif_image* image = nullptr;
   e = heif_image_create(gm.image.width, gm.image.height,
-      gm.multiChannel ? heif_colorspace_YCbCr : heif_colorspace_monochrome,
-      gm.multiChannel ? heif_chroma_444 : heif_chroma_monochrome, &image);
+      (gm.multiChannel || compatibleHeic) ? heif_colorspace_YCbCr : heif_colorspace_monochrome,
+      compatibleHeic ? heif_chroma_420 : (gm.multiChannel ? heif_chroma_444 : heif_chroma_monochrome), &image);
   if (e.code != heif_error_Ok) { err = e.message; return 24; }
   std::unique_ptr<heif_image, decltype(&heif_image_release)> imageOwner(image, heif_image_release);
   const heif_channel planes[] = {heif_channel_Y, heif_channel_Cb, heif_channel_Cr};
-  if (gm.multiChannel) {
+  if (compatibleHeic) {
+    // Platform HEVC decoders need 4:2:0 even for a monochrome auxiliary image.
+    // Keep Y at the original map dimensions. RGB chroma is explicitly lossy;
+    // a mono map uses full-range Y and neutral chroma to retain its samples.
+    for (int c = 0; c < 3; ++c) {
+      e = heif_image_add_plane(image, planes[c], c ? (gm.image.width + 1) / 2 : gm.image.width,
+                              c ? (gm.image.height + 1) / 2 : gm.image.height, 8);
+      if (e.code != heif_error_Ok) { err = e.message; return 24; }
+    }
+    int ys = 0, us = 0, vs = 0;
+    auto* yp = heif_image_get_plane(image, heif_channel_Y, &ys);
+    auto* up = heif_image_get_plane(image, heif_channel_Cb, &us);
+    auto* vp = heif_image_get_plane(image, heif_channel_Cr, &vs);
+    if (gm.multiChannel) {
+      rgbaToYuv420Direct(gm.image, yp, ys, up, us, vp, vs, false);
+    } else {
+      for (int y = 0; y < gm.image.height; ++y)
+        rgbaToGrayFast(gm.image.rgba.data() + size_t(y) * gm.image.width * 4, yp + y * ys, gm.image.width);
+      for (int y = 0; y < (gm.image.height + 1) / 2; ++y) {
+        memset(up + y * us, 128, (gm.image.width + 1) / 2);
+        memset(vp + y * vs, 128, (gm.image.width + 1) / 2);
+      }
+    }
+  } else if (gm.multiChannel) {
     for (int c = 0; c < 3; ++c) {
       e = heif_image_add_plane(image, planes[c], gm.image.width, gm.image.height, 8);
       if (e.code != heif_error_Ok) { err = e.message; return 24; }
@@ -1227,7 +1252,7 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
   nclx.version = 1;
   nclx.color_primaries = heif_color_primaries_unspecified;
   nclx.transfer_characteristics = heif_transfer_characteristic_unspecified;
-  nclx.matrix_coefficients = compatibleRgb ? heif_matrix_coefficients_ITU_R_BT_601_6
+  nclx.matrix_coefficients = (compatibleRgb || compatibleHeic) ? heif_matrix_coefficients_ITU_R_BT_601_6
                                          : heif_matrix_coefficients_RGB_GBR;
   nclx.full_range_flag = compatibleRgb ? 0 : 1;
   heif_image_set_nclx_color_profile(image, &nclx);
@@ -1946,6 +1971,7 @@ int tryReuseGainMap(const std::vector<uint8_t>& data, int container, uhdr_codec_
     GainMapPayload payload;
     payload.cacheForRetry = opt.retrySmaller;
     payload.avifGainmapCompatibility = opt.avifGainmapCompatibility;
+    payload.heicGainmapCompatibility = opt.heicGainmapCompatibility;
     payload.image = std::move(gm);
     payload.iso = std::move(iso);
     payload.codec = opt.outCodec;

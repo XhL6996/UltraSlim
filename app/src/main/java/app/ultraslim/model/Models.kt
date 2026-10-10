@@ -36,4 +36,5 @@ data class ConversionSettings(
     val speedLevel: Int = 1,
     val resizePercent: Int = 100,
     val avifGainmapCompatibility: Boolean = true,
+    val heicGainmapCompatibility: Boolean = true,
 )

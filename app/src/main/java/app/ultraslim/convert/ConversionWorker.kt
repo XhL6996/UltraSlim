@@ -130,7 +130,8 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                                     options.gainmapQuality, options.gainmapScale, options.multiChannelGainmap, options.keepExif,
                                     options.allowSdr, options.speedLevel, options.resizePercent,
                                     Runtime.getRuntime().availableProcessors().coerceIn(2, 8), options.keepLocation, motionXmp, options.onlySmaller,
-                                    avifGainmapCompatibility = options.avifGainmapCompatibility)
+                                    avifGainmapCompatibility = options.avifGainmapCompatibility,
+                                    heicGainmapCompatibility = options.heicGainmapCompatibility)
                             }
                         }
                     }
@@ -161,8 +162,9 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
                         repo.update(id) { it.copy(status = QueueStatus.SKIPPED, result = result, error = why) }
                         continue
                     }
-                    if (verified.hasGainMap && options.format == OutputFormat.AVIF && options.avifGainmapCompatibility) {
-                        withContext(Dispatchers.IO) { AvifOutputValidation.requireReadableGainmap(file) }
+                    if (verified.hasGainMap && ((options.format == OutputFormat.AVIF && options.avifGainmapCompatibility) ||
+                        (options.format == OutputFormat.HEIC && options.heicGainmapCompatibility))) {
+                        withContext(Dispatchers.IO) { HdrOutputValidation.requireReadableGainmap(file) }
                     }
                     val name = outputName(item.displayName, options.format.extension, id, item.createdAt, motionPhoto = liveAttached)
                     val liveSummary = if (motionInfo != null) {

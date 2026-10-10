@@ -502,6 +502,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     fun setKeepExif(v: Boolean) = change { it.copy(keepExif = v) }
     fun setKeepLocation(v: Boolean) = change { it.copy(keepLocation = v) }
     fun setAvifGainmapCompatibility(v: Boolean) = change { it.copy(avifGainmapCompatibility = v) }
+    fun setHeicGainmapCompatibility(v: Boolean) = change { it.copy(heicGainmapCompatibility = v) }
     fun setAllowSdr(v: Boolean) = change { it.copy(allowSdr = v) }
     fun setAutoSave(v: Boolean) = change { it.copy(autoSave = v) }
     fun setOnlySmaller(v: Boolean) = change { it.copy(onlySmaller = v) }

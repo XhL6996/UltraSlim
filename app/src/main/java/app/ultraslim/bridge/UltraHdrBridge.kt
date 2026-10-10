@@ -81,6 +81,7 @@ object UltraHdrBridge {
         motionXmp: ByteArray? = null,
         retrySmaller: Boolean = false,
         avifGainmapCompatibility: Boolean = false,
+        heicGainmapCompatibility: Boolean = false,
     ): TranscodeResult
 
     @JvmStatic

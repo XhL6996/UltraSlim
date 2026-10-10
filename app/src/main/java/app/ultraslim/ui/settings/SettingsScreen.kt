@@ -183,9 +183,17 @@ fun SettingsScreen(onBack: () -> Unit) {
                     if (defaults.format == OutputFormat.AVIF) {
                         SwitchRow(
                             title = "AVIF 相册兼容模式",
-                            hint = "针对部分手机相册避免色彩偏差；关闭则保持 RGB 逐像素直写",
+                            hint = "彩色增益图转换存在舍入误差；关闭后部分相册可能偏色",
                             checked = defaults.avifGainmapCompatibility,
                             onCheckedChange = vm::setAvifGainmapCompatibility,
+                        )
+                    }
+                    if (defaults.format == OutputFormat.HEIC) {
+                        SwitchRow(
+                            title = "HEIC 相册兼容模式",
+                            hint = "保留增益图尺寸与 HDR 参数，彩色增益图色度有损；关闭后部分相册可能偏色或不显示 HDR",
+                            checked = defaults.heicGainmapCompatibility,
+                            onCheckedChange = vm::setHeicGainmapCompatibility,
                         )
                     }
                     SwitchRow(

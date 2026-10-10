@@ -46,6 +46,7 @@ class SettingsViewModel(private val app: UltraSlimApp) : ViewModel() {
     fun setOnlySmaller(v: Boolean) = viewModelScope.launch { repo.setOnlySmaller(v) }
     fun setKeepLocation(v: Boolean) = viewModelScope.launch { repo.setKeepLocation(v) }
     fun setAvifGainmapCompatibility(v: Boolean) = viewModelScope.launch { repo.setAvifGainmapCompatibility(v) }
+    fun setHeicGainmapCompatibility(v: Boolean) = viewModelScope.launch { repo.setHeicGainmapCompatibility(v) }
 
     fun setSpeedLevel(level: Int) = viewModelScope.launch { repo.setSpeedLevel(level) }
 
