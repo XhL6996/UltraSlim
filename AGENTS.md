@@ -54,6 +54,7 @@ build/host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 - Android 15 及更早的平台解码器不认识 ISO 21496-1 tmap HEIC，预览一律走 `nativeDecodePreview` 原生兜底（UltraAsyncImage，带 PreviewCache）。
 - 编码输出固定 8-bit（base + gainmap），所以 x265 只编 8-bit；AV1 编码走 **SVT-AV1**（比 aomenc 快数倍），AV1 解码走 dav1d（aom 解码器在大图上有横向拖影，仅保留无损 gainmap 编码用途），HEVC 解码走 libde265（支持 HEIC/AVIF 输入）。
 - 速度档位（speedLevel 0/1/2）：HEVC 映射 x265 preset slow/medium/veryfast，AV1 映射 "speed" 4/6/9；经 vendored libultrahdr 补丁注入（`heifultrahdr.cpp` / `avifultrahdr.cpp`，读取全局弱符号 `ultraslim_codec_speed_level`，强定义在 transcode.cpp）。svt 插件没有 "chroma" 参数，`set_internal_color_format` 已改为容错。
+- 质量映射按编码器区分：HEVC 沿用 `remapQualityForLibheif`，AVIF（SVT 及奇数尺寸 AOM）使用 `remapQualityForAvif` 传递完整 1–100 范围；禁止套用 HEVC 曲线把 AVIF 100 限制到 libheif 84。SDR、preserve 和显式 rebuild 路径须一致。100 仍有 8-bit RGB/YUV 转换损失，不承诺 RGB 无损；最高档可能接近或超过原文件大小，既有 `retrySmaller` 仍可降质一次。主机 `avif_quality` 检查实际解码纹理保真。
 - 分辨率缩放：HDR 路径用 `uhdr_add_effect_resize`（解码时生效），SDR 路径用自带 bilinear（RGBA8888）。
 - 预览兜底：平台解码器不认识 ISO 21496-1 tmap HEIC（Android 15 及更早）时，`UltraAsyncImage`（ui/components/Components.kt）会走 `nativeDecodePreview`（原生解码主图 → JPEG → Bitmap）显示预览；历史/队列/详情共用。
 - x265 4.1 在 Clang + CMake≥4 下需要补丁（`native/deps/patches/patch_x265.sh`）；手写 aarch64 .S 汇编含绝对重定位，Android 共享库禁止（bionic 拒绝 textrel），故保持 `ENABLE_ASSEMBLY=OFF`，通过 `ULTRASLIM_ARM_INTRINSICS` 单独编译并注册 PIC-safe NEON intrinsics；不能仅设置 `HAVE_NEON`。16×16 DCT 使用 C++ intrinsic 实现，依赖汇编的 planar 预测保留 C 回退。

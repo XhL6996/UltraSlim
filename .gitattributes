@@ -5,6 +5,7 @@
 /native/deps/patches/*.sh text eol=lf
 /apple-live/script/*.sh text eol=lf
 /tests/fixtures/**/*.jpg binary
+/tests/fixtures/libultrahdr/LICENSE -text -whitespace
 *.apk binary
 *.jar binary
 # License snapshots must retain upstream bytes, including original whitespace.

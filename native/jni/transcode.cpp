@@ -1355,7 +1355,8 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
     heif_context_free(ctx);
     return 20;
   }
-  heif_encoder_set_lossy_quality(encoder, ultrahdr::remapQualityForLibheif(quality));
+  heif_encoder_set_lossy_quality(encoder, outCodec == 2 ?
+      ultrahdr::remapQualityForAvif(quality) : ultrahdr::remapQualityForLibheif(quality));
   heif_encoder_set_parameter(encoder, "chroma", oddAvif ? "444" : "420");
   configureEncoder(encoder, outCodec, speedLevel, threads);
   if (oddAvif && speedLevel == 2) heif_encoder_set_parameter_integer(encoder, "speed", 8);

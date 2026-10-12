@@ -1,6 +1,7 @@
 // Dumps gainmap pixel stats from a HEIC/AVIF gain map file or Ultra HDR JPEG.
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <vector>
 #include <libheif/heif.h>
 #include "ultrahdr_api.h"

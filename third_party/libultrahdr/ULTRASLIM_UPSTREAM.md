@@ -20,7 +20,7 @@ The remaining five contain these local changes:
 | File | Local changes |
 | --- | --- |
 | `cmake/Findlibheif.cmake` | Apply `-D` separately to each feature-probe definition. |
-| `lib/include/ultrahdr/ultrahdrcommon.h` | App quality-to-codec quality remapping helper. |
+| `lib/include/ultrahdr/ultrahdrcommon.h` | Separate HEVC quality remapping and full-range AVIF quality; AV1 must not inherit the HEVC quality cap. |
 | `lib/src/heifultrahdr.cpp` | Speed/thread controls, encoder chroma-parameter tolerance, quality remapping. |
 | `lib/src/avifultrahdr.cpp` | Speed/thread controls, encoder chroma-parameter tolerance, quality remapping. |
 | `lib/src/jpegrutils.cpp` | Initialize Apple gain-map `use_base_cg` to true. |
