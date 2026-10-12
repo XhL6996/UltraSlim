@@ -1,13 +1,14 @@
 plugins {
     alias(libs.plugins.android.application)
-    alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.screenshot)
     alias(libs.plugins.ksp)
 }
 
 android {
     namespace = "app.ultraslim"
-    compileSdk = 36
+    compileSdk { version = release(37) }
     ndkVersion = "27.2.12479018"
 
     defaultConfig {
@@ -15,8 +16,8 @@ android {
         minSdk = 26
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 8
-        versionName = "1.0.2"
+        versionCode = 13
+        versionName = "1.1.1"
 
         // Filter transitive JNI libraries too, not only our CMake target.
         ndk { abiFilters += listOf("arm64-v8a") }
@@ -55,13 +56,11 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
 
-    kotlin {
-        compilerOptions {
-            jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
-        }
-    }
 
-    sourceSets.getByName("androidTest").assets.srcDir("../third_party/libultrahdr/tests/data")
+
+    sourceSets.getByName("androidTest").assets.srcDir("../tests/fixtures/libultrahdr")
+
+    experimentalProperties["android.experimental.enableScreenshotTest"] = true
 
     buildFeatures {
         compose = true
@@ -71,7 +70,11 @@ android {
         // Project-built JNI replacement takes precedence; verification checks the packaged bytes.
         jniLibs.pickFirsts += "lib/arm64-v8a/libandroidx.graphics.path.so"
         resources {
-            excludes += setOf("META-INF/**", "META-INF/LICENSE.md", "META-INF/LICENSE-notice.md")
+            // Keep AndroidX version metadata for Compose Layout Inspector / Android CLI.
+            excludes += setOf(
+                "META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*",
+                "META-INF/*.kotlin_module", "META-INF/versions/**", "META-INF/INDEX.LIST",
+            )
         }
     }
 }
@@ -85,6 +88,7 @@ dependencies {
     }
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.window:window-testing:1.5.0")
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation("androidx.room:room-testing:2.8.1")
@@ -102,7 +106,14 @@ dependencies {
     implementation(libs.compose.material3)
     implementation(libs.compose.material.icons.extended)
     implementation(libs.compose.activity)
-    implementation(libs.compose.navigation)
+implementation(libs.compose.navigation)
+implementation(libs.compose.adaptive)
+implementation(libs.compose.adaptive.navigation)
+implementation(libs.compose.navigation.suite)
+implementation(libs.androidx.lifecycle.navigation)
+implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.9.0")
+screenshotTestImplementation("com.android.tools.screenshot:screenshot-validation-api:0.0.1-alpha16")
+screenshotTestImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.tooling)
 
     implementation(libs.androidx.room.runtime)

@@ -41,7 +41,7 @@ data class QueueItem(
 
 /**
  * Durable conversion queue shared between the UI and
- * [ConversionWorker]. Also carries URIs arriving via share intents.
+ * [ConversionService]. Also carries URIs arriving via share intents.
  */
 class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
     private val ready = CompletableDeferred<Unit>()
@@ -77,7 +77,11 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
                 var persisted = dao.all().associateBy { it.id }
                 synchronized(this@ConversionRepository) {
                     _queue.value = persisted.values.map {
-                        if (it.status == QueueStatus.PROBING || it.status == QueueStatus.CONVERTING) it.copy(status = QueueStatus.READY) else it
+                        when (it.status) {
+                            QueueStatus.CONVERTING -> it.copy(status = QueueStatus.READY, error = "上次转换被中断，请继续；已完成图片保留")
+                            QueueStatus.PROBING -> it.copy(status = QueueStatus.READY)
+                            else -> it
+                        }
                     }
                     if (_queue.value.any { persisted[it.id] != it }) persist()
                 }
@@ -128,8 +132,26 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
         _queue.update { existing -> existing + items.filter { item -> existing.none { it.uri == item.uri } } }; persist()
     }
 
-    @Synchronized fun remove(id: String) {
-        _queue.update { list -> list.filterNot { it.id == id && it.status != QueueStatus.CONVERTING } }; persist()
+    data class RemovedItem(val item: QueueItem, val index: Int)
+
+    @Synchronized fun remove(id: String): RemovedItem? {
+        val list = _queue.value
+        val index = list.indexOfFirst { it.id == id && it.status != QueueStatus.CONVERTING }
+        if (index < 0) return null
+        val removed = RemovedItem(list[index], index)
+        _queue.value = list.filterNot { it.id == id }
+        persist()
+        return removed
+    }
+
+    @Synchronized fun restore(removed: RemovedItem): QueueItem? {
+        if (_queue.value.any { it.id == removed.item.id || it.uri == removed.item.uri }) return null
+        val item = removed.item.let {
+            if (it.status == QueueStatus.PROBING) it.copy(status = QueueStatus.PENDING) else it
+        }
+        _queue.value = _queue.value.toMutableList().apply { add(removed.index.coerceIn(0, size), item) }
+        persist()
+        return item
     }
 
     @Synchronized fun removeIds(ids: Collection<String>) {

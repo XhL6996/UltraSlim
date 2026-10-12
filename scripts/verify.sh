@@ -1,12 +1,22 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
+if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--device" ) ]]; then
+  echo "usage: $0 [--device]" >&2
+  exit 2
+fi
 export ULTRASLIM_BUILD_ROOT="${ULTRASLIM_BUILD_ROOT:-$HOME/.cache/ultraslim-build}"
-cmake -G Ninja -S native -B build-host-test -DULTRASLIM_HOST_TEST=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-host-test --parallel 4
-ctest --test-dir build-host-test --output-on-failure
-./gradlew -Pkotlin.incremental=false :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest :app:lintDebug
+python3 scripts/check_repository.py
+host_build="$ULTRASLIM_BUILD_ROOT/host-test"
+cmake -G Ninja -S native -B "$host_build" -DULTRASLIM_HOST_TEST=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build "$host_build" --parallel 4
+ctest --test-dir "$host_build" --output-on-failure
+gradle_args=(-Pkotlin.incremental=false)
+if [[ "${1:-}" == "--device" ]]; then
+  gradle_args+=(-PultraslimDebugSuffix=.verifyqa)
+fi
+./gradlew "${gradle_args[@]}" :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest :app:lintDebug
 python3 scripts/check_apk_alignment.py "$ULTRASLIM_BUILD_ROOT/app/outputs/apk/debug/app-debug.apk" "$ULTRASLIM_BUILD_ROOT/app/outputs/apk/release/app-release-unsigned.apk"
 if [[ "${1:-}" == "--device" ]]; then
-  ./gradlew -Pkotlin.incremental=false :app:connectedDebugAndroidTest
+  ./gradlew "${gradle_args[@]}" :app:connectedDebugAndroidTest
 fi

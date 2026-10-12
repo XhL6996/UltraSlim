@@ -1,0 +1,11 @@
+/gradlew text eol=lf
+/gradlew.bat text eol=crlf
+/scripts/*.sh text eol=lf
+/native/deps/*.sh text eol=lf
+/native/deps/patches/*.sh text eol=lf
+/apple-live/script/*.sh text eol=lf
+/tests/fixtures/**/*.jpg binary
+*.apk binary
+*.jar binary
+# License snapshots must retain upstream bytes, including original whitespace.
+/third_party/licenses/** -text -whitespace

@@ -1,9 +1,12 @@
 name: Verify UltraSlim
-on: [push, pull_request, workflow_dispatch]
+# Public pull requests must not execute arbitrary code on this self-hosted machine.
+on: [push, workflow_dispatch]
 jobs:
   verify:
-    # Register an ARM64 macOS Gitea runner with this label; see README.md.
+    # Register a trusted ARM64 macOS Gitea runner; see docs/BUILDING.md.
     runs-on: macos-arm64
+    env:
+      ULTRASLIM_BUILD_ROOT: ${{ github.workspace }}/build/ci
     steps:
       - uses: actions/checkout@v4
       - name: Build dependencies and verify
@@ -20,8 +23,9 @@ jobs:
         with:
           name: ultraslim-verify-artifacts
           path: |
-            **/outputs/apk/debug/app-debug.apk
-            **/outputs/apk/release/app-release-unsigned.apk
-            **/build/reports/*
+            build/ci/app/outputs/apk/debug/app-debug.apk
+            build/ci/app/outputs/apk/release/app-release-unsigned.apk
+            build/ci/app/reports/**
+            build/ci/host-test/Testing/**
           retention-days: 7
           if-no-files-found: ignore

@@ -170,7 +170,7 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
     fun onOriginalTrashed() {
         originalTrashed.value = true
         canTrash.value = false
-        _events.tryEmit(DetailEvent.Message("原图已移入系统相册回收站（30天内可恢复）"))
+        _events.tryEmit(DetailEvent.Message("原图已移入系统相册回收站（恢复期限以系统回收站为准）"))
     }
 
     fun deleteRecord() {

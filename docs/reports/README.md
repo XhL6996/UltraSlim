@@ -1,0 +1,19 @@
+# 历史验证报告
+
+这些记录保留对应日期的实现、样本和验证范围。版本号、路径与设备结果反映当时状态；当前命令请以 [构建文档](../BUILDING.md) 为准。个人用户名路径和设备序列号已改为占位符，技术结论保留。
+
+- [2026-10-12 · 1.1.1：系统栏与 Expressive 视觉完善](2026-10-12-expressive-polish.md)
+- [2026-10-12 · 1.1.0：Expressive 与自适应 UI](2026-10-12-expressive-adaptive.md)
+- [2026-10-12 · 开源准备：目录与构建整理](2026-10-12-repository-layout.md)
+- [2026-10-12 · SDR AVIF 解码兼容性修复](2026-10-12-sdr-avif-compatibility.md)
+- [2026-10-12 · 1.0.4：滑动交互与校验后自动替换](2026-10-12-interactions-auto-replace.md)
+- [2026-10-12 · 后台转换检查与修复（1.0.5）](2026-10-12-background-conversion.md)
+- [2026-10-10 · 2026-10-10 libultrahdr upstream and HEIC rebuild evaluation](2026-10-10-ultrahdr-rebuild-evaluation.md)
+- [2026-10-10 · Apple Live Photo 导出与三项上游修复（2026-10-10）](2026-10-10-apple-live-validation.md)
+- [2026-10-09 · HEIC 偏色修复验证（1.0.1 / code 7）](2026-10-09-heic-fix-validation.md)
+- [2026-10-09 · HEIC 彩色增益图偏色：复现与范围确认](2026-10-09-heic-color-audit.md)
+- [2026-10-08 · 2026-10-08：转码性能与历史页修复](2026-10-08-performance-history.md)
+- [2026-10-08 · 1.2.2：AVIF 偏色与 HDR 读取失败的批次修复](2026-10-08-color-batch-audit.md)
+- [2026-10-08 · OPPO JPG → AVIF：Android P3 色彩兼容性修复](2026-10-08-avif-p3-color.md)
+- [2026-10-08 · AVIF 在 Google 相册偏红、偏绿：第二轮追查](2026-10-08-avif-hdr-followup.md)
+- [2026-10-06 · 2026-10-06 修复与验收](2026-10-06-validation.md)

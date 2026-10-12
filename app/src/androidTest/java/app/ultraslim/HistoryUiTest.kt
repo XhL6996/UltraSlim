@@ -34,7 +34,9 @@ class HistoryUiTest {
                 durationMs = 100.0, maxContentBoost = 1f, createdAt = now + ids.size, status = "DONE", saveState = state))
         }
         compose.onNodeWithText("历史", useUnmergedTree = true).performClick()
-        compose.waitUntil(10_000) { compose.onAllNodesWithTag("history-row-${ids.last()}").fetchSemanticsNodes().isNotEmpty() }
+        compose.waitUntil(10_000) { compose.onAllNodesWithTag("history-date-${historyDate(now)}").fetchSemanticsNodes().isNotEmpty() }
+        compose.onNodeWithTag("history-list").performScrollToNode(hasTestTag("history-row-${ids.last()}"))
+        Unit
     }
     @After fun cleanup() = runBlocking {
         ids.forEach { app.database.historyDao().deleteById(it) }
@@ -47,7 +49,7 @@ class HistoryUiTest {
         compose.onNodeWithText("已选择 1 张").assertExists()
         compose.onAllNodesWithText("保存 1 张").assertCountEquals(0)
         compose.onNodeWithText("分享").assertIsEnabled()
-        compose.onNodeWithText("删除").assertIsEnabled()
+        compose.onNodeWithText("删除记录").assertIsEnabled()
         val bar = compose.onNodeWithTag("history-selection-bar").fetchSemanticsNode().boundsInRoot
         val root = compose.onRoot().fetchSemanticsNode().boundsInRoot
         assertEquals(root.width, bar.width, 1f)
@@ -58,11 +60,13 @@ class HistoryUiTest {
         compose.onNodeWithText("待保存", useUnmergedTree = true).performClick()
         compose.onNodeWithText("已选择 0 张").assertExists()
         compose.onNodeWithText("分享").assertIsNotEnabled()
+        compose.onNodeWithTag("history-list").performScrollToNode(hasTestTag("history-row-${ids[1]}"))
         compose.onNodeWithTag("history-row-${ids[1]}").performClick()
         compose.onNodeWithText("保存 1 张").assertExists()
         File(app.filesDir, "history-pending.png").outputStream().use {
             compose.onRoot().captureToImage().asAndroidBitmap().compress(Bitmap.CompressFormat.PNG, 100, it)
         }
+        compose.onNodeWithTag("history-list").performScrollToIndex(0)
         compose.onNodeWithText("取消全选").performClick()
         compose.onNodeWithText("已选择 0 张").assertExists()
     }
@@ -71,7 +75,7 @@ class HistoryUiTest {
             val template = app.database.historyDao().byId(ids.first())!!
             repeat(105) { ids += app.database.historyDao().insert(template.copy(id = 0, createdAt = now - 1000)) }
         }
-        compose.onNodeWithTag("history-date-${historyDate(now)}").performTouchInput { swipeRight() }
+        compose.onNodeWithTag("history-date-${historyDate(now)}").performScrollTo().performTouchInput { swipeRight() }
         compose.onNodeWithText("删除 108 条记录？").assertExists()
         compose.onNodeWithText("取消").performClick()
         runBlocking { ids.forEach { assertNotNull(app.database.historyDao().byId(it)) } }

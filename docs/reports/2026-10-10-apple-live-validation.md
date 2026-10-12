@@ -25,7 +25,7 @@
 
 ## 未完成的设备验证
 
-手机 `8c209733` 拒绝安装独立 `.liveqa` 测试包：`INSTALL_FAILED_USER_RESTRICTED: Install canceled by user`。没有绕过限制或用其他安装方式重试。实际 Android UI → Mac 导入 → iCloud → iPhone 相册尚未完成端到端验收；不把主机或 PhotoKit 资源检查等同于该验收。日常 App 未被更新。
+手机 `<device-serial>` 拒绝安装独立 `.liveqa` 测试包：`INSTALL_FAILED_USER_RESTRICTED: Install canceled by user`。没有绕过限制或用其他安装方式重试。实际 Android UI → Mac 导入 → iCloud → iPhone 相册尚未完成端到端验收；不把主机或 PhotoKit 资源检查等同于该验收。日常 App 未被更新。
 
 `AppleLiveIntegrationTest` 已提供真机验证入口，需在用户允许安装测试包后，放入 `files/apple-live-source.jpg` 与 `files/apple-live-clip.mp4`，运行参数 `appleLiveSample=true`；输出在隔离 QA 包的 `files/outputs/live-qa/AppleLive.zip`。
 

@@ -1,5 +1,14 @@
 package app.ultraslim.ui.history
 
+import app.ultraslim.ui.components.appTopBarColors
+import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import app.ultraslim.ui.adaptive.AdaptiveWorkspace
+import androidx.compose.material3.adaptive.currentWindowAdaptiveInfoV2
+import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffoldDefaults
+import androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteType
+
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.IntentSenderRequest
@@ -38,7 +47,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
-fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> Unit = {}) {
+fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> Unit = {}, activeHistoryId: Long? = null) {
     val vm: HistoryViewModel = viewModel(factory = appViewModelFactory { HistoryViewModel(it) })
     val state by vm.uiState.collectAsStateWithLifecycle()
     val deleting by vm.deleteCandidates.collectAsStateWithLifecycle()
@@ -58,7 +67,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
         stateSaver = listSaver(save = { it.toList() }, restore = { it.toSet() }),
     ) { mutableStateOf(emptySet<LocalDate>()) }
     var lastTrashCount by remember { mutableIntStateOf(0) }
-    LaunchedEffect(filter) { vm.setFilter(if (filter == "全部") "" else filter) }
+    LaunchedEffect(filter) { vm.setFilter(historyFilterSaveState(filter)) }
     LaunchedEffect(selecting) { onSelectingChange(selecting) }
     val trashLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
@@ -79,12 +88,13 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
         vm.ensureTrashableResolved(visible)
     }
     val groups = remember(visible) { visible.groupBy { historyDate(it.createdAt) } }
-    val railMode = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width /
-        androidx.compose.ui.platform.LocalDensity.current.density >= 840
+    val railMode = NavigationSuiteScaffoldDefaults.navigationSuiteType(currentWindowAdaptiveInfoV2()) == NavigationSuiteType.WideNavigationRailCollapsed
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
-            TopAppBar(title = {
+            TopAppBar(colors = appTopBarColors(), scrollBehavior = if (selecting) null else scrollBehavior, title = {
                 Column {
                     Text(if (selecting) "已选择 ${selectedItems.size} 张" else "成品库", style = MaterialTheme.typography.titleLarge)
                     Text(if (selecting) "点击图片勾选，可批量分享或删除" else "每一次减负，都看得见",
@@ -148,11 +158,12 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
             }
         }
     ) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding).testTag("history-list"),
+        AdaptiveWorkspace(modifier = Modifier.padding(padding).consumeWindowInsets(padding), primary = { expanded ->
+        LazyColumn(Modifier.fillMaxSize().testTag("history-list"),
             contentPadding = PaddingValues(start = 20.dp, top = 20.dp, end = 20.dp,
                 bottom = 20.dp + if (!selecting) WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            item { StatsCard(state.stats) }
+            if (!expanded) item { StatsCard(state.stats) }
             item {
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     listOf("全部", "待保存", "已保存", "保存失败").forEach { label ->
@@ -208,16 +219,12 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
             groups.forEach { (date, records) ->
                 val isCollapsed = date in collapsedDates
                 item(key = "date-group-$date", contentType = "history-header") {
-                    val latestDelete by rememberUpdatedState({ vm.requestDeleteDate(date, filter) })
-                    val swipe = rememberSwipeToDismissBoxState(confirmValueChange = {
-                        if (it == SwipeToDismissBoxValue.StartToEnd) latestDelete()
-                        false // Confirmation precedes deletion; cancellation leaves the header in place.
-                    }, positionalThreshold = { it * 0.35f })
-                    SwipeToDismissBox(state = swipe,
+                    app.ultraslim.ui.components.CommitSwipeRow(
                         modifier = Modifier.fillMaxWidth().animateItem(placementSpec = Motion.itemPlacement()).testTag("history-date-$date"),
-                        enableDismissFromStartToEnd = !selecting && !state.busyNow,
-                        enableDismissFromEndToStart = false,
-                        backgroundContent = {
+                        enabled = !selecting && !state.busyNow,
+                        toRight = true,
+                        onCommit = { vm.requestDeleteDate(date, filter) },
+                        background = {
                             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.errorContainer, shape = RoundedCornerShape(16.dp)) {
                                 Row(Modifier.padding(16.dp), verticalAlignment = Alignment.CenterVertically) {
                                     Icon(Icons.Rounded.DeleteOutline, null)
@@ -249,7 +256,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
                                         }) {
                                             Text(if (allSelected) "取消当天" else "选择当天")
                                         }
-                                    } else IconButton(onClick = { latestDelete() }, enabled = !state.busyNow) {
+                                    } else IconButton(onClick = { vm.requestDeleteDate(date, filter) }, enabled = !state.busyNow) {
                                         Icon(Icons.Rounded.DeleteOutline, "删除${historyDateTitle(date)}的记录")
                                     }
                                 }
@@ -264,6 +271,7 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
                             entity = entity,
                             selecting = selecting,
                             checked = checked,
+                            active = entity.id == activeHistoryId,
                             enabled = !state.busyNow,
                             onClick = {
                                 if (selecting) selected = if (checked) selected - entity.id else selected + entity.id
@@ -278,6 +286,13 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
                 TextButton(onClick = vm::loadMore, modifier = Modifier.fillMaxWidth()) { Text("加载更多记录") }
             }
         }
+        }, secondary = {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                StatsCard(state.stats)
+                Text("成品一览", style = MaterialTheme.typography.headlineSmall)
+                Text("选择一张照片查看画质对比；点击「选择」可批量操作。", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+        })
     }
     if (deleting.isNotEmpty()) AlertDialog(onDismissRequest = vm::cancelDelete,
         title = { Text("删除 ${deleting.size} 条记录？") },
@@ -297,10 +312,10 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
 
 @Composable
 internal fun HistoryRow(entity: HistoryEntity, selecting: Boolean, checked: Boolean, enabled: Boolean,
-    onClick: () -> Unit, modifier: Modifier = Modifier) {
+    onClick: () -> Unit, modifier: Modifier = Modifier, active: Boolean = false) {
     Card(onClick = onClick, enabled = enabled, modifier = modifier.fillMaxWidth().testTag("history-row-${entity.id}"),
-        border = if (checked) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
-        colors = CardDefaults.cardColors(containerColor = if (checked) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceContainerLow)) {
+        border = if (checked || active) BorderStroke(1.dp, MaterialTheme.colorScheme.primary) else null,
+        colors = CardDefaults.cardColors(containerColor = if (checked) MaterialTheme.colorScheme.secondaryContainer else if (active) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerLow)) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
             if (selecting) Checkbox(checked = checked, onCheckedChange = null, enabled = enabled)
             UltraAsyncImage(entity.outputUri, null, ContentScale.Crop, Modifier.padding(start = if (selecting) 8.dp else 0.dp)

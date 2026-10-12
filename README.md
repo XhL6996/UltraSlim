@@ -1,67 +1,59 @@
-# UltraSlim (v1.0.0 正式版)
+# UltraSlim
 
-Android 离线图片转码工具，支持 JPEG、HEIC、AVIF，以及 Ultra HDR / ISO 21496-1 Gain Map。原图始终保留。包含手风琴就地展开设置、轻量单行底部操作条、自然日分组折叠动效与相册级色彩兼容。
+Android 离线照片转码工具，将 JPEG、HEIC、AVIF、JXL 转为更小的图片，支持 Ultra HDR / ISO 21496-1 Gain Map、纯 SDR 图片和部分动态照片。当前 Android 构建面向 **Android 8.0+ / arm64-v8a**。
 
-## 构建
+界面采用 Material 3 Expressive，支持手机、横屏、折叠屏内容分区，以及宽屏成品列表与详情并排。实现与验证边界见 [设计记录](docs/design/2026-10-12-expressive-adaptive.md)。
 
-需要 JDK 17、Android SDK 36、NDK 27.2.12479018、CMake、Ninja、Python 3。当前 APK 仅含 arm64-v8a。
+## 功能
+
+- 转换 HEIC / AVIF / JXL / JPEG，支持质量、速度、分辨率和「仅保留更小结果」。
+- HDR 默认保留原有增益图，不静默缩小、重建或降为 SDR；HEIC / AVIF 相册兼容模式有明确的色彩转换边界。
+- 批量导入、忽略 Live 照片、相册 HDR 筛选、先试转一张、历史记录和原图对比。
+- 转换可在后台继续，显示进度通知；温控等待、任务中断和逐项进度恢复。
+- 默认保留原图。可选择开启「校验后自动替换」，启用时提示；通过检查后向系统请求将原图移入回收站，可能仍需用户确认。
+- 配套 [UltraSlim Live（macOS）](apple-live/README.md)，将 Android 导出的动态 HEIC 导入包配对为 Apple Live Photo。
+
+处理在本机完成，不需要服务器。**兼容模式不是彩色增益图 RGB 逐值无损；系统能解码，也不等于所有相册都能正确显示 HDR。** 支持边界见 [格式与兼容性](docs/COMPATIBILITY.md)。
+
+## 开发与构建
+
+完整步骤见 [构建与测试](docs/BUILDING.md)。已验证的开发环境为 Apple Silicon macOS，使用 JDK 17、Android SDK 37.0、NDK 27.2.12479018、CMake、Ninja、Meson、Python 3 和 Git。
+
+工具准备好后，在项目根目录执行：
 
 ```bash
 export JAVA_HOME=/opt/homebrew/opt/openjdk@17
 export ANDROID_HOME="$HOME/Library/Android/sdk"
-# 同步目录内推荐将 Gradle/NDK 中间产物放到本地缓存。
 export ULTRASLIM_BUILD_ROOT="$HOME/.cache/ultraslim-build"
 native/deps/build_deps.sh host
 native/deps/build_deps.sh android arm64-v8a "$ANDROID_HOME/ndk/27.2.12479018" 26
 scripts/verify.sh
-# 连接 ARM64 设备或模拟器后再运行设备回归：
-scripts/verify.sh --device
 ```
 
-APK 在 `$ULTRASLIM_BUILD_ROOT/app/outputs/apk/`。Debug 包名为 `app.ultraslim.debug`，Release 包未签名；签名由发布环境提供。未设置构建目录变量时沿用 `app/build/`。
+APK 位于 `$ULTRASLIM_BUILD_ROOT/app/outputs/apk/`。Debug 包名为 `app.ultraslim.debug`；Release 构建输出未签名 APK。仓库不包含签名密钥、预编译编解码库或本机相册素材。
 
-Gitea 工作流 `.gitea/workflows/verify.yml` 使用 `macos-arm64` 自托管 runner，需要按以上步骤预装工具。工作流运行主机回归、Debug/Release 构建、JUnit 和 lint；设备测试通过 `--device` 单独执行。当前没有代替用户注册或触发远程 runner。
+## 目录
 
-构建验证还会检查最终 APK 的 16 KB LOAD/RELRO/ZIP 对齐。`graphics-path` 的 JNI 部分使用对应 1.0.1 上游源码重编，来源和许可证见 `third_party/androidx-graphics-path/README.md`。升级该 Kotlin 依赖时必须同步更新 JNI 源码并通过对齐检查。
+```text
+app/                  Android 应用、JVM/设备测试、Room schema
+native/               转码核心、JNI、主机测试、原生依赖构建与补丁
+apple-live/           可独立构建的 macOS Live Photo 配套工具
+third_party/          内置上游源码、来源说明、依赖许可文本
+tests/                主机与 Android 共用的测试素材及来源
+scripts/              验证、仓库检查和 Android 色彩检查入口
+docs/                 开发文档、历史验证报告、设计草案
+gradle/               Gradle Wrapper 与依赖版本目录
+.gitea/               自托管 CI 配置
+```
 
-## Gain Map 与编码质量
+项目结构和数据流见 [架构说明](docs/ARCHITECTURE.md)，全部文档见 [文档索引](docs/README.md)。构建缓存、下载依赖、APK 和本地排查产物由 `.gitignore` 排除；旧本地构建目录集中保留在 `build/legacy/`。
 
-保持原始 Gain Map 的尺寸、通道和增益参数，不因主图质量或预设重建、缩小。JPEG 方向归一化时主图与增益图同步变换；JPEG → JPEG 直接复用原始增益图压缩扫描数据并保留方向。
+## 参与贡献
 
-“AVIF 相册兼容”默认开启：彩色增益图转换为 BT.601 限定域 YCbCr 4:4:4，再由 AOM 无损编码。增益图尺寸和 HDR 参数不变，RGB/YUV 转换有少量误差，**不是增益图逐值无损**。关闭时使用 Identity GBR 逐值保留模式，但部分 Apple / Android 相册会偏色；已有设置和旧任务快照不自动改写。单通道增益图保留原始像素。
+提交问题时请附手机型号、Android 版本、源文件/输出格式和复现步骤。分享测试图片前先确认可公开，并清除不希望公开的位置等元数据。开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
-1.2.2 将大增益图和大 AVIF 主图分块存储，避免系统解码器的输入缓冲和分辨率限制，不缩小图像。保存兼容 HDR AVIF 前，API 34+ 会检查本机系统是否读到增益图；不支持时明确失败，不把缺少 HDR 的系统解码结果当成功。旧相册文件需要从原图重新转换。跨平台证据和未覆盖范围见 [批次验证报告](docs/2026-10-08-color-batch-audit.md)。
+## 许可证
 
-“HEIC 相册兼容”默认开启，与 AVIF 开关独立。兼容路径使用 HEVC YCbCr 4:2:0：单通道值原样放入 Y，彩色增益图存在色度采样与舍入损失；尺寸和 HDR 参数不变，**不是 RGB 逐值无损**。API 34+ 在保存前检查系统能否读取 HDR，失败时保留原图、不发布成品。主图超过 4096 像素采用分块，解决超大 HEIC 解码失败。此前导出的文件需从原图重新转换。验证范围见 [HEIC 修复报告](docs/2026-10-09-heic-fix-validation.md)。
+UltraSlim 原创代码采用 **GNU GPL v3.0（GPL-3.0-only）**，完整文本见 [LICENSE](LICENSE)。第三方源码、补丁涉及的上游代码和测试图片保留其各自许可证，不因顶层协议改变授权。
 
-HEIC 增益图使用 x265 无损编码；严格模式下 HEIC/AVIF 彩色增益图采用 4:4:4 identity GBR，保留解码像素和解释参数。AVIF 主图仍使用 SVT-AV1。HEIC/AVIF HDR → JPEG 无法无损承载增益图时明确拒绝，需选择 HEIC/AVIF；不会悄悄重建或降为 SDR。当前增益图编码链路为 8 位；输入超过 8 位时明确停止转换，避免截断精度。
-
-界面不再提供 Gain Map 质量、缩放和通道开关。默认主图编码质量 92、原始分辨率、仅保留更小结果；既有用户明确设置仍保留。编码质量 100 是编码器参数，不等于无损，不保证比已经压缩过的原图更小。三个主图预设不再暗中缩小分辨率。
-
-输出文件保留可读原名，附 `_Slim_` 和 8 位稳定标识，重复任务不覆盖；系统返回纯数字名时改用 `Photo_日期时间`。相册、记录和分享使用一致文件名。旧历史的发布恢复保留原命名策略。
-
-## CPU 加速与重试
-
-ARM64 构建启用 x265 的 PIC-safe NEON intrinsic 路径，SVT-AV1 编入 NEON、DotProd、I8MM、SVE/SVE2 优化，由库按 CPU 能力和编码路径选择；不等于每张 8-bit 图片都会使用 SVE2。未接入 MediaCodec 硬件编码。
-
-“仅保留更小”需要重试时，原生层复用已准备的主图和无损增益图码流，只重新编码主图。速度档位同时影响主图和无损增益图的编码搜索量，不缩小或降低增益图精度。缩放和像素转换使用最多四线程，图片之间保持顺序处理。
-
-## 使用与数据
-
-- 历史页按日期分组，右滑日期标题或点删除图标可删除当天同筛选条件下的记录（包括分页外记录），确认框显示实际数量。已保存到相册的图片保留。选择模式提供分享、删除以及仅针对未保存项的保存操作。
-- 首页参数只用于当前批次；设置页修改未来的默认参数。开始时锁定参数，支持先试转一张、仅保留更小结果。
-- 队列、参数快照和处理结果保存在 Room。系统中断后重试使用逐项检查点；停止批次会等待当前原生编码结束。
-- 待保存/保存失败成品保存在私有 `files/outputs`，不会按缓存期限清除；可重试保存、直接分享或导出到文件。保存相册采用任务 ID 去重。
-- 临时分享授权会复制到私有 `files/inputs`；可持久授权的图片直接通过 fd 读取。无引用的私有文件在超过 24 小时后清理。
-- 数据库升级自动迁移并保留历史与队列（现版本 v4）：v1→v2 迁移旧缓存成品，v3→v4 扩展 result 元数据列。已被旧版本删掉的文件无法恢复。
-- Android 8/9 使用“导出到文件”或分享；自动写入相册适用于 Android 10+。
-- 对比视图统一显示 SDR 主图，放大时最长边 4096 像素。HDR 显示效果由外部查看器、系统和屏幕支持决定。
-- 关闭位置保留会清除标准 EXIF GPS 目录及其数据；不是对任意私有 MakerNote 的取证级匿名化。
-
-## 验证范围
-
-见 [性能与历史页修复记录](docs/2026-10-08-performance-history.md) 和 [原有验收记录](docs/2026-10-06-validation.md)。真机 HDR 显示、长时间热稳态、超高像素压力测试仍需目标硬件验证。
-
-### 导出给 Apple「照片」
-
-HEIC 动态成品详情 → 更多 → **导出 Apple Live Photo…**，将 ZIP 交给配套的 Mac **UltraSlim Live** 导入器。PhotoKit 检查通过后可预览并导入「照片」，再通过 iCloud 照片同步到 iPhone。直接传输 Android 动态 HEIC 不会自动变为 Apple Live Photo。参见 [Mac 工具与使用说明](apple-live/README.md)。
+依赖来源与许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。发布源码、签名包和依赖源码的准备步骤见 [发布说明](docs/RELEASING.md)。

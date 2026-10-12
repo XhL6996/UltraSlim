@@ -43,6 +43,8 @@ class SettingsViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     fun setAutoSave(enabled: Boolean) = viewModelScope.launch { repo.setAutoSave(enabled) }
 
+    fun setAutoReplaceOriginals(v: Boolean) = viewModelScope.launch { repo.setAutoReplaceOriginals(v) }
+
     fun setOnlySmaller(v: Boolean) = viewModelScope.launch { repo.setOnlySmaller(v) }
     fun setKeepLocation(v: Boolean) = viewModelScope.launch { repo.setKeepLocation(v) }
     fun setAvifGainmapCompatibility(v: Boolean) = viewModelScope.launch { repo.setAvifGainmapCompatibility(v) }

@@ -1,5 +1,6 @@
 package app.ultraslim.ui.theme
 
+import androidx.compose.material3.MotionScheme
 import androidx.compose.animation.core.CubicBezierEasing
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.Spring
@@ -12,6 +13,7 @@ import androidx.compose.ui.unit.IntOffset
  * 原则：手势跟随零延迟；布局形变必动画；高频值（进度、时间）不动。
  */
 object Motion {
+    private val expressive = MotionScheme.expressive()
     /** 小型内容切换：按钮状态、图片 crossfade。 */
     const val Fast = 150
 
@@ -37,26 +39,24 @@ object Motion {
     val Linear = LinearEasing
 
     /** 列表项位置移动的轻弹簧（Modifier.animateItem 的 placementSpec）：不过冲，快速落位。 */
-    fun itemPlacement() = spring<IntOffset>(
-        dampingRatio = Spring.DampingRatioNoBouncy,
-        stiffness = Spring.StiffnessMediumLow,
-    )
+    fun itemPlacement() = expressive.defaultSpatialSpec<IntOffset>()
 
     /** 取消手势后的回弹（如预测性返回）：轻微弹性，不夸张。 */
-    fun settleBack() = spring<Float>(
-        dampingRatio = Spring.DampingRatioLowBouncy,
-        stiffness = Spring.StiffnessMediumLow,
-    )
+    fun settleBack() = expressive.fastSpatialSpec<Float>()
 
-    fun <T> fast() = tween<T>(Fast, easing = StandardEasing)
+    fun <T> fast() = expressive.fastEffectsSpec<T>()
 
-    fun <T> standard() = tween<T>(Standard, easing = StandardEasing)
+    fun <T> effects() = expressive.defaultEffectsSpec<T>()
 
-    fun <T> emphasized() = tween<T>(Emphasized, easing = StandardEasing)
+    fun <T> slowEffects() = expressive.slowEffectsSpec<T>()
+
+    fun <T> standard() = expressive.defaultSpatialSpec<T>()
+
+    fun <T> emphasized() = expressive.slowSpatialSpec<T>()
 
     fun <T> exit(durationMillis: Int = Standard) = tween<T>(durationMillis, easing = ExitEasing)
 
-    fun <T> accordion() = tween<T>(Accordion, easing = StandardEasing)
+    fun <T> accordion() = expressive.slowSpatialSpec<T>()
 
     fun <T> accordionExit() = tween<T>(AccordionExit, easing = ExitEasing)
 }

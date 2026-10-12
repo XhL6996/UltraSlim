@@ -16,11 +16,18 @@ import kotlinx.coroutines.launch
 
 class UltraSlimApp : Application() {
 
+    // Shared with legacy workers to prevent overlapping native encoders during an upgrade.
+    internal val conversionMutex = kotlinx.coroutines.sync.Mutex()
+    internal val conversionServiceRunning = kotlinx.coroutines.flow.MutableStateFlow(false)
+
+    private val replacementRecovery = kotlinx.coroutines.CompletableDeferred<Unit>()
+    suspend fun awaitReplacementRecovery() = replacementRecovery.await()
+
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     val database: AppDatabase by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         Room.databaseBuilder(this, AppDatabase::class.java, "ultraslim.db")
-            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4)
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5)
             .build()
     }
 
@@ -36,6 +43,9 @@ class UltraSlimApp : Application() {
         super.onCreate()
         createNotificationChannel()
         appScope.launch {
+            // A process death while the system dialog was open must not re-prompt indefinitely.
+            database.replacementDao().interruptRequests()
+            replacementRecovery.complete(Unit)
             conversionRepository.awaitReady()
             // Promote legacy cache outputs before any cleanup; never delete a referenced result.
             database.historyDao().all().forEach { entity ->

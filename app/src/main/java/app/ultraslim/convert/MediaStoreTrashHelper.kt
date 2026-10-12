@@ -1,11 +1,9 @@
 package app.ultraslim.convert
 
-import android.content.ContentUris
 import android.content.Context
 import android.content.IntentSender
 import android.net.Uri
 import android.os.Build
-import android.provider.DocumentsContract
 import android.provider.MediaStore
 
 object MediaStoreTrashHelper {
@@ -21,49 +19,13 @@ object MediaStoreTrashHelper {
     fun resolveToMediaStoreImageUri(context: Context, uri: Uri): Uri? {
         if (uri.scheme != "content") return null
 
-        val auth = uri.authority ?: return null
-
-        // 1. Direct MediaStore URI
-        if (auth == MediaStore.AUTHORITY || auth == "media") {
-            val path = uri.path ?: ""
-            if (path.contains("/images/media/")) {
-                val id = uri.lastPathSegment?.toLongOrNull()
-                if (id != null) {
-                    return ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
-                }
-            }
-            return uri
-        }
-
-        // 2. SAF Document URI from MediaDocumentsProvider
-        if (auth == "com.android.providers.media.documents") {
-            if (DocumentsContract.isDocumentUri(context, uri)) {
-                val docId = DocumentsContract.getDocumentId(uri)
-                if (docId.startsWith("image:")) {
-                    val id = docId.substringAfter("image:").toLongOrNull()
-                    if (id != null) {
-                        return ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, id)
-                    }
-                }
-            }
-        }
-
-        // 3. Photo Picker URI (com.android.providers.media.photopicker or similar)
-        if (auth.contains("photopicker") || uri.path?.contains("picker") == true) {
-            val lastId = uri.lastPathSegment?.toLongOrNull()
-            if (lastId != null) {
-                val candidate = ContentUris.withAppendedId(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, lastId)
-                val exists = runCatching {
-                    context.contentResolver.query(
-                        candidate,
-                        arrayOf(MediaStore.Images.Media._ID),
-                        null,
-                        null,
-                        null,
-                    )?.use { it.moveToFirst() }
-                }.getOrNull() == true
-                if (exists) return candidate
-            }
+        // Preserve the actual volume. A numeric picker id is not a MediaStore id.
+        if (uri.authority == MediaStore.AUTHORITY &&
+            uri.pathSegments.size == 4 && uri.pathSegments[1] == "images" &&
+            uri.pathSegments[2] == "media" && uri.lastPathSegment?.toLongOrNull() != null) return uri
+        if (Build.VERSION.SDK_INT >= 29 && uri.authority == "com.android.providers.media.documents") {
+            val mapped = runCatching { MediaStore.getMediaUri(context, uri) }.getOrNull()
+            if (mapped != null && mapped != uri) return resolveToMediaStoreImageUri(context, mapped)
         }
 
         return null
@@ -93,8 +55,7 @@ object MediaStoreTrashHelper {
             context.contentResolver.query(
                 target,
                 arrayOf(MediaStore.MediaColumns.IS_TRASHED),
-                null,
-                null,
+                android.os.Bundle().apply { putInt(MediaStore.QUERY_ARG_MATCH_TRASHED, MediaStore.MATCH_INCLUDE) },
                 null,
             )?.use { cursor ->
                 if (cursor.moveToFirst()) {

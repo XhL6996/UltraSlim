@@ -30,19 +30,21 @@ export JAVA_HOME=/opt/homebrew/opt/openjdk@17
 
 ```bash
 native/deps/build_deps.sh host                      # 主机依赖（一次性）
-cmake -G Ninja -S native -B build-host-test -DULTRASLIM_HOST_TEST=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-host-test --parallel
-build-host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [gainmapScale=4] [gainmapQuality=60]
+cmake -G Ninja -S native -B build/host-test -DULTRASLIM_HOST_TEST=ON -DCMAKE_BUILD_TYPE=Release
+cmake --build build/host-test --parallel
+build/host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [gainmapScale=4] [gainmapQuality=60]
 ```
 
-测试样本：`third_party/libultrahdr/tests/data/`（Apple gainmap JPEG、SDR JPEG）。Google 风格 Ultra HDR 样本可用 `build-uhdr-app/ultrahdr_app` 生成（先 `-m 1` 解码成 raw rgba1010102，再 `-m 0 -a 5` 编码）。
+测试样本：`tests/fixtures/libultrahdr/`（Apple gainmap JPEG、SDR JPEG）。Google 风格 Ultra HDR 样本可用 `build/uhdr-app/ultrahdr_app` 生成（先 `-m 1` 解码成 raw rgba1010102，再 `-m 0 -a 5` 编码）。
 
 ## 关键实现说明
 
 - **HEIC 相册兼容**：App 新任务默认开启 `heicGainmapCompatibility`，与 AVIF 开关独立；原生/JNI 默认 false，旧快照缺字段按 false。兼容增益图采用 HEVC YCbCr 4:2:0：RGB 转 BT.601 限定域，存在色度采样与舍入损失；单通道使用 full-range Y + 中性 U/V，保持灰度值。保留增益图尺寸和 HDR 参数，不能标为 RGB 逐值无损。严格关闭时仍用原有 GBR/mono；部分相册可能偏色或不识别 HDR。API 34+ 保存兼容 HEIC/AVIF 前必须由 `HdrOutputValidation` 确认平台读取增益图，否则不发布。主图边长 >4096 的 HEIC 也采用 2048 网格，解决单图解码失败；HEVC ICC 和 AV1 一样排在 NCLX 之后。tmap 的 HLG 标记不是本次偏色原因，不改为 PQ。
 - **AVIF 相册兼容**：App 新任务默认开启 `avifGainmapCompatibility`；用户显式关闭仍保留，原生/JNI 默认 false，旧快照缺字段按 false。彩色增益图转换为实际 BT.601 限定域 YCbCr 4:4:4，再 AOM 无损编码；不缩小或重建，不保证 RGB 逐值无损。关闭开关时保留 Identity GBR，但必须提示部分 Apple / Android 相册会偏色。不要将兼容模式标为逐值无损。
 - AVIF 增益图超过 512 像素时使用 512×512 HEIF grid，避免单包超出 MediaCodec 输入缓冲。主图任一边超过 4096 时用 2048×2048 grid，保持原分辨率、ICC/NCLX 和 EXIF。`patch_avif_grid.py` 同时修复 libheif grid 的内存 ISPE，防止后续 tmap 写成 0×0；分块不得复用单图 gainmap 缓存。
-- 奇数尺寸 HDR AVIF 主图使用 AOM 4:4:4，避免 4:2:0 偶数画布及仅主图 clap 使系统丢失 gainmap。通常尺寸仍用 SVT。该例外比 SVT 慢，但不裁剪、不缩放原图或 gainmap。
+- 奇数尺寸 HDR AVIF 主图，以及边长 >4096 的奇数尺寸 SDR AVIF，使用 AOM 4:4:4，避免 4:2:0 偶数画布及 clap：HDR 可能丢失 gainmap，SDR 分块图也会被 Android 系统拒绝解码。通常尺寸仍用 SVT。该例外比 SVT 慢，但不裁剪、不缩放原图或 gainmap。
+- SDR 保存前在 API 29+ 且系统声明支持目标 MIME 时经 `SdrOutputValidation` 做平台解码检查；失败不发布且保留原图。系统不支持的格式（如 JXL）不以平台解码失败否定文件有效性。
+- `tmap` compatible brand 只在 libheif 实际创建 tone-map item 时添加，禁止因编译了增益图功能就给所有 HEIC/AVIF 输出加此标记；纯 SDR 带 `tmap` 却没有 item 会被 libavif 拒绝，即使 Android ImageDecoder / Apple ImageIO 能读取也不代表封装合规。修改该补丁后必须重建 host 和 Android libheif。
 - App 在 API 34+ 保存兼容 HDR AVIF 前检查平台能否解码主图并读出 gainmap；失败不保存，保留原图并明确提示。API 34 以下没有此系统检查能力。平台可读不代表色彩逐值无损或所有相册视觉验收通过。
 
 - 两条转码路径，按请求自动选择：
@@ -84,4 +86,11 @@ build-host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 - Android HEIC 成品详情菜单导出 ZIP（AppleLiveBundle/AppleLiveExporter），包内为照片、原视频与时间点；本身不是 Apple Live Photo。保留 Android 原有动态导出。
 - `apple-live/` 是 macOS 15+ SwiftPM 配套工具，`script/build_and_run.sh` 构建/启动。只修改 HEIC 配对元数据，视频 AVFoundation passthrough 成 MOV；PhotoKit 识别后用户点击导入「照片」。不能把只传 ZIP/HEIC 到 iPhone 说成可自动成为 Live Photo。
 - HEIC 配对时不经过 ImageIO 重编码主图/增益图。改 iloc/iinf/iref 必须验证 Apple ImageIO；升级表版本可能导致 libheif 可读但 Apple 不可读。EXIF 序列化临时图的 1x1 尺寸必须还原。
-- 原图保留/兼容仍为默认；用户允许研究重建，但尚未切换。详见 docs/2026-10-10-ultrahdr-rebuild-evaluation.md 与 apple-live/README.md。
+- 原图保留/兼容仍为默认；用户允许研究重建，但尚未切换。详见 docs/reports/2026-10-10-ultrahdr-rebuild-evaluation.md 与 apple-live/README.md。
+
+## Expressive 与自适应 UI（2026-10-12）
+
+- UI 使用 MaterialExpressiveTheme，Material 3 1.5.0-beta01；BOM、Adaptive、Navigation 3 版本在 gradle/libs.versions.toml。工具链 AGP 9.4.1 / Gradle 9.6.0 / compileSdk 37.0，targetSdk 仍为 36；Kotlin 由 AGP 内置，勿重新应用 kotlin-android 插件。
+- AppRoot 的两个标签各自保存 NavBackStack，必须同时保留 saveable 与 ViewModel decorators。成品库的 ListDetailSceneStrategy 要接管单栏及双栏，避免窗口变化时重新挂载布局。
+- 页面内容使用 AdaptiveWorkspace 的实际约束和 FoldingFeature 坐标分区，不按设备型号或全局像素宽度猜布局。History 在 tabletop 使用单一导航场景，内部列表/统计避让横向铰链。
+- 改 UI 后跑 AdaptiveUiTest 与现有滑动/撤销/历史/自动替换回归。截图参考图变动须先检查差异。设计依据见 docs/design/2026-10-12-expressive-adaptive.md。

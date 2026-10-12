@@ -47,9 +47,9 @@ SHA-256：`6d8ef65cc451ee92f4141258a314498023e67ffa8e79e0d29b807ca74148b5fc`。
 
 ### 用户提供的实际 HEIC 已匹配
 
-用户随后提供 `/Users/linyusen/Downloads/Photo_20261009_150412_Slim_07ac9bea.HEIC`。SHA-256 为 `04ac34e7b64cfffa4f03266082a257ce5235d30e44b9d3a41d7eb6bda4854921`，与手机记录 247 拉取的文件完全一致（2,898,206 字节）。文件仍是 GBR 4:4:4/full-range/matrix 0 增益图，未经过 1.0.1 的 HEIC 兼容编码。当前可确认用户反馈的这一份是旧输出，不应以它判定新版兼容处理仍偏色，也不能把这次现象归咎于传输改变了文件或 iPhone 解码器。
+用户随后提供 `<local-samples>/Photo_20261009_150412_Slim_07ac9bea.HEIC`。SHA-256 为 `04ac34e7b64cfffa4f03266082a257ce5235d30e44b9d3a41d7eb6bda4854921`，与手机记录 247 拉取的文件完全一致（2,898,206 字节）。文件仍是 GBR 4:4:4/full-range/matrix 0 增益图，未经过 1.0.1 的 HEIC 兼容编码。当前可确认用户反馈的这一份是旧输出，不应以它判定新版兼容处理仍偏色，也不能把这次现象归咎于传输改变了文件或 iPhone 解码器。
 
-为排除文件混淆，已把同原图开启兼容生成、并通过本轮 Android/macOS 数值检查的输出另存为 `/Users/linyusen/Downloads/UltraSlim_1.0.1_HEIC_compatible_check.HEIC`（2,562,043 字节；SHA-256 `ccbc18b28f6f0d878379abb9593a9f5d405132f281e77702c321fddf499b2010`）。待用户以该明确命名的文件验证 iPhone「照片」显示。本轮无需再改动转码代码。
+为排除文件混淆，已把同原图开启兼容生成、并通过本轮 Android/macOS 数值检查的输出另存为 `<local-samples>/UltraSlim_1.0.1_HEIC_compatible_check.HEIC`（2,562,043 字节；SHA-256 `ccbc18b28f6f0d878379abb9593a9f5d405132f281e77702c321fddf499b2010`）。待用户以该明确命名的文件验证 iPhone「照片」显示。本轮无需再改动转码代码。
 
 ### 用户确认新版对照文件显示正确
 

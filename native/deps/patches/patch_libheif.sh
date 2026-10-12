@@ -18,6 +18,29 @@ s=s.replace('svt_config.level_of_parallelism = encoder->threads;', 'svt_config.l
 if p.read_text() != s: p.write_text(s)
 PYCODE
 
+# Advertise tmap only when a tone-map item is actually created. The original
+# experimental patch tagged every HEIC/AVIF, including SDR; libavif rejects
+# those files because the required tmap item is missing.
+python3 - "$SRC" <<'PYCODE'
+from pathlib import Path
+import sys
+root = Path(sys.argv[1]) / "libheif"
+p = root / "file.cc"
+s = p.read_text()
+old = "#if WITH_EXPERIMENTAL_GAIN_MAP\n      m_ftyp_box->add_compatible_brand(heif_brand2_tmap);\n#endif\n"
+assert s.count(old) in (0, 2), "unexpected unconditional tmap brand sites"
+s = s.replace(old, "")
+if p.read_text() != s: p.write_text(s)
+p = root / "context.cc"
+s = p.read_text()
+marker = "  // UltraSlim: tmap brand describes actual tone-map content, never plain SDR."
+if marker not in s:
+    anchor = "Error HeifContext::add_tmap_item(const std::vector<uint8_t>& data, heif_item_id& item_id) {\n"
+    assert s.count(anchor) == 1, "tone-map writer changed"
+    s = s.replace(anchor, anchor + marker + "\n  m_heif_file->get_ftyp_box()->add_compatible_brand(heif_brand2_tmap);\n")
+    p.write_text(s)
+PYCODE
+
 python3 "$PATCH_DIR/patch_gainmap_grid.py" "$SRC"
 python3 "$PATCH_DIR/patch_avif_grid.py" "$SRC"
 

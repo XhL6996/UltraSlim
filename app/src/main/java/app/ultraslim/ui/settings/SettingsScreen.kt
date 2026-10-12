@@ -2,66 +2,30 @@ package app.ultraslim.ui.settings
 
 import android.content.pm.PackageManager
 import android.os.Build
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
-import androidx.compose.material.icons.rounded.CleaningServices
-import androidx.compose.material.icons.rounded.Info
-import androidx.compose.material.icons.rounded.Security
-import androidx.compose.material.icons.rounded.Tune
-import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilterChip
-import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.SnackbarHost
-import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.material.icons.automirrored.rounded.ArrowForward
+import androidx.compose.material.icons.rounded.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import app.ultraslim.bridge.UltraHdrBridge
 import app.ultraslim.data.ThemeMode
 import app.ultraslim.model.OutputFormat
+import app.ultraslim.ui.adaptive.AdaptiveWorkspace
 import app.ultraslim.ui.appViewModelFactory
-import app.ultraslim.ui.components.CompressionPreset
-import app.ultraslim.ui.components.InfoRow
-import app.ultraslim.ui.components.PreviewCache
-import app.ultraslim.ui.components.SectionHeader
-import app.ultraslim.ui.components.SwitchRow
+import app.ultraslim.ui.components.*
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -73,6 +37,17 @@ fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+
+    var confirmAutoReplace by rememberSaveable { mutableStateOf(false) }
+    if (confirmAutoReplace) {
+        AlertDialog(
+            onDismissRequest = { confirmAutoReplace = false },
+            title = { Text("开启校验后自动替换？") },
+            text = { Text("将同时开启自动保存。仅当成品更小、完整保存且系统能解码，HDR 和实况视频均通过检查后，才将原图移入系统回收站。\n\n原图不会被直接覆盖；回收站保留期限由系统决定。Android 可能仍需确认，取消会保留原图。后台完成的任务将在回到应用后继续；不支持校验或无法定位原图时不替换。此选项只影响之后开始的任务。") },
+            confirmButton = { TextButton(onClick = { confirmAutoReplace = false; vm.setAutoReplaceOriginals(true) }) { Text("开启") } },
+            dismissButton = { TextButton(onClick = { confirmAutoReplace = false }) { Text("取消") } },
+        )
+    }
 
     val versionName = remember {
         runCatching {
@@ -89,245 +64,160 @@ fun SettingsScreen(onBack: () -> Unit) {
         runCatching { UltraHdrBridge.nativeVersion() }.getOrDefault("不可用")
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("设置", fontWeight = FontWeight.Bold) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
+    val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    val preferences: @Composable () -> Unit = {
+        SettingsGroup("默认转码偏好", "新任务采用此方案；首页可单独微调") {
+            Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.secondaryContainer) {
+                Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Icon(Icons.Rounded.Tune, null, Modifier.size(28.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("默认输出格式", style = MaterialTheme.typography.titleLarge)
+                            Text("${defaults.format.label} · 品质 ${defaults.quality} · ${defaults.resizePercent}% 尺寸",
+                                style = MaterialTheme.typography.bodySmall)
+                        }
                     }
+                    val formats = OutputFormat.entries
+                    ExpressiveChoiceRow(formats.map { it.label }, formats.indexOf(defaults.format),
+                        onSelect = { vm.setFormat(formats[it]) })
+                    val matchedPreset = CompressionPreset.entries.firstOrNull { it.matches(defaults) }
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        CompressionPreset.entries.forEach { preset ->
+                            FilterChip(selected = matchedPreset == preset, onClick = { vm.applyPreset(preset) },
+                                label = { Text(preset.label) },
+                                leadingIcon = if (matchedPreset == preset) ({ Icon(Icons.Rounded.Check, null, Modifier.size(18.dp)) }) else null)
+                        }
+                    }
+                }
+            }
+        }
+        SettingsGroup("保存与原图", "控制成品的去向，原图始终有据可查") {
+            SettingItem("仅保留更小结果", "成品没有变小时，保留原图", Icons.Rounded.Compress,
+                defaults.onlySmaller, vm::setOnlySmaller, 0, 3)
+            SettingItem("自动保存到相册", "完成后保存到 UltraSlim 相册", Icons.Rounded.PhotoLibrary,
+                defaults.autoSave, vm::setAutoSave, 1, 3)
+            SettingItem("校验后自动替换原图",
+                if (Build.VERSION.SDK_INT >= 30) "默认关闭；保存并校验后，将原图移入系统回收站" else "需要 Android 11 或更新版本",
+                Icons.Rounded.VerifiedUser, defaults.autoReplaceOriginals,
+                { if (it) confirmAutoReplace = true else vm.setAutoReplaceOriginals(false) }, 2, 3,
+                enabled = Build.VERSION.SDK_INT >= 30)
+        }
+        SettingsGroup("画面与兼容性") {
+            val compatibleFormat = defaults.format == OutputFormat.AVIF || defaults.format == OutputFormat.HEIC
+            if (compatibleFormat) {
+                val avif = defaults.format == OutputFormat.AVIF
+                SettingItem(if (avif) "AVIF 相册兼容模式" else "HEIC 相册兼容模式",
+                    if (avif) "彩色增益图转换存在舍入误差；关闭后部分相册可能偏色"
+                    else "保留增益图尺寸与 HDR 参数，彩色增益图色度有损；关闭后部分相册可能偏色或不显示 HDR",
+                    Icons.Rounded.HdrOn,
+                    if (avif) defaults.avifGainmapCompatibility else defaults.heicGainmapCompatibility,
+                    { if (avif) vm.setAvifGainmapCompatibility(it) else vm.setHeicGainmapCompatibility(it) }, 0, 2)
+            }
+            SettingItem("允许纯 SDR 转换", "也转换没有增益图的普通照片", Icons.Rounded.Image,
+                defaults.allowSdr, vm::setAllowSdr, if (compatibleFormat) 1 else 0, if (compatibleFormat) 2 else 1)
+        }
+        SettingsGroup("照片信息与隐私") {
+            SettingItem("保留 EXIF 信息", "保留拍摄器材、曝光参数与拍摄时间", Icons.Rounded.CameraAlt,
+                defaults.keepExif, vm::setKeepExif, 0, 2)
+            SettingItem("保留 GPS 位置信息", "关闭后移除照片中的地理坐标", Icons.Rounded.LocationOn,
+                defaults.keepLocation, vm::setKeepLocation, 1, 2)
+        }
+    }
+    val appearanceAndStorage: @Composable () -> Unit = {
+        SettingsGroup("外观与显示", "选一种看着舒服的配色") {
+            Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(18.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Icon(Icons.Rounded.Palette, null, tint = MaterialTheme.colorScheme.primary)
+                        Text("主题模式", style = MaterialTheme.typography.titleLarge)
+                    }
+                    ThemePalettePreview()
+                    val modes = listOf(ThemeMode.SYSTEM, ThemeMode.LIGHT, ThemeMode.DARK)
+                    ExpressiveChoiceRow(listOf("跟随系统", "浅色", "深色"), modes.indexOf(theme.themeMode),
+                        onSelect = { vm.setThemeMode(modes[it]) })
+                }
+            }
+            if (Build.VERSION.SDK_INT >= 31) SettingItem("动态取色", "让界面配色呼应你的壁纸", Icons.Rounded.ColorLens,
+                theme.dynamicColor, vm::setDynamicColor, 0, 1)
+        }
+        SettingsGroup("存储与维护") {
+            SegmentedListItem(onClick = {
+                PreviewCache.clear(context)
+                scope.launch { snackbar.showSnackbar("已清理缩略图与临时缓存") }
+            }, shapes = ListItemDefaults.segmentedShapes(0, 1),
+                leadingContent = { Icon(Icons.Rounded.CleaningServices, null, tint = MaterialTheme.colorScheme.primary) },
+                supportingContent = { Text("仅清理预览与临时缓存，不影响相册照片") },
+                trailingContent = { Icon(Icons.AutoMirrored.Rounded.ArrowForward, null) },
+                colors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+            ) { Text("立即清理", style = MaterialTheme.typography.titleMedium) }
+        }
+        Surface(shape = MaterialTheme.shapes.extraLarge, color = MaterialTheme.colorScheme.tertiaryContainer) {
+            Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Icon(Icons.Rounded.Security, null, Modifier.size(32.dp))
+                Text("照片留在你的设备", style = MaterialTheme.typography.titleLarge)
+                Text("全部离线处理，默认保留原图。主动开启自动替换或手动清理时，原图才会移入系统回收站。",
+                    style = MaterialTheme.typography.bodyMedium)
+            }
+        }
+        SettingsGroup("引擎与关于") {
+            Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                Column(Modifier.fillMaxWidth().padding(20.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text("UltraSlim", style = MaterialTheme.typography.titleLarge)
+                    Text("版本 $versionName", style = MaterialTheme.typography.bodyMedium)
+                    Text(nativeVersion, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+            }
+        }
+    }
+    Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        topBar = {
+            MediumFlexibleTopAppBar(
+                scrollBehavior = scrollBehavior,
+                colors = appTopBarColors(),
+                title = { Text("设置") },
+                subtitle = { Text("你的照片，你的偏好") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "返回") }
                 },
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
     ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            // ================= 1. 默认转码偏好 =================
-            SectionHeader("默认转码偏好", "新加入处理列表的照片将默认采用此方案")
-            Card(
-                shape = MaterialTheme.shapes.extraLarge,
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-            ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    Surface(
-                        color = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f),
-                        shape = RoundedCornerShape(12.dp),
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            Icon(Icons.Rounded.Tune, null, Modifier.size(18.dp), tint = MaterialTheme.colorScheme.primary)
-                            Text(
-                                "在这里设定的是全局默认模板；在首页中可随时针对单批照片微调。",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                    }
+        AdaptiveWorkspace(
+            modifier = Modifier.padding(innerPadding).consumeWindowInsets(innerPadding).padding(horizontal = 20.dp),
+            expandedWidth = 600.dp,
+            minPaneWidth = 280.dp * androidx.compose.ui.platform.LocalDensity.current.fontScale.coerceAtLeast(1f),
+            primary = { expanded ->
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(24.dp)) {
+                    preferences()
+                    if (!expanded) appearanceAndStorage()
+                    Spacer(Modifier.height(24.dp))
+                }
+            },
+            secondary = {
+                Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(top = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(24.dp)) {
+                    appearanceAndStorage()
+                    Spacer(Modifier.height(24.dp))
+                }
+            },
+        )
+    }
+}
 
-                    SectionHeader("默认输出格式")
-                    val formats = OutputFormat.entries
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        formats.forEachIndexed { index, format ->
-                            SegmentedButton(
-                                selected = defaults.format == format,
-                                onClick = { vm.setFormat(format) },
-                                shape = SegmentedButtonDefaults.itemShape(index = index, count = formats.size),
-                                icon = {},
-                                contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
-                            ) {
-                                Text(format.label, maxLines = 1, style = MaterialTheme.typography.labelMedium)
-                            }
-                        }
-                    }
-
-                    val matchedPreset = CompressionPreset.entries.firstOrNull { it.matches(defaults) }
-                    SectionHeader("默认画质档位", matchedPreset?.description ?: "自定义品质 ${defaults.quality}")
-                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CompressionPreset.entries.forEach { preset ->
-                            FilterChip(
-                                selected = matchedPreset == preset,
-                                onClick = { vm.applyPreset(preset) },
-                                label = { Text(preset.label) },
-                            )
-                        }
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
-
-                    SwitchRow(
-                        title = "仅保留更小结果",
-                        hint = "若压缩后体积未减小，自动保留原图，杜绝反向变大",
-                        checked = defaults.onlySmaller,
-                        onCheckedChange = vm::setOnlySmaller,
-                    )
-                    SwitchRow(
-                        title = "自动保存到相册",
-                        hint = "转换完成后自动写入系统 相册/UltraSlim 目录",
-                        checked = defaults.autoSave,
-                        onCheckedChange = vm::setAutoSave,
-                    )
-                    if (defaults.format == OutputFormat.AVIF) {
-                        SwitchRow(
-                            title = "AVIF 相册兼容模式",
-                            hint = "彩色增益图转换存在舍入误差；关闭后部分相册可能偏色",
-                            checked = defaults.avifGainmapCompatibility,
-                            onCheckedChange = vm::setAvifGainmapCompatibility,
-                        )
-                    }
-                    if (defaults.format == OutputFormat.HEIC) {
-                        SwitchRow(
-                            title = "HEIC 相册兼容模式",
-                            hint = "保留增益图尺寸与 HDR 参数，彩色增益图色度有损；关闭后部分相册可能偏色或不显示 HDR",
-                            checked = defaults.heicGainmapCompatibility,
-                            onCheckedChange = vm::setHeicGainmapCompatibility,
-                        )
-                    }
-                    SwitchRow(
-                        title = "保留 EXIF 信息",
-                        hint = "保留拍摄器材、曝光参数、拍摄时间等元数据",
-                        checked = defaults.keepExif,
-                        onCheckedChange = vm::setKeepExif,
-                    )
-                    SwitchRow(
-                        title = "保留 GPS 位置信息",
-                        hint = "关闭后将擦除照片拍摄地理坐标，保护隐私",
-                        checked = defaults.keepLocation,
-                        onCheckedChange = vm::setKeepLocation,
-                    )
-                    SwitchRow(
-                        title = "允许纯 SDR 转换",
-                        hint = "对没有 Gain Map 的普通照片也执行转码",
-                        checked = defaults.allowSdr,
-                        onCheckedChange = vm::setAllowSdr,
-                    )
+@Composable
+private fun ThemePalettePreview() {
+    val colors = MaterialTheme.colorScheme
+    Row(Modifier.fillMaxWidth().height(80.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        listOf(colors.primary, colors.secondary, colors.tertiary).forEachIndexed { index, color ->
+            Surface(Modifier.weight(if (index == 0) 2f else 1f).fillMaxHeight(),
+                shape = if (index == 0) RoundedCornerShape(40.dp) else RoundedCornerShape(20.dp), color = color) {
+                if (index == 0) Box(contentAlignment = Alignment.Center) {
+                    Icon(Icons.Rounded.AutoAwesome, null, Modifier.size(32.dp), tint = colors.onPrimary)
                 }
             }
-
-            // ================= 2. 外观与显示 =================
-            SectionHeader("外观与显示")
-            Card(
-                shape = MaterialTheme.shapes.extraLarge,
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-            ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp),
-                ) {
-                    SectionHeader("主题模式")
-                    val modes = listOf(ThemeMode.SYSTEM, ThemeMode.LIGHT, ThemeMode.DARK)
-                    val labels = listOf("跟随系统", "浅色", "深色")
-                    SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                        modes.forEachIndexed { index, mode ->
-                            SegmentedButton(
-                                selected = theme.themeMode == mode,
-                                onClick = { vm.setThemeMode(mode) },
-                                shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size),
-                            ) {
-                                Text(labels[index])
-                            }
-                        }
-                    }
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                        SwitchRow(
-                            title = "动态取色 (Monet)",
-                            hint = "从当前壁纸提取配色主题",
-                            checked = theme.dynamicColor,
-                            onCheckedChange = vm::setDynamicColor,
-                        )
-                    }
-                }
-            }
-
-            // ================= 3. 存储与维护 =================
-            SectionHeader("存储与维护")
-            Card(
-                shape = MaterialTheme.shapes.extraLarge,
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-            ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Column(modifier = Modifier.weight(1f).padding(end = 12.dp)) {
-                            Text("预览图与临时缓存", style = MaterialTheme.typography.bodyLarge)
-                            Text(
-                                "清理原图解码生成的缩略缓存，不影响相册中的任何图片",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
-                        OutlinedButton(onClick = {
-                            PreviewCache.clear(context)
-                            scope.launch { snackbar.showSnackbar("已清理缩略图与临时缓存") }
-                        }) {
-                            Icon(Icons.Rounded.CleaningServices, null, Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("立即清理")
-                        }
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
-
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Icon(Icons.Rounded.Security, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                        Text(
-                            "原图保护承诺：源文件始终在设备中安全保留，绝不直接覆盖或删除原图。",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-
-            // ================= 4. 引擎与关于 =================
-            SectionHeader("引擎与关于")
-            Card(
-                shape = MaterialTheme.shapes.extraLarge,
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
-            ) {
-                Column(
-                    modifier = Modifier.padding(20.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    InfoRow("应用版本", versionName)
-                    InfoRow("原生引擎架构", nativeVersion)
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Icon(Icons.Rounded.Info, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-                        Text(
-                            "全部转码与增益图处理完全在设备本地离线执行，无任何网络上传。",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-
-            Spacer(Modifier.height(24.dp))
         }
     }
 }

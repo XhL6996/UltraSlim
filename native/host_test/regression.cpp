@@ -14,6 +14,12 @@ static ultraslim::TranscodeResult convert(const std::string& in,const std::strin
   int a=open(in.c_str(),O_RDONLY),b=open(out.c_str(),O_CREAT|O_TRUNC|O_RDWR,0600);
   check(a>=0&&b>=0,"open fixture");auto r=ultraslim::transcodeImage(a,b,o);close(a);
   if(r.errorCode)fprintf(stderr,"%s\n",r.error.c_str());check(r.errorCode==0,"transcode");
+  if(o.outCodec==1 || o.outCodec==2) {
+    uint8_t header[256];const auto size=pread(b,header,sizeof(header),0);
+    check(size>=16,"read output brands");
+    check(heif_has_compatible_brand(header,static_cast<int>(size),"tmap")==static_cast<int>(r.hasGainMap),
+          "tmap brand must match actual gain-map content, including SDR");
+  }
   auto p=ultraslim::probeImage(b);check(p.errorCode==0,"output probe");
   check(r.width==p.width&&r.height==p.height&&r.gainmapWidth==p.gainmapWidth&&r.gainmapHeight==p.gainmapHeight,"reported dimensions match output");
   check(!r.inputHadGainMap||p.hasGainMap,"gain map retained");
@@ -60,6 +66,20 @@ int main(int argc,char**argv){
  for(int orientation: {6,8}){
   auto file=out+"/rotate-"+std::to_string(orientation)+".jpg";orientedJpeg(file,orientation);
   for(bool keep:{false,true}){o.keepExif=keep;auto r=convert(file,file+(keep?"-exif":"-none"),o);check(r.width==32&&r.height==64,"orientation normalized independently of EXIF retention");}
+ }
+ // Odd SDR AVIF grids must not rely on a padded canvas plus clap: Android
+ // rejects those files even though libheif and Apple ImageIO can decode them.
+ for (auto dimensions : {std::pair<int,int>{5001,513}, {513,5001}, {5002,513}}) {
+  const auto file=out+"/sdr-grid-"+std::to_string(dimensions.first)+"x"+std::to_string(dimensions.second)+".jpg";
+  orientedJpeg(file,1,dimensions.first,dimensions.second);
+  auto options=o;options.outCodec=2;options.speedLevel=2;
+  const auto target=file+".avif";auto result=convert(file,target,options);
+  check(!result.hasGainMap,"SDR grid stays SDR");
+  auto*ctx=heif_context_alloc();check(heif_context_read_from_file(ctx,target.c_str(),nullptr).code==heif_error_Ok,"read SDR grid");
+  heif_image_handle*h=nullptr;check(heif_context_get_primary_image_handle(ctx,&h).code==heif_error_Ok,"SDR grid handle");
+  check(heif_image_handle_get_ispe_width(h)==dimensions.first && heif_image_handle_get_ispe_height(h)==dimensions.second,
+        "SDR grid stores exact odd canvas without padding/clap");
+  heif_image_handle_release(h);heif_context_free(ctx);
  }
  // Exercise independent codec settings concurrently (TLS must not bleed across calls).
  std::thread a([&]{auto x=o;x.outCodec=1;x.speedLevel=0;convert(dir+"/apple_gainmap_new.jpg",out+"/parallel-a",x);});

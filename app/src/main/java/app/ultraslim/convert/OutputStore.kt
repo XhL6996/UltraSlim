@@ -28,6 +28,7 @@ object OutputStore {
     }
     suspend fun delete(app: UltraSlimApp, id: Long) = saveLock.withLock {
         val row = app.database.historyDao().byId(id) ?: return@withLock
+        app.database.replacementDao().delete(id)
         app.database.historyDao().deleteById(id)
         if (!row.outputUri.startsWith("content://")) withContext(Dispatchers.IO) { File(row.outputUri).delete() }
         row.taskId?.let { app.conversionRepository.remove(it) }

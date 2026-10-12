@@ -43,8 +43,8 @@ private val DarkColors = darkColorScheme(
     onSurfaceVariant = Color(0xFFBBC7B7), outlineVariant = Color(0xFF3E4A40),
 )
 private val AppShapes = Shapes(
-    extraSmall = RoundedCornerShape(6.dp), small = RoundedCornerShape(10.dp),
-    medium = RoundedCornerShape(16.dp), large = RoundedCornerShape(22.dp), extraLarge = RoundedCornerShape(28.dp),
+    extraSmall = RoundedCornerShape(8.dp), small = RoundedCornerShape(12.dp),
+    medium = RoundedCornerShape(16.dp), large = RoundedCornerShape(24.dp), extraLarge = RoundedCornerShape(32.dp),
 )
 private val AppTypography = Typography(
     headlineLarge = TextStyle(fontSize = 34.sp, lineHeight = 42.sp, fontWeight = FontWeight.Bold, letterSpacing = (-0.5).sp),
@@ -70,7 +70,8 @@ fun AppTheme(themeMode: ThemeMode = ThemeMode.SYSTEM, dynamicColor: Boolean = fa
                 android.graphics.Color.TRANSPARENT, android.graphics.Color.TRANSPARENT,
             ) { dark }
             activity.enableEdgeToEdge(statusBarStyle = style, navigationBarStyle = style)
+            if (Build.VERSION.SDK_INT >= 29) activity.window.isNavigationBarContrastEnforced = false
         }
     }
-    MaterialTheme(colorScheme = colors, shapes = AppShapes, typography = AppTypography, content = content)
+    MaterialExpressiveTheme(colorScheme = colors, motionScheme = MotionScheme.expressive(), shapes = AppShapes, typography = AppTypography, content = content)
 }

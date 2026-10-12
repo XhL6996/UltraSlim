@@ -1,10 +1,18 @@
 package app.ultraslim.ui.detail
 
+import app.ultraslim.ui.components.appTopBarColors
+import app.ultraslim.ui.adaptive.AdaptiveWorkspace
+import androidx.compose.material3.adaptive.navigation3.LocalListDetailSceneScope
+import androidx.compose.material3.adaptive.ExperimentalMaterial3AdaptiveApi
+import androidx.compose.material3.adaptive.layout.ListDetailPaneScaffoldRole
+import androidx.compose.material3.adaptive.layout.PaneAdaptedValue
+
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.material3.Slider
+import androidx.compose.material3.rememberSliderState
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.drawscope.clipRect
@@ -84,6 +92,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -128,7 +137,7 @@ import app.ultraslim.util.formatSavedPercent
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3AdaptiveApi::class, ExperimentalMaterial3Api::class)
 @Composable
 fun DetailScreen(historyId: Long, onBack: () -> Unit) {
     val vm: DetailViewModel = viewModel(factory = appViewModelFactory { DetailViewModel(it, historyId) })
@@ -171,10 +180,10 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
+            TopAppBar(colors = appTopBarColors(),
                 title = { Text("转换结果", fontWeight = FontWeight.Bold) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    if (LocalListDetailSceneScope.current?.scaffoldTransitionScope?.scaffoldStateTransition?.targetState?.let { it[ListDetailPaneScaffoldRole.List] == PaneAdaptedValue.Expanded && it[ListDetailPaneScaffoldRole.Detail] == PaneAdaptedValue.Expanded } != true) IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "返回")
                     }
                 },
@@ -255,7 +264,7 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                                 onClick = { vm.saveToAlbum() },
                                 enabled = !state.saving,
                                 modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                                shape = MaterialTheme.shapes.medium,
+                                shapes = ButtonDefaults.shapes(),
                             ) {
                                 Icon(Icons.Rounded.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
@@ -265,7 +274,7 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                             Button(
                                 onClick = { viewInAlbum(context, entity) },
                                 modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                                shape = MaterialTheme.shapes.medium,
+                                shapes = ButtonDefaults.shapes(),
                             ) {
                                 Icon(Icons.Rounded.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
@@ -280,7 +289,7 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                             },
                             enabled = !state.saving,
                             modifier = Modifier.weight(1f).heightIn(min = 48.dp),
-                            shape = MaterialTheme.shapes.medium,
+                            shapes = ButtonDefaults.shapes(),
                         ) {
                             Icon(Icons.Rounded.Share, contentDescription = null, modifier = Modifier.size(18.dp))
                             Spacer(Modifier.width(8.dp))
@@ -348,13 +357,7 @@ private fun DetailContent(
 ) {
     val saved = entity.outputUri.startsWith("content://")
 
-    Column(
-        modifier = modifier
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(horizontal = 20.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
+    val overview: @Composable () -> Unit = {
         Card(
             shape = RoundedCornerShape(20.dp),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
@@ -392,7 +395,7 @@ private fun DetailContent(
                     Column(modifier = Modifier.weight(1f)) {
                         Text("相册空间一键释放", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.SemiBold)
                         Text(
-                            "高画质瘦身图已就绪。原图可安全移入系统相册回收站，释放 ${formatBytes(entity.inputBytes)}（30天内可在系统相册随时恢复）。",
+                            "高画质瘦身图已就绪。原图可安全移入系统相册回收站，释放 ${formatBytes(entity.inputBytes)}（可在系统回收站恢复，期限由系统决定）。",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
@@ -420,7 +423,7 @@ private fun DetailContent(
                         modifier = Modifier.size(20.dp),
                     )
                     Text(
-                        "原图已移入系统相册回收站，相册已减负 ${formatBytes(entity.inputBytes)}（30天内可恢复）",
+                        "原图已移入系统相册回收站，相册已减负 ${formatBytes(entity.inputBytes)}（恢复期限以系统回收站为准）",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -428,10 +431,8 @@ private fun DetailContent(
             }
         }
 
-        SectionHeader("画质细节对比", "拖动分界线查看对比；双击 2.5× 放大；双指可捏合缩放")
-        Text("当前页面为 SDR 预览；完整 HDR 高动态亮度请在系统相册中查看。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-        HeroCompareCard(entity = entity)
-
+    }
+    val metadata: @Composable () -> Unit = {
         if (!saved) {
             Surface(
                 shape = RoundedCornerShape(12.dp),
@@ -464,8 +465,29 @@ private fun DetailContent(
         }
         MetadataCard(entity)
 
-        Spacer(Modifier.height(16.dp))
     }
+    AdaptiveWorkspace(
+        modifier = modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+        primary = { expanded ->
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                if (!expanded) overview()
+        SectionHeader("画质细节对比", "拖动分界线查看对比；双击 2.5× 放大；双指可捏合缩放")
+        Text("当前页面为 SDR 预览；完整 HDR 高动态亮度请在系统相册中查看。", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        HeroCompareCard(entity = entity)
+
+
+                if (!expanded) metadata()
+                Spacer(Modifier.height(16.dp))
+            }
+        },
+        secondary = {
+            Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                overview()
+                metadata()
+                Spacer(Modifier.height(16.dp))
+            }
+        },
+    )
 }
 
 @Composable
@@ -660,11 +682,12 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
         }
 
         if (compareMode == 0) {
+            val sliderState = rememberSliderState(value = fraction)
+            SideEffect { sliderState.value = fraction }
             Slider(
                 modifier = Modifier.padding(horizontal = 16.dp).semantics { contentDescription = "原图与成品比较比例" },
-                value = fraction,
+                state = sliderState,
                 onValueChange = { fraction = it },
-                valueRange = 0f..1f,
             )
         } else {
             Row(

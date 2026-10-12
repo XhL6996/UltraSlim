@@ -182,7 +182,7 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     fun onSelectedOriginalsTrashed(count: Int) {
-        _events.tryEmit("已将 $count 张原图移至系统相册回收站（30天内可恢复）")
+        _events.tryEmit("已将 $count 张原图移至系统相册回收站（恢复期限以系统回收站为准）")
     }
 
     fun clearAll() {

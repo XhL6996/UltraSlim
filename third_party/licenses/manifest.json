@@ -1,0 +1,163 @@
+[
+  {
+    "path": "third_party/licenses/libjpeg-turbo/LICENSE.md",
+    "dependency": "libjpeg-turbo",
+    "version": "3.1.1",
+    "upstream_path": "LICENSE.md",
+    "sha256": "96f5b328adbb78eeaaec6980d73fd558cb1e4d62560ed615646bc3cf5e532430"
+  },
+  {
+    "path": "third_party/licenses/libjpeg-turbo/README.ijg",
+    "dependency": "libjpeg-turbo",
+    "version": "3.1.1",
+    "upstream_path": "README.ijg",
+    "sha256": "75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6"
+  },
+  {
+    "path": "third_party/licenses/x265/COPYING",
+    "dependency": "x265",
+    "version": "4.1",
+    "upstream_path": "COPYING",
+    "sha256": "d8afb1bcc7a2cfc603683b168d6987ef0a48e59e0da3693bf55c5d33b67e2b49"
+  },
+  {
+    "path": "third_party/licenses/aom/LICENSE",
+    "dependency": "aom",
+    "version": "3.12.1",
+    "upstream_path": "LICENSE",
+    "sha256": "4764a286d8b2faeaf42f4418e7d7a28d58fc8fd4d00a3d0a7f44b0a4099de7f2"
+  },
+  {
+    "path": "third_party/licenses/aom/PATENTS",
+    "dependency": "aom",
+    "version": "3.12.1",
+    "upstream_path": "PATENTS",
+    "sha256": "661fb8e504744e95587b556b94a58343448300606a41bea8c7a9b97125696e61"
+  },
+  {
+    "path": "third_party/licenses/aom/AUTHORS",
+    "dependency": "aom",
+    "version": "3.12.1",
+    "upstream_path": "AUTHORS",
+    "sha256": "b1314d8a827bb8ce2da5bd9a0991e227a53b86a6b208442e60a09a4ece7e6543"
+  },
+  {
+    "path": "third_party/licenses/svt-av1/LICENSE.md",
+    "dependency": "svt-av1",
+    "version": "3.0.0",
+    "upstream_path": "LICENSE.md",
+    "sha256": "0acc2fcb27472bdc9aaf8b71f37055bbdac4f54671b7d922f241bd7fcd0dd3e6"
+  },
+  {
+    "path": "third_party/licenses/svt-av1/LICENSE-BSD2.md",
+    "dependency": "svt-av1",
+    "version": "3.0.0",
+    "upstream_path": "LICENSE-BSD2.md",
+    "sha256": "c582fcbeb9cf972a60d298bfaf41dc5adff2dd14208946edcb9bb56a281e8438"
+  },
+  {
+    "path": "third_party/licenses/svt-av1/PATENTS.md",
+    "dependency": "svt-av1",
+    "version": "3.0.0",
+    "upstream_path": "PATENTS.md",
+    "sha256": "20678ab10402659106dc4c147c97b2a6e94b5c0695415e15a8f195ebc3547922"
+  },
+  {
+    "path": "third_party/licenses/svt-av1/third_party/fastfeat/LICENSE",
+    "dependency": "svt-av1",
+    "version": "3.0.0",
+    "upstream_path": "third_party/fastfeat/LICENSE",
+    "sha256": "043dcfd059386f9facd376351b2bd79325778744aa442177390cdfcca54babed"
+  },
+  {
+    "path": "third_party/licenses/svt-av1/third_party/safestringlib/LICENSE",
+    "dependency": "svt-av1",
+    "version": "3.0.0",
+    "upstream_path": "third_party/safestringlib/LICENSE",
+    "sha256": "c0f99a208799ca20c9ccf31a30533d49334eb458dca5a3d14f9afe3e884e5d7d"
+  },
+  {
+    "path": "third_party/licenses/dav1d/COPYING",
+    "dependency": "dav1d",
+    "version": "1.5.1",
+    "upstream_path": "COPYING",
+    "sha256": "b327887de263238deaa80c34cdd2ff3e0ba1d35db585ce14a37ce3e74ee389e9"
+  },
+  {
+    "path": "third_party/licenses/dav1d/doc/PATENTS",
+    "dependency": "dav1d",
+    "version": "1.5.1",
+    "upstream_path": "doc/PATENTS",
+    "sha256": "335eca574598bf4ca181b12f708d6669e5a5e78c8e1513e5b35fa1f03901484b"
+  },
+  {
+    "path": "third_party/licenses/libde265/COPYING",
+    "dependency": "libde265",
+    "version": "1.0.16",
+    "upstream_path": "COPYING",
+    "sha256": "02cc1585a20677992e0ba578fa692635dc193735f2691dc81de924b51c4e8020"
+  },
+  {
+    "path": "third_party/licenses/libde265/AUTHORS",
+    "dependency": "libde265",
+    "version": "1.0.16",
+    "upstream_path": "AUTHORS",
+    "sha256": "0cc86790616c939cbf1d422790160fde068205b9771e687bd8572afe417a0c8f"
+  },
+  {
+    "path": "third_party/licenses/libheif/COPYING",
+    "dependency": "libheif",
+    "version": "4a3f74bc593ebfc29becc1ed5dd0a61cc66d40e1",
+    "upstream_path": "COPYING",
+    "sha256": "fa81ce652315b013359d6e8e4744335f31a50c7c192907176d3632f78a3b4596"
+  },
+  {
+    "path": "third_party/licenses/libjxl/LICENSE",
+    "dependency": "libjxl",
+    "version": "0.11.1",
+    "upstream_path": "LICENSE",
+    "sha256": "8405932022a556380c2d8c272eff154a923feb197233f348ce5f7334fb0a5ede"
+  },
+  {
+    "path": "third_party/licenses/libjxl/PATENTS",
+    "dependency": "libjxl",
+    "version": "0.11.1",
+    "upstream_path": "PATENTS",
+    "sha256": "91915f8ae056a68a3c5bdf05d9f6f78bb6903e27a8ca3a8434c9e4ac87300575"
+  },
+  {
+    "path": "third_party/licenses/libjxl/AUTHORS",
+    "dependency": "libjxl",
+    "version": "0.11.1",
+    "upstream_path": "AUTHORS",
+    "sha256": "00be88a8e3275f8f52a147ecede84c11900fd3180f88478d7cc9f55acabf3a35"
+  },
+  {
+    "path": "third_party/licenses/libjxl/third_party/brotli/LICENSE",
+    "dependency": "libjxl",
+    "version": "0.11.1",
+    "upstream_path": "third_party/brotli/LICENSE",
+    "sha256": "3d180008e36922a4e8daec11c34c7af264fed5962d07924aea928c38e8663c94"
+  },
+  {
+    "path": "third_party/licenses/libjxl/third_party/highway/LICENSE",
+    "dependency": "libjxl",
+    "version": "0.11.1",
+    "upstream_path": "third_party/highway/LICENSE",
+    "sha256": "43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1"
+  },
+  {
+    "path": "third_party/licenses/libjxl/third_party/highway/LICENSE-BSD3",
+    "dependency": "libjxl",
+    "version": "0.11.1",
+    "upstream_path": "third_party/highway/LICENSE-BSD3",
+    "sha256": "d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2"
+  },
+  {
+    "path": "third_party/licenses/libjxl/third_party/skcms/LICENSE",
+    "dependency": "libjxl",
+    "version": "0.11.1",
+    "upstream_path": "third_party/skcms/LICENSE",
+    "sha256": "e59bb5c5c6ba426a9ac4ba9fe667ad14c5166b12aa25be8af1d122b14fbe2e36"
+  }
+]

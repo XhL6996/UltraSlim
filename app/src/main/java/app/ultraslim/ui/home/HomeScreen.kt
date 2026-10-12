@@ -1,5 +1,6 @@
 package app.ultraslim.ui.home
 
+import app.ultraslim.ui.components.appTopBarColors
 import android.Manifest
 import android.os.Build
 import android.content.pm.PackageManager
@@ -37,7 +38,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.graphics.Color
@@ -51,12 +55,14 @@ import app.ultraslim.data.ConversionDefaults
 import app.ultraslim.data.summary
 import app.ultraslim.ui.appViewModelFactory
 import app.ultraslim.ui.components.*
+import app.ultraslim.ui.adaptive.AdaptiveWorkspace
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import app.ultraslim.ui.theme.Motion
 import app.ultraslim.util.*
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     val vm: HomeViewModel = viewModel(factory = appViewModelFactory { HomeViewModel(it) })
@@ -66,7 +72,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     val stopping by vm.stopping.collectAsStateWithLifecycle()
     val importing by vm.importing.collectAsStateWithLifecycle()
     val importProgress by vm.importProgress.collectAsStateWithLifecycle()
-    val railLayout = androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.width / androidx.compose.ui.platform.LocalDensity.current.density >= 840
+    val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
     val pendingItems = remember(state.queue) {
         state.queue.filter { it.status != QueueStatus.DONE && it.status != QueueStatus.SKIPPED && it.status != QueueStatus.FAILED }
     }
@@ -94,9 +100,10 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     var optionsExpanded by rememberSaveable { mutableStateOf(false) }
     var showAlbums by rememberSaveable { mutableStateOf(false) }
     var hdrOnly by rememberSaveable { mutableStateOf(false) }
+    var ignoreLivePhotos by rememberSaveable { mutableStateOf(false) }
     val albums by vm.albums.collectAsStateWithLifecycle()
     val loadingAlbums by vm.loadingAlbums.collectAsStateWithLifecycle()
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { vm.addItems(it) }
+    val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { vm.addItems(it, ignoreLivePhotos) }
     val pick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { vm.startConversion() }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
@@ -116,6 +123,21 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     var lastTrashCount by remember { mutableIntStateOf(0) }
     val trashableOriginals by vm.trashableOriginalUris.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
+    val pendingUndo = remember { mutableListOf<app.ultraslim.convert.ConversionRepository.RemovedItem>() }
+    var undoJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    fun removeWithUndo(item: QueueItem) {
+        val removed = vm.removeItem(item.id) ?: return
+        pendingUndo += removed
+        undoJob?.cancel()
+        undoJob = scope.launch {
+            snackbar.currentSnackbarData?.dismiss()
+            val message = if (pendingUndo.size == 1) "已移除「${item.displayName}」" else "已移除 ${pendingUndo.size} 张照片"
+            if (snackbar.showSnackbar(message, actionLabel = "撤销", duration = SnackbarDuration.Short) == SnackbarResult.ActionPerformed) {
+                pendingUndo.asReversed().forEach(vm::restoreItem)
+            }
+            pendingUndo.clear()
+        }
+    }
     val trashBatchLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartIntentSenderForResult()) { result ->
         if (result.resultCode == android.app.Activity.RESULT_OK) {
             vm.onBatchOriginalsTrashed(lastTrashCount)
@@ -186,29 +208,10 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             onResetToDefault = vm::resetToDefault,
         )
     }
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        "UltraSlim",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                    )
-                },
-                actions = {
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Rounded.Settings, contentDescription = "设置")
-                    }
-                },
-            )
-        },
-        snackbarHost = { SnackbarHost(snackbar) },
-        contentWindowInsets = WindowInsets(0,0,0,0),
-        bottomBar = {
+    val actionBar: @Composable () -> Unit = {
             AnimatedVisibility(
                 visible = state.queue.isNotEmpty(),
-                enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.standard()),
+                enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.effects()),
                 exit = slideOutVertically(Motion.exit()) { it } + fadeOut(Motion.exit()),
             ) {
                 Surface(
@@ -220,7 +223,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .then(if (railLayout) Modifier.navigationBarsPadding() else Modifier)
+                            .navigationBarsPadding()
                             .padding(horizontal = 16.dp, vertical = 10.dp),
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -251,8 +254,8 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             onClick = { if (state.isConverting) vm.cancelConversion() else start() },
                             modifier = Modifier
                                 .weight(1f)
-                                .heightIn(min = 48.dp),
-                            shape = RoundedCornerShape(12.dp),
+                                .heightIn(min = 56.dp),
+                            shapes = ButtonDefaults.shapes(),
                             enabled = !stopping && (state.isConverting || state.convertibleCount > 0),
                         ) {
                             AnimatedContent(
@@ -290,14 +293,37 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                 }
             }
         }
+    Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
+        topBar = {
+            TopAppBar(colors = appTopBarColors(),
+                scrollBehavior = scrollBehavior,
+                title = {
+                    Text(
+                        "UltraSlim",
+                        style = MaterialTheme.typography.titleLarge,
+                        fontWeight = FontWeight.Bold,
+                    )
+                },
+                actions = {
+                    IconButton(onClick = onOpenSettings) {
+                        Icon(Icons.Rounded.Settings, contentDescription = "设置")
+                    }
+                },
+            )
+        },
+        snackbarHost = { SnackbarHost(snackbar) },
+        contentWindowInsets = WindowInsets(0,0,0,0),
+
     ) { padding ->
-        BoxWithConstraints(Modifier.fillMaxSize().padding(padding)) {
-            val wide = maxWidth >= 840.dp
-            Row(Modifier.fillMaxSize()) {
+        AdaptiveWorkspace(
+            modifier = Modifier.padding(padding).consumeWindowInsets(padding).padding(horizontal = 12.dp),
+            primary = { wide ->
+            Column(Modifier.fillMaxSize()) {
                 LazyColumn(
-                    Modifier.weight(1f).fillMaxHeight(),
+                    Modifier.weight(1f).fillMaxWidth().testTag("queue-list"),
                     contentPadding = PaddingValues(
-                        start = 20.dp, top = 20.dp, end = 20.dp,
+                        start = 8.dp, top = 8.dp, end = 8.dp,
                         // rail 模式且队列为空时没有底部操作栏，补上导航条避让。
                         // 底部操作栏隐藏（队列为空）时一律补导航条避让，不限分栏模式。
                         bottom = 20.dp + if (state.queue.isEmpty()) WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding() else 0.dp,
@@ -306,7 +332,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                     item(key = "import-hero") {
                         AnimatedVisibility(
                             visible = state.queue.isEmpty(),
-                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.effects()),
                             exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
                         ) {
                             ImportHero(
@@ -314,13 +340,18 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                 callbacks = callbacks,
                                 onPick = pick,
                                 onAlbums = openAlbums,
+                                showOptions = !wide,
+                                importFilter = { IgnoreLivePhotosOption(ignoreLivePhotos, { ignoreLivePhotos = it }, enabled = !importing && !scanning) },
                             )
                         }
+                    }
+                    if (state.queue.isNotEmpty()) item(key = "import-filter") {
+                        IgnoreLivePhotosOption(ignoreLivePhotos, { ignoreLivePhotos = it }, enabled = !importing && !scanning)
                     }
                     item {
                         AnimatedVisibility(
                             visible = scanning || importing,
-                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.effects()),
                             exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
                         ) {
                             Surface(
@@ -332,7 +363,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                     verticalAlignment = Alignment.CenterVertically,
                                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
                                 ) {
-                                    CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                                    LoadingIndicator(Modifier.size(36.dp))
                                     Spacer(Modifier.width(12.dp))
                                     Text(if (scanning) scanProgress else importProgress, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium)
                                     if (scanning) TextButton(onClick = vm::cancelScan) { Text("停止") }
@@ -345,7 +376,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                         item(key = "scheme-card") {
                             AnimatedVisibility(
                                 visible = state.queue.isNotEmpty(),
-                                enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                                enter = expandVertically(Motion.standard()) + fadeIn(Motion.effects()),
                                 exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
                             ) {
                                 OutputSchemeCard(
@@ -362,7 +393,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                     item {
                         AnimatedVisibility(
                             visible = state.queue.isNotEmpty(),
-                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.effects()),
                             exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
                         ) {
                             Row(
@@ -461,15 +492,11 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                 QueueRow(
                                     item,
                                     onRemove = {
-                                        vm.removeItem(item.id)
-                                        scope.launch {
-                                            val r = snackbar.showSnackbar("已移除「${item.displayName}」", actionLabel = "撤销", duration = SnackbarDuration.Short)
-                                            if (r == SnackbarResult.ActionPerformed) vm.restoreItems(listOf(item))
-                                        }
+                                        removeWithUndo(item)
                                     },
                                     onRetry = { vm.retryItem(item.id) },
                                     onOpen = { item.historyId?.let(onOpenDetail) },
-                                    modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast))
+                                    modifier = Modifier.testTag("queue-row-${item.id}").animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast))
                                 )
                             }
                         }
@@ -542,51 +569,49 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                 QueueRow(
                                     item,
                                     onRemove = {
-                                        vm.removeItem(item.id)
-                                        scope.launch {
-                                            val r = snackbar.showSnackbar("已移除「${item.displayName}」", actionLabel = "撤销", duration = SnackbarDuration.Short)
-                                            if (r == SnackbarResult.ActionPerformed) vm.restoreItems(listOf(item))
-                                        }
+                                        removeWithUndo(item)
                                     },
                                     onRetry = { vm.retryItem(item.id) },
                                     onOpen = { item.historyId?.let(onOpenDetail) },
-                                    modifier = Modifier.animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast))
+                                    modifier = Modifier.testTag("queue-row-${item.id}").animateItem(fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast))
                                 )
                             }
                         }
                     }
                 }
-                // 参数列常驻（转换中仅锁定并提示），不再随转换启停整列消失。
-                AnimatedVisibility(
-                    visible = wide,
-                    enter = expandHorizontally(Motion.emphasized()) + fadeIn(Motion.emphasized()),
-                    exit = shrinkHorizontally(Motion.exit(Motion.Emphasized)) + fadeOut(Motion.exit(Motion.Emphasized)),
-                ) {
-                    Column(Modifier.width(360.dp).fillMaxHeight().verticalScroll(rememberScrollState()).padding(16.dp)) {
-                        AnimatedVisibility(
-                            visible = state.isConverting,
-                            enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
-                            exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
-                        ) {
-                            Surface(shape = MaterialTheme.shapes.medium, color = MaterialTheme.colorScheme.surfaceContainerHighest, modifier = Modifier.fillMaxWidth()) {
-                                Row(Modifier.padding(horizontal = 12.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    Icon(Icons.Rounded.Lock, null, Modifier.size(14.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    Text("转换中 · 参数已锁定", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                }
-                            }
-                        }
-                        Text("本次参数", style = MaterialTheme.typography.titleLarge)
+            if (!wide) actionBar()
+        }
+        },
+        secondary = {
+            Surface(Modifier.fillMaxSize(), shape = MaterialTheme.shapes.extraLarge,
+                color = MaterialTheme.colorScheme.surfaceContainerLow) {
+                Column(Modifier.fillMaxSize()) {
+                    Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(20.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text("本次参数", style = MaterialTheme.typography.headlineSmall)
+                        Text(if (state.isConverting) "转换中 · 参数已锁定" else "选择输出方案，随时开始转换",
+                            style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         ConversionOptionsPanel(state.defaults, callbacks, enabled = !state.isConverting)
                     }
+                    actionBar()
                 }
             }
-        }
-    }
+        },
+    )
+}
     if (showAlbums) {
-        ModalBottomSheet(onDismissRequest = { showAlbums = false }) {
+        ModalBottomSheet(
+            onDismissRequest = { showAlbums = false },
+            sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
+            sheetGesturesEnabled = false,
+            dragHandle = null,
+        ) {
             var albumTab by remember { mutableIntStateOf(0) }
-            Column(Modifier.padding(horizontal = 20.dp, vertical = 12.dp)) {
-                Text("导入照片", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+            Column(Modifier.fillMaxHeight(0.9f).padding(horizontal = 20.dp, vertical = 12.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text("导入照片", Modifier.weight(1f), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold)
+                    TextButton(onClick = { showAlbums = false }) { Text("关闭") }
+                }
                 Spacer(Modifier.height(12.dp))
 
                 PrimaryTabRow(
@@ -609,6 +634,9 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
 
                 Spacer(Modifier.height(16.dp))
 
+                IgnoreLivePhotosOption(ignoreLivePhotos, { ignoreLivePhotos = it }, enabled = !importing && !scanning)
+                Spacer(Modifier.height(8.dp))
+
                 if (albumTab == 0) {
                     Row(
                         Modifier.fillMaxWidth().padding(bottom = 8.dp),
@@ -629,9 +657,9 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             Text("未读取到任何相册，请检查照片访问权限", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     } else {
-                        LazyColumn(Modifier.heightIn(max = 420.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        LazyColumn(Modifier.weight(1f).testTag("album-list"), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                             items(albums, key = { it.id }) { album ->
-                                val action = { showAlbums = false; if (hdrOnly) vm.scanAlbumForHdr(album) else vm.importAlbum(album) }
+                                val action = { showAlbums = false; if (hdrOnly) vm.scanAlbumForHdr(album, ignoreLivePhotos) else vm.importAlbum(album, ignoreLivePhotos) }
                                 Surface(
                                     shape = MaterialTheme.shapes.medium,
                                     color = MaterialTheme.colorScheme.surfaceContainerLow,
@@ -658,7 +686,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                     Card(
                         shape = RoundedCornerShape(20.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f)),
-                        modifier = Modifier.fillMaxWidth(),
+                        modifier = Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()),
                     ) {
                         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -676,7 +704,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             Button(
-                                onClick = { showAlbums = false; vm.scanLibraryForHdr() },
+                                onClick = { showAlbums = false; vm.scanLibraryForHdr(ignoreLivePhotos) },
                                 modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
                                 shape = MaterialTheme.shapes.medium,
                             ) {
@@ -696,7 +724,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmClear = null },
             title = { Text(if (what == "pending") "清除 $count 张待处理照片？" else "清空处理列表（$count 张）？") },
-            text = { Text("列表记录会被移除；已保存到相册的成品不受影响，原图始终保留。") },
+            text = { Text("列表记录会被移除；已保存到相册的成品不受影响，不会因此删除原图。") },
             confirmButton = { TextButton(onClick = { confirmClear = null; if (what == "pending") vm.clearPending() else vm.clearAll() }) { Text("清除", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { confirmClear = null }) { Text("取消") } },
         )
@@ -705,7 +733,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmRemoveIds = null },
             title = { Text("移除这批 ${ids.size} 张记录？") },
-            text = { Text("列表记录会被移除；已保存到相册的成品不受影响，原图始终保留。") },
+            text = { Text("列表记录会被移除；已保存到相册的成品不受影响，不会因此删除原图。") },
             confirmButton = { TextButton(onClick = { confirmRemoveIds = null; vm.removeBatch(ids) }) { Text("移除", color = MaterialTheme.colorScheme.error) } },
             dismissButton = { TextButton(onClick = { confirmRemoveIds = null }) { Text("取消") } },
         )
@@ -723,31 +751,12 @@ private fun QueueRow(
     onOpen: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val dismissState = rememberSwipeToDismissBoxState(
-        confirmValueChange = { value ->
-            if (value == SwipeToDismissBoxValue.Settled) {
-                false
-            } else if (item.status == QueueStatus.CONVERTING) {
-                false
-            } else {
-                onRemove()
-                true
-            }
-        },
-    )
-    SwipeToDismissBox(
-        state = dismissState,
+    app.ultraslim.ui.components.CommitSwipeRow(
         modifier = modifier,
-        enableDismissFromStartToEnd = false,
-        backgroundContent = {
-            val color by animateColorAsState(
-                targetValue = if (dismissState.targetValue == SwipeToDismissBoxValue.Settled) {
-                    MaterialTheme.colorScheme.surfaceContainerHighest
-                } else {
-                    MaterialTheme.colorScheme.errorContainer
-                },
-                label = "swipeBg",
-            )
+        enabled = item.status != QueueStatus.CONVERTING,
+        onCommit = onRemove,
+        background = {
+            val color = MaterialTheme.colorScheme.errorContainer
             Box(
                 modifier = Modifier
                     .fillMaxSize()
@@ -821,14 +830,14 @@ private fun QueueCard(
             }
             AnimatedVisibility(
                 visible = item.status == QueueStatus.CONVERTING,
-                enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                enter = expandVertically(Motion.standard()) + fadeIn(Motion.effects()),
                 exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
             ) {
-                LinearProgressIndicator(Modifier.fillMaxWidth())
+                LinearWavyProgressIndicator(Modifier.fillMaxWidth())
             }
             AnimatedVisibility(
                 visible = item.status == QueueStatus.DONE || item.status == QueueStatus.SKIPPED || item.status == QueueStatus.FAILED,
-                enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                enter = expandVertically(Motion.standard()) + fadeIn(Motion.effects()),
                 exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
             ) {
                 Column {
@@ -856,103 +865,87 @@ private fun FeatureLabel(icon: androidx.compose.ui.graphics.vector.ImageVector, 
 }
 
 @Composable
+private fun IgnoreLivePhotosOption(checked: Boolean, onCheckedChange: (Boolean) -> Unit, enabled: Boolean) {
+    Row(
+        Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text("忽略实况照片（Live）", style = MaterialTheme.typography.titleSmall)
+            Text(
+                "导入时跳过检测到内嵌动态视频的照片",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Switch(
+            checked = checked,
+            onCheckedChange = onCheckedChange,
+            enabled = enabled,
+            modifier = Modifier.testTag("ignore-live-photos").semantics { contentDescription = "忽略实况照片（Live）" },
+        )
+    }
+}
+
+@Composable
 private fun ImportHero(
     defaults: ConversionDefaults,
     callbacks: OptionsCallbacks,
     onPick: () -> Unit,
     onAlbums: () -> Unit,
     modifier: Modifier = Modifier,
+    showOptions: Boolean = true,
+    importFilter: @Composable () -> Unit,
 ) {
-    var heroOptionsExpanded by remember { mutableStateOf(false) }
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(24.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-    ) {
-        Column(
-            modifier = Modifier.padding(20.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(16.dp),
-            ) {
-                Surface(
-                    shape = RoundedCornerShape(16.dp),
-                    color = MaterialTheme.colorScheme.primaryContainer,
-                    modifier = Modifier.size(52.dp),
-                ) {
-                    Box(contentAlignment = Alignment.Center) {
-                        Icon(
-                            Icons.Rounded.FilterHdr,
-                            contentDescription = null,
-                            modifier = Modifier.size(28.dp),
-                            tint = MaterialTheme.colorScheme.onPrimaryContainer,
-                        )
+    var heroOptionsExpanded by rememberSaveable { mutableStateOf(false) }
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Surface(shape = RoundedCornerShape(32.dp), color = MaterialTheme.colorScheme.primaryContainer) {
+            Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween) {
+                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary) {
+                        Text("ULTRA HDR", Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            style = MaterialTheme.typography.labelMedium)
+                    }
+                    // A quiet photo-stack motif, drawn with the app's own tonal palette.
+                    Box(Modifier.size(76.dp), contentAlignment = Alignment.Center) {
+                        Surface(Modifier.size(60.dp).rotate(-16f), shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.tertiaryContainer) {}
+                        Surface(Modifier.size(60.dp).rotate(12f), shape = RoundedCornerShape(18.dp),
+                            color = MaterialTheme.colorScheme.primary) {
+                            Box(contentAlignment = Alignment.Center) { Icon(Icons.Rounded.FilterHdr, null, Modifier.size(34.dp)) }
+                        }
                     }
                 }
-                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(
-                        "Ultra HDR 照片瘦身",
-                        style = MaterialTheme.typography.titleLarge,
-                        fontWeight = FontWeight.Bold,
-                    )
-                    Text(
-                        "保留 HDR 效果 · 精简照片体积",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text("让照片\n轻一点", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
+                    Text("留下明暗层次，腾出更多空间。", style = MaterialTheme.typography.bodyLarge)
                 }
-            }
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                Button(
-                    onClick = onPick,
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp),
-                    shape = MaterialTheme.shapes.medium,
-                ) {
-                    Icon(Icons.Rounded.AddPhotoAlternate, null, Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("选择照片")
+                importFilter()
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onPick, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                        shapes = ButtonDefaults.shapes(), contentPadding = PaddingValues(16.dp)) {
+                        Icon(Icons.Rounded.AddPhotoAlternate, null, Modifier.size(24.dp))
+                        Spacer(Modifier.width(12.dp))
+                        Text("选择照片", style = MaterialTheme.typography.titleMedium)
+                    }
+                    FilledTonalButton(onClick = onAlbums, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        shapes = ButtonDefaults.shapes()) {
+                        Icon(Icons.Rounded.PhotoLibrary, null, Modifier.size(20.dp))
+                        Spacer(Modifier.width(10.dp))
+                        Text("相册导入")
+                    }
                 }
-                FilledTonalButton(
-                    onClick = onAlbums,
-                    modifier = Modifier
-                        .weight(1f)
-                        .heightIn(min = 48.dp),
-                    shape = MaterialTheme.shapes.medium,
-                ) {
-                    Icon(Icons.Rounded.PhotoLibrary, null, Modifier.size(20.dp))
-                    Spacer(Modifier.width(8.dp))
-                    Text("相册导入")
-                }
-            }
-
-            OutputSchemeCard(
-                defaults = defaults,
-                callbacks = callbacks,
-                expanded = heroOptionsExpanded,
-                onToggleExpand = { heroOptionsExpanded = !heroOptionsExpanded },
-                enabled = true,
-            )
-
-            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                FeatureLabel(Icons.Rounded.AutoAwesome, "保留 HDR 亮度")
-                FeatureLabel(Icons.Rounded.Speed, "硬件加速")
-                FeatureLabel(Icons.Rounded.Security, "离线处理，不出网络")
             }
         }
+        FlowRow(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            FeatureLabel(Icons.Rounded.AutoAwesome, "保留 HDR 亮度")
+            FeatureLabel(Icons.Rounded.Security, "离线处理")
+        }
+        if (showOptions) OutputSchemeCard(defaults, callbacks, heroOptionsExpanded,
+            onToggleExpand = { heroOptionsExpanded = !heroOptionsExpanded }, enabled = true)
     }
 }
 

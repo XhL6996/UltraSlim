@@ -1340,12 +1340,14 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
   heif_context* ctx = heif_context_alloc();
   heif_encoder* encoder = nullptr;
   const heif_encoder_descriptor* descriptor = nullptr;
-  // Subsampled grids need even canvases. A clap on only the base also makes
-  // system gain-map readers reject the HDR association. For odd HDR dimensions,
-  // use AOM 4:4:4 so both images retain their exact geometry without a crop.
-  const bool oddHdrAvif = outCodec == 2 && gainmap != nullptr && ((img.width | img.height) & 1);
+  // Subsampled grids need even canvases, and Android cannot decode a grid
+  // cropped back to odd dimensions with clap (including SDR). HDR also needs
+  // exact base/gain-map geometry even without a grid. Use AOM 4:4:4 for those
+  // cases so no padding/crop is needed; ordinary SDR single images keep SVT.
+  const bool oddAvif = outCodec == 2 && ((img.width | img.height) & 1) &&
+      (gainmap != nullptr || img.width > 4096 || img.height > 4096);
   heif_context_get_encoder_descriptors(ctx, outCodec == 2 ? heif_compression_AV1 : heif_compression_HEVC,
-      outCodec == 2 ? (oddHdrAvif ? "aom" : "svt") : "x265", &descriptor, 1);
+      outCodec == 2 ? (oddAvif ? "aom" : "svt") : "x265", &descriptor, 1);
   heif_error e = descriptor ? heif_context_get_encoder(ctx, descriptor, &encoder) :
       heif_error{heif_error_Encoder_plugin_error, heif_suberror_Unspecified, "编码器不可用"};
   if (e.code != heif_error_Ok) {
@@ -1354,21 +1356,21 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
     return 20;
   }
   heif_encoder_set_lossy_quality(encoder, ultrahdr::remapQualityForLibheif(quality));
-  heif_encoder_set_parameter(encoder, "chroma", oddHdrAvif ? "444" : "420");
+  heif_encoder_set_parameter(encoder, "chroma", oddAvif ? "444" : "420");
   configureEncoder(encoder, outCodec, speedLevel, threads);
-  if (oddHdrAvif && speedLevel == 2) heif_encoder_set_parameter_integer(encoder, "speed", 8);
+  if (oddAvif && speedLevel == 2) heif_encoder_set_parameter_integer(encoder, "speed", 8);
 
   heif_image* himg = nullptr;
   e = heif_image_create(img.width, img.height, heif_colorspace_YCbCr,
-                        oddHdrAvif ? heif_chroma_444 : heif_chroma_420, &himg);
+                        oddAvif ? heif_chroma_444 : heif_chroma_420, &himg);
   if (e.code != heif_error_Ok) {
     err = std::string("创建图像失败: ") + e.message;
     heif_encoder_release(encoder);
     heif_context_free(ctx);
     return 21;
   }
-  const int cw = oddHdrAvif ? img.width : (img.width + 1) / 2;
-  const int ch = oddHdrAvif ? img.height : (img.height + 1) / 2;
+  const int cw = oddAvif ? img.width : (img.width + 1) / 2;
+  const int ch = oddAvif ? img.height : (img.height + 1) / 2;
   if(heif_image_add_plane(himg, heif_channel_Y, img.width, img.height, 8).code!=heif_error_Ok ||
      heif_image_add_plane(himg, heif_channel_Cb, cw, ch, 8).code!=heif_error_Ok ||
      heif_image_add_plane(himg, heif_channel_Cr, cw, ch, 8).code!=heif_error_Ok) {
@@ -1381,7 +1383,7 @@ int encodeSdrWithLibheif(const SdrImage& img, int outCodec, int quality, bool ke
   if (yDst == nullptr || uDst == nullptr || vDst == nullptr) {
     err="获取图像平面失败";heif_image_release(himg);heif_encoder_release(encoder);heif_context_free(ctx);return 31;
   }
-  if (oddHdrAvif) {
+  if (oddAvif) {
     parallelRows(img.height, size_t(img.width) * img.height, [&](int begin, int end) {
       for (int y = begin; y < end; ++y) for (int x = 0; x < img.width; ++x) {
         const uint8_t* pixel = img.rgba.data() + (size_t(y) * img.width + x) * 4;

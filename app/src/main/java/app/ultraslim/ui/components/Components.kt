@@ -43,6 +43,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SegmentedButton
 import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
+import androidx.compose.material3.rememberSliderState
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
@@ -495,20 +496,8 @@ fun ConversionOptionsPanel(
             // === 第一层：输出格式与画质预设 ===
             SectionHeader("1. 输出格式", "优先推荐 AVIF / HEIC 保持高画质极省体积")
             val formats = OutputFormat.entries
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                formats.forEachIndexed { index, format ->
-                    SegmentedButton(
-                        selected = defaults.format == format,
-                        onClick = { callbacks.onFormatChange(format) },
-                        enabled = enabled,
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = formats.size),
-                        icon = {},
-                        contentPadding = PaddingValues(horizontal = 4.dp, vertical = 8.dp),
-                    ) {
-                        Text(format.label, maxLines = 1, style = MaterialTheme.typography.labelMedium)
-                    }
-                }
-            }
+            ExpressiveChoiceRow(formats.map { it.label }, formats.indexOf(defaults.format),
+                onSelect = { callbacks.onFormatChange(formats[it]) }, enabled = enabled)
             val formatTip = when (defaults.format) {
                 OutputFormat.AVIF -> "AVIF：现代 AV1 编码，体积超小；实况照片将导出为静止 HDR"
                 OutputFormat.HEIC -> "HEIC：高效 HEVC 编码，支持保留实况照片；HDR 显示取决于相册支持"
@@ -623,7 +612,7 @@ fun ConversionOptionsPanel(
 
             AnimatedVisibility(
                 visible = advanced,
-                enter = expandVertically(Motion.standard()) + fadeIn(Motion.standard()),
+                enter = expandVertically(Motion.standard()) + fadeIn(Motion.effects()),
                 exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
             ) {
                 Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -748,11 +737,11 @@ private fun SliderOption(
                 color = MaterialTheme.colorScheme.primary,
             )
         }
+        val sliderState = rememberSliderState(value = sliderValue, steps = steps, trackRange = valueRange)
+        androidx.compose.runtime.SideEffect { sliderState.value = sliderValue }
         Slider(
-            value = sliderValue,
+            state = sliderState,
             onValueChange = { dragging = true; sliderValue = it },
-            valueRange = valueRange,
-            steps = steps,
             enabled = enabled,
             onValueChangeFinished = {
                 dragging = false

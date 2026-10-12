@@ -5,12 +5,15 @@ import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 
-internal fun HistoryEntity.matchesHistoryFilter(filter: String): Boolean = when (filter) {
-    "待保存" -> saveState == "PENDING"
-    "已保存" -> saveState == "SAVED"
-    "保存失败" -> saveState == "FAILED"
-    else -> true
+internal fun historyFilterSaveState(filter: String): String = when (filter) {
+    "待保存" -> "PENDING"
+    "已保存" -> "SAVED"
+    "保存失败" -> "FAILED"
+    else -> ""
 }
+
+internal fun HistoryEntity.matchesHistoryFilter(filter: String): Boolean =
+    historyFilterSaveState(filter).let { it.isEmpty() || saveState == it }
 
 internal fun historyDate(timestamp: Long, zone: ZoneId = ZoneId.systemDefault()): LocalDate =
     Instant.ofEpochMilli(timestamp).atZone(zone).toLocalDate()

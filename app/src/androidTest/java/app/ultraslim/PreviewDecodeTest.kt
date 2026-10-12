@@ -20,6 +20,8 @@ class PreviewDecodeTest {
             instrumentation.targetContext.getExternalFilesDir(null),
             "preview_probe.avif",
         )
+        org.junit.Assume.assumeTrue("opt-in diagnostic: pass -e previewSample true",
+            InstrumentationRegistry.getArguments().getString("previewSample") == "true")
         assertTrue("push preview_probe.avif first", source.exists())
 
         // Stage 1: raw Y plane straight out of heif_decode_image (no conversion).
