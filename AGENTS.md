@@ -105,4 +105,4 @@ build/host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 - Home 统计改用单条 `flowStats()` + 500ms 节流（原 totalSaved+countDone 两次全表聚合且未节流）；扫描/导入进度按批（16/8 张）发射；`scannedProbes` 在扫描结束 finally 清空（persist 有权限时返回原 URI，键才匹配）。
 - `PreviewCache` 的 content URI version（size:mtime）有 2 秒 TTL 缓存，内存命中不再必先做 provider 查询；大图档降采样走 `inSampleSize`；设置页清缓存挪到 IO 线程。`DetailViewModel.requestTrashOriginal` 改 suspend + IO（原在主线程做 MediaStore 查询）；DetailViewModel 只有一条 flowById 订阅，按 inputUri 去重后才做回收站检查。
 - 自动替换管线：`stage` 中 source/target 解析到同一 URI 时只哈希一次；`saved()` 的 validate 跳过原图重哈希（`recheckSource=false`，回收前的 trash 时校验仍保留）——saved 时机不做破坏性操作，安全性不依赖这次哈希。
-- 依赖：room 2.8.5 / work 2.12.0 / coroutines 1.11.0 / coreKtx 1.19.1 / splashscreen 1.2.0 / serialization 1.11.0；硬编码版本已全部迁入 libs.versions.toml。coil 停在 3.3.0 待单独验证。defaultConfig 加了 resourceConfigurations（zh/en）。
+- 依赖：room 2.8.5 / work 2.12.0 / coroutines 1.11.0 / coreKtx 1.19.1 / splashscreen 1.2.0 / serialization 1.11.0 / coil 3.6.3；硬编码版本已全部迁入 libs.versions.toml。defaultConfig 加了 resourceConfigurations（zh/en）。
