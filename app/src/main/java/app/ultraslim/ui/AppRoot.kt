@@ -43,6 +43,7 @@ fun AppRoot() {
 @OptIn(ExperimentalMaterial3AdaptiveApi::class)
 @Composable
 private fun AppNavigation() {
+    DeferredOutputHost()
     AutoReplacementHost()
     val homeStack = rememberNavBackStack(Home)
     val historyStack = rememberNavBackStack(History)

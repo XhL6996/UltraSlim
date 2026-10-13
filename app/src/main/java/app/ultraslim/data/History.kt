@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.Flow
         Index(value = ["taskId"], unique = true),
         Index(value = ["createdAt"]),
         Index(value = ["status"]),
+        // flowPage/flowCount/pendingPublications 都按 saveState 过滤 + createdAt 排序。
+        Index(value = ["saveState", "createdAt"]),
     ]
 )
 data class HistoryEntity(
@@ -65,6 +67,9 @@ interface HistoryDao {
     @Query("SELECT * FROM history WHERE :filter = '' OR saveState = :filter ORDER BY createdAt DESC LIMIT :limit")
     fun flowPage(limit: Int, filter: String): Flow<List<HistoryEntity>>
 
+    @Query("SELECT * FROM history WHERE saveState = 'PENDING' ORDER BY id")
+    fun pendingPublications(): Flow<List<HistoryEntity>>
+
     /** 与 [flowPage] 同筛选的计数，供"加载更多"页脚比较。 */
     @Query("SELECT COUNT(*) FROM history WHERE :filter = '' OR saveState = :filter")
     fun flowCount(filter: String): Flow<Int>
@@ -93,6 +98,15 @@ interface HistoryDao {
     @Query("DELETE FROM history WHERE id = :id")
     suspend fun deleteById(id: Long)
 
+    @Query("SELECT * FROM history WHERE id IN (:ids)")
+    suspend fun byIds(ids: List<Long>): List<HistoryEntity>
+
+    @Query("DELETE FROM history WHERE id IN (:ids)")
+    suspend fun deleteByIdsChunk(ids: List<Long>)
+
+    @Transaction
+    suspend fun deleteByIds(ids: List<Long>) { ids.chunked(500).forEach { deleteByIdsChunk(it) } }
+
     @Query("DELETE FROM history")
     suspend fun deleteAll()
 
@@ -104,6 +118,10 @@ interface HistoryDao {
 
     @Query("SELECT COUNT(*) as countDone, COALESCE(SUM(inputBytes), 0) as totalInputBytes, COALESCE(SUM(outputBytes), 0) as totalOutputBytes, COALESCE(SUM(CASE WHEN hadGainMap THEN 1 ELSE 0 END), 0) as gainmapCount FROM history WHERE status = 'DONE'")
     fun flowStats(): Flow<HistoryStats>
+
+    /** 批量追加替换结果摘要，替代逐条 byId+update（AutoReplacement.finish）。 */
+    @Query("UPDATE history SET settingsSummary = (CASE WHEN instr(settingsSummary, ' · 替换结果：') > 0 THEN substr(settingsSummary, 1, instr(settingsSummary, ' · 替换结果：') - 1) ELSE settingsSummary END) || ' · 替换结果：' || :message WHERE id IN (:ids)")
+    suspend fun noteReplacement(ids: List<Long>, message: String)
 }
 
 data class HistoryStats(
@@ -140,7 +158,7 @@ interface TaskDao {
     @Query("UPDATE batches SET cancelled = 1 WHERE id = :id") suspend fun cancel(id: String)
 }
 
-@Database(entities = [HistoryEntity::class, QueueItem::class, BatchEntity::class, ReplacementEntity::class], version = 5, exportSchema = true)
+@Database(entities = [HistoryEntity::class, QueueItem::class, BatchEntity::class, ReplacementEntity::class], version = 6, exportSchema = true)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun historyDao(): HistoryDao
     abstract fun taskDao(): TaskDao
@@ -150,6 +168,11 @@ abstract class AppDatabase : RoomDatabase() {
         val MIGRATION_4_5 = object : Migration(4, 5) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 db.execSQL("CREATE TABLE IF NOT EXISTS replacements (historyId INTEGER NOT NULL PRIMARY KEY, batchId TEXT NOT NULL, sourceUri TEXT NOT NULL, outputUri TEXT NOT NULL, sourceHash TEXT NOT NULL, outputHash TEXT NOT NULL, state TEXT NOT NULL, note TEXT NOT NULL)")
+            }
+        }
+        val MIGRATION_5_6 = object : Migration(5, 6) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("CREATE INDEX IF NOT EXISTS index_history_saveState_createdAt ON history(saveState, createdAt)")
             }
         }
         val MIGRATION_1_2 = object : Migration(1, 2) {

@@ -27,6 +27,12 @@ class FormattingTest {
         assertFalse(outputName("../a/b.jpg", "avif", "task", 0).contains('/'))
     }
 
+    @Test fun convertedScreenshotsDoNotAdvertiseANewScreenCapture() {
+        for (name in listOf("Screenshot_20250101.png", "screen_shot-123.jpg", "ScreenCapture.jpg", "截屏2025.jpg", "截图.png")) {
+            assertTrue(outputName(name, "avif", "same-task", 0).startsWith("Photo_"))
+        }
+    }
+
     @Test fun testGroupByTimeSessionClustersCloseTimestamps() {
         data class MockItem(val id: String, val timestamp: Long, val batchId: String = "")
         val t0 = 1700000000000L

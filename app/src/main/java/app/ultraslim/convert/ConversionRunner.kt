@@ -100,11 +100,11 @@ internal class ConversionRunner(
                 try {
                     var existing = app.database.historyDao().byTask(id)
                     if (existing != null) {
-                        if (options.autoSave && app.database.taskDao().batch(batchId)?.cancelled == false) existing = OutputStore.save(app, existing)
+                        if (options.autoSave && app.galleryPublishingAllowed.value && app.database.taskDao().batch(batchId)?.cancelled == false) existing = OutputStore.save(app, existing)
                         if (options.autoReplaceOriginals) AutoReplacement.saved(app, existing)
                         val recovered = existing
                         repo.update(id) { it.copy(status = QueueStatus.DONE, outputUri = recovered.outputUri, historyId = recovered.id,
-                            error = if(recovered.saveState == "SAVED") null else "转换完成，待保存；可在详情重试") }
+                            error = if(recovered.saveState == "SAVED") null else if (options.autoSave && recovered.saveState == "PENDING") "已转换，回到应用后自动保存" else "转换完成，待保存；可在详情重试") }
                         continue
                     }
                     val source = Uri.parse(item.uri)
@@ -208,13 +208,13 @@ internal class ConversionRunner(
                         AutoReplacement.stage(app, entity, originalHash)
                         entity = app.database.historyDao().byId(historyId) ?: entity
                     }
-                    if (options.autoSave && app.database.taskDao().batch(batchId)?.cancelled == false) {
+                    if (options.autoSave && app.galleryPublishingAllowed.value && app.database.taskDao().batch(batchId)?.cancelled == false) {
                         entity = OutputStore.save(app, entity)
                     }
                     if (options.autoReplaceOriginals) AutoReplacement.saved(app, entity)
                     repo.update(id) { it.copy(status = QueueStatus.DONE, progress = 100, result = result,
                         outputUri = entity.outputUri, historyId = historyId,
-                        error = if (entity.saveState == "FAILED") "转换完成，保存失败；可在详情重试保存" else if (entity.saveState != "SAVED") "待保存，可直接分享" else null) }
+                        error = if (entity.saveState == "FAILED") "转换完成，保存失败；可在详情重试保存" else if (entity.saveState != "SAVED") { if (options.autoSave) "已转换，回到应用后自动保存" else "待保存，可直接分享" } else null) }
                     done++; saved += result.inputBytes - result.outputBytes
                 } catch (e: CancellationException) { throw e } catch (e: Exception) {
                     if (app.database.historyDao().byTask(id) == null) {
@@ -228,7 +228,12 @@ internal class ConversionRunner(
             ids.forEach { id -> repo.update(id) { if (it.status == QueueStatus.CONVERTING) it.copy(status = QueueStatus.READY, error = "已中断，可继续") else it } }
             withContext(NonCancellable) { repo.flush() }
         }
-        if (app.database.taskDao().batch(batchId)?.cancelled == false) showSummary(done, saved)
+        if (app.database.taskDao().batch(batchId)?.cancelled == false) {
+            val pendingSave = options.autoSave && ids.any { id -> repo.find(id)?.let {
+                it.status == QueueStatus.DONE && it.outputUri?.startsWith("content://") != true
+            } == true }
+            showSummary(done, saved, pendingSave)
+        }
         return Outcome.COMPLETE
     }
 
@@ -261,7 +266,7 @@ internal class ConversionRunner(
     }
 
     /** Best-effort completion notification, shown only when notifications are allowed. */
-    private fun showSummary(doneCount: Int, savedBytes: Long) {
+    private fun showSummary(doneCount: Int, savedBytes: Long, pendingSave: Boolean) {
         if (doneCount <= 0) return
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(applicationContext, Manifest.permission.POST_NOTIFICATIONS) !=
@@ -281,7 +286,8 @@ internal class ConversionRunner(
         val notification = NotificationCompat.Builder(applicationContext, CHANNEL_ID)
             .setSmallIcon(R.drawable.ic_launcher_foreground)
             .setContentTitle("转换完成")
-            .setContentText("完成 $doneCount 张，输出体积净变化 ${app.ultraslim.util.formatByteDelta(-savedBytes)}（原图保留）")
+            .setContentText("完成 $doneCount 张，输出体积净变化 ${app.ultraslim.util.formatByteDelta(-savedBytes)}" +
+                if (pendingSave) "；回到应用继续保存" else "（原图保留）")
             .setAutoCancel(true)
             .setContentIntent(pendingIntent)
             .build()

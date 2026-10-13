@@ -95,3 +95,14 @@ build/host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 - AppRoot 的两个标签各自保存 NavBackStack，必须同时保留 saveable 与 ViewModel decorators。成品库的 ListDetailSceneStrategy 要接管单栏及双栏，避免窗口变化时重新挂载布局。
 - 页面内容使用 AdaptiveWorkspace 的实际约束和 FoldingFeature 坐标分区，不按设备型号或全局像素宽度猜布局。History 在 tabletop 使用单一导航场景，内部列表/统计避让横向铰链。
 - 改 UI 后跑 AdaptiveUiTest 与现有滑动/撤销/历史/自动替换回归。截图参考图变动须先检查差异。设计依据见 docs/design/2026-10-12-expressive-adaptive.md。
+
+## 优化批次（2026-10-13）
+
+- 原生正确性：HDR 重建路径的输入内存释放（`data.clear()`）必须发生在 HEIF EXIF 回退提取**之后**；SDR/重建编码失败统一 `ftruncate(0)` 清输出 fd；`decodeJpegSdr` 短读视为失败（截断码流不再产出灰底图）；JXL box 倍增受 `kMaxBoxBytes` 约束（errorCode 32）。
+- `ultraslim` target 已加 `-fvisibility=hidden` + `--gc-sections` + `--exclude-libs,ALL`（动态符号 10,262 → 216，.so 约 20.6MB → 17.5MB）；`core`/`image_io` 带 `-ffunction-sections` 才能让 gc-sections 生效。`decodePreviewJpeg` 入口自行初始化 `ultraslim_codec_threads`（不经过 transcodeUnchecked），否则 parallelRows 退化为单线程。
+- 同步盘冲突副本（`xxx 2.so` / `libheif 3.a`）曾泄漏进 APK（3 份 20MB .so）；packaging 已加 `jniLibs.excludes += "**/* [0-9].so"` 防御，prefix 副本已清理。项目仍在同步目录时此防御不能撤。
+- Room 版本 6：新增 `(saveState, createdAt)` 索引（flowPage/flowCount/pendingPublications）。批量 API：`HistoryDao.noteReplacement/deleteByIds`、`ReplacementDao.deleteAll`、`OutputStore.deleteBatch`、`ConversionRepository.updateAll`——批量场景禁止逐条 update（每条都触发全量 diff + 表 invalidation）。
+- Home 统计改用单条 `flowStats()` + 500ms 节流（原 totalSaved+countDone 两次全表聚合且未节流）；扫描/导入进度按批（16/8 张）发射；`scannedProbes` 在扫描结束 finally 清空（persist 有权限时返回原 URI，键才匹配）。
+- `PreviewCache` 的 content URI version（size:mtime）有 2 秒 TTL 缓存，内存命中不再必先做 provider 查询；大图档降采样走 `inSampleSize`；设置页清缓存挪到 IO 线程。`DetailViewModel.requestTrashOriginal` 改 suspend + IO（原在主线程做 MediaStore 查询）；DetailViewModel 只有一条 flowById 订阅，按 inputUri 去重后才做回收站检查。
+- 自动替换管线：`stage` 中 source/target 解析到同一 URI 时只哈希一次；`saved()` 的 validate 跳过原图重哈希（`recheckSource=false`，回收前的 trash 时校验仍保留）——saved 时机不做破坏性操作，安全性不依赖这次哈希。
+- 依赖：room 2.8.5 / work 2.12.0 / coroutines 1.11.0 / coreKtx 1.19.1 / splashscreen 1.2.0 / serialization 1.11.0；硬编码版本已全部迁入 libs.versions.toml。coil 停在 3.3.0 待单独验证。defaultConfig 加了 resourceConfigurations（zh/en）。

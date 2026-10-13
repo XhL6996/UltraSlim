@@ -40,6 +40,26 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun updateGalleryPublishing() {
+        (application as UltraSlimApp).galleryPublishingAllowed.value =
+            lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED) &&
+            window.decorView.hasWindowFocus() && !isInMultiWindowMode && !isInPictureInPictureMode
+    }
+
+    override fun onPostResume() { super.onPostResume(); updateGalleryPublishing() }
+    override fun onPause() {
+        (application as UltraSlimApp).galleryPublishingAllowed.value = false
+        super.onPause()
+    }
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        updateGalleryPublishing()
+    }
+    override fun onMultiWindowModeChanged(inMultiWindow: Boolean, config: android.content.res.Configuration) {
+        super.onMultiWindowModeChanged(inMultiWindow, config)
+        updateGalleryPublishing()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         forwardShareIntent(intent)

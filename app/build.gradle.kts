@@ -16,8 +16,11 @@ android {
         minSdk = 26
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 13
-        versionName = "1.1.1"
+        versionCode = 18
+        versionName = "1.1.6"
+
+        // App 自身只有中文文案；剥掉 androidx/Compose 带入的其他语言资源。
+        resourceConfigurations += setOf("zh-rCN", "zh-rTW", "zh-rHK", "en")
 
         // Filter transitive JNI libraries too, not only our CMake target.
         ndk { abiFilters += listOf("arm64-v8a") }
@@ -69,11 +72,15 @@ android {
     packaging {
         // Project-built JNI replacement takes precedence; verification checks the packaged bytes.
         jniLibs.pickFirsts += "lib/arm64-v8a/libandroidx.graphics.path.so"
+        // 同步盘冲突副本（"xxx 2.so"）不得进 APK——曾把 3 份 20MB 的 libultraslim.so 打进包。
+        jniLibs.excludes += setOf("**/* [0-9].so", "**/* [0-9].*[0-9].so")
         resources {
             // Keep AndroidX version metadata for Compose Layout Inspector / Android CLI.
             excludes += setOf(
                 "META-INF/DEPENDENCIES", "META-INF/LICENSE*", "META-INF/NOTICE*",
                 "META-INF/*.kotlin_module", "META-INF/versions/**", "META-INF/INDEX.LIST",
+                "META-INF/proguard/**", "META-INF/com.android.tools/**",
+                "META-INF/gradle/incremental.annotation.processors",
             )
         }
     }
@@ -86,13 +93,13 @@ dependencies {
             because("The aligned JNI replacement is built from the matching 1.0.1 source")
         }
     }
-    testImplementation("junit:junit:4.13.2")
-    androidTestImplementation("androidx.test:runner:1.6.2")
-    androidTestImplementation("androidx.window:window-testing:1.5.0")
+    testImplementation(libs.junit)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.window.testing)
     androidTestImplementation(platform(libs.compose.bom))
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
-    androidTestImplementation("androidx.room:room-testing:2.8.1")
-    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation(libs.androidx.room.testing)
+    androidTestImplementation(libs.androidx.test.ext.junit)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.lifecycle.runtime.compose)
@@ -111,8 +118,8 @@ implementation(libs.compose.adaptive)
 implementation(libs.compose.adaptive.navigation)
 implementation(libs.compose.navigation.suite)
 implementation(libs.androidx.lifecycle.navigation)
-implementation("org.jetbrains.kotlinx:kotlinx-serialization-core:1.9.0")
-screenshotTestImplementation("com.android.tools.screenshot:screenshot-validation-api:0.0.1-alpha16")
+implementation(libs.kotlinx.serialization.core)
+screenshotTestImplementation(libs.screenshot.validation.api)
 screenshotTestImplementation(libs.compose.ui.tooling)
     debugImplementation(libs.compose.ui.tooling)
 

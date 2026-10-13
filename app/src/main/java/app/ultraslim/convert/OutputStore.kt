@@ -18,10 +18,26 @@ object OutputStore {
     suspend fun save(app: UltraSlimApp, record: HistoryEntity): HistoryEntity = saveLock.withLock {
         val current = app.database.historyDao().byId(record.id) ?: error("记录已删除")
         if (current.outputUri.startsWith("content://")) return@withLock current
+        val replacement = app.database.replacementDao().byId(current.id)?.takeIf { it.state == "PREPARED" }
+        val source = Uri.parse(replacement?.sourceUri ?: current.inputUri)
+        val metadata = withContext(Dispatchers.IO) { SourceMedia.read(app, source) }
         val uri = try { withContext(Dispatchers.IO) {
-            MediaStoreSaver.save(app, File(current.outputUri), current.displayName, OutputFormat.parse(current.format), taskId = current.taskId ?: "history-${current.id}")
+            val file = File(current.outputUri)
+            val format = OutputFormat.parse(current.format)
+            val task = current.taskId ?: "history-${current.id}"
+            val date = metadata?.dateTaken ?: SourceMedia.captureTime(app, source)
+            val sameAlbum = if (replacement != null && metadata != null) MediaStoreSaver.save(app, file,
+                current.displayName, format, taskId = task, relativePath = metadata.relativePath,
+                volume = metadata.volume, dateTaken = date, relatedUri = source) else null
+            if (sameAlbum != null) sameAlbum else {
+                if (replacement != null) AutoReplacement.finish(app, listOf(replacement), "SKIPPED",
+                    "无法保存回原相册，成品保存到 UltraSlim，原图保留")
+                MediaStoreSaver.save(app, file, current.displayName, format, taskId = task, dateTaken = date)
+            }
         } } catch(e: kotlinx.coroutines.CancellationException) { throw e } catch(e: Exception) { null }
-        val updated = if (uri != null) current.copy(outputUri = uri.toString(), saveState = "SAVED") else current.copy(saveState = "FAILED")
+        // finish() may have added a replacement outcome while saving.
+        val latest = app.database.historyDao().byId(current.id) ?: current
+        val updated = if (uri != null) latest.copy(outputUri = uri.toString(), saveState = "SAVED") else latest.copy(saveState = "FAILED")
         app.database.historyDao().update(updated)
         if (uri != null) withContext(Dispatchers.IO) { File(current.outputUri).delete() }
         updated
@@ -32,6 +48,20 @@ object OutputStore {
         app.database.historyDao().deleteById(id)
         if (!row.outputUri.startsWith("content://")) withContext(Dispatchers.IO) { File(row.outputUri).delete() }
         row.taskId?.let { app.conversionRepository.remove(it) }
+    }
+
+    /** 批量删除：一次 saveLock、批量 SQL、队列清理只做一次 persist。 */
+    suspend fun deleteBatch(app: UltraSlimApp, ids: List<Long>) = saveLock.withLock {
+        if (ids.isEmpty()) return@withLock
+        val rows = ids.chunked(500).flatMap { app.database.historyDao().byIds(it) }
+        app.database.replacementDao().deleteAll(ids)
+        app.database.historyDao().deleteByIds(ids)
+        withContext(Dispatchers.IO) {
+            rows.forEach { row ->
+                if (!row.outputUri.startsWith("content://")) File(row.outputUri).delete()
+            }
+        }
+        app.conversionRepository.removeIds(rows.mapNotNull { it.taskId })
     }
     fun uri(context: Context, value: String, displayName: String? = null): Uri = if (value.startsWith("content://")) Uri.parse(value)
         else FileProvider.getUriForFile(context, "${context.packageName}.files", File(value), displayName ?: File(value).name)

@@ -23,6 +23,7 @@ import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.*
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -99,12 +100,37 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     val snackbar = remember { SnackbarHostState() }
     var optionsExpanded by rememberSaveable { mutableStateOf(false) }
     var showAlbums by rememberSaveable { mutableStateOf(false) }
+    var showFolderOptions by rememberSaveable { mutableStateOf(false) }
+    var includeSubfolders by rememberSaveable { mutableStateOf(true) }
     var hdrOnly by rememberSaveable { mutableStateOf(false) }
     var ignoreLivePhotos by rememberSaveable { mutableStateOf(false) }
     val albums by vm.albums.collectAsStateWithLifecycle()
     val loadingAlbums by vm.loadingAlbums.collectAsStateWithLifecycle()
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia()) { vm.addItems(it, ignoreLivePhotos) }
     val pick = { picker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
+        if (tree != null) vm.importFolder(tree, includeSubfolders, ignoreLivePhotos)
+    }
+    if (showFolderOptions) AlertDialog(
+        onDismissRequest = { showFolderOptions = false },
+        icon = { Icon(Icons.Rounded.FolderOpen, null) },
+        title = { Text("导入文件夹") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text("读取所选目录中的 JPEG、HEIC、AVIF 和 JXL 照片。成品沿用当前保存设置。")
+                Row(Modifier.fillMaxWidth().toggleable(value = includeSubfolders,
+                    role = androidx.compose.ui.semantics.Role.Checkbox,
+                    onValueChange = { includeSubfolders = it }), verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(checked = includeSubfolders, onCheckedChange = null)
+                    Spacer(Modifier.width(8.dp))
+                    Text("包含子文件夹")
+                }
+                Text("导入过程中可以停止，已加入的照片会保留。", style = MaterialTheme.typography.bodySmall)
+            }
+        },
+        confirmButton = { TextButton(onClick = { showFolderOptions = false; folderPicker.launch(null) }) { Text("选择文件夹") } },
+        dismissButton = { TextButton(onClick = { showFolderOptions = false }) { Text("取消") } },
+    )
     val notifications = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { vm.startConversion() }
     val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { grants ->
         if (grants.values.any { it }) { vm.loadAlbums(); showAlbums = true }
@@ -209,83 +235,59 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
         )
     }
     val actionBar: @Composable () -> Unit = {
-            AnimatedVisibility(
-                visible = state.queue.isNotEmpty(),
-                enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.effects()),
-                exit = slideOutVertically(Motion.exit()) { it } + fadeOut(Motion.exit()),
+        AnimatedVisibility(
+            visible = state.queue.isNotEmpty(),
+            enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.effects()),
+            exit = slideOutVertically(Motion.exit()) { it } + fadeOut(Motion.exit()),
+        ) {
+            Box(
+                modifier = Modifier.fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 12.dp),
             ) {
-                Surface(
-                    color = MaterialTheme.colorScheme.surfaceContainer,
-                    tonalElevation = 3.dp,
-                    shadowElevation = 8.dp,
-                    shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp),
+                val mode = when {
+                    stopping -> HomeAction.Stopping
+                    state.isConverting -> HomeAction.Converting
+                    state.convertibleCount > 0 -> HomeAction.Ready
+                    else -> HomeAction.Done
+                }
+                Button(
+                    onClick = { if (state.isConverting) vm.cancelConversion() else start() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 56.dp)
+                        .testTag("conversion-action"),
+                    shapes = ButtonDefaults.shapes(),
+                    colors = if (state.isConverting) ButtonDefaults.filledTonalButtonColors()
+                        else ButtonDefaults.buttonColors(),
+                    enabled = !stopping && (state.isConverting || (state.convertibleCount > 0 && !importing && !scanning)),
                 ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .navigationBarsPadding()
-                            .padding(horizontal = 16.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        OutlinedIconButton(
-                            onClick = pick,
-                            enabled = !state.isConverting,
-                            modifier = Modifier.size(48.dp),
-                            shape = RoundedCornerShape(12.dp),
-                        ) {
-                            Icon(Icons.Rounded.AddPhotoAlternate, "添加图片", modifier = Modifier.size(22.dp))
-                        }
-                        OutlinedIconButton(
-                            onClick = openAlbums,
-                            enabled = !state.isConverting,
-                            modifier = Modifier.size(48.dp),
-                            shape = RoundedCornerShape(12.dp),
-                        ) {
-                            Icon(Icons.Rounded.PhotoLibrary, "从相册批量导入", modifier = Modifier.size(22.dp))
-                        }
-                        val mode = when {
-                            stopping -> HomeAction.Stopping
-                            state.isConverting -> HomeAction.Converting
-                            state.convertibleCount > 0 -> HomeAction.Ready
-                            else -> HomeAction.Done
-                        }
-                        Button(
-                            onClick = { if (state.isConverting) vm.cancelConversion() else start() },
-                            modifier = Modifier
-                                .weight(1f)
-                                .heightIn(min = 56.dp),
-                            shapes = ButtonDefaults.shapes(),
-                            enabled = !stopping && (state.isConverting || state.convertibleCount > 0),
-                        ) {
-                            AnimatedContent(
-                                targetState = mode,
-                                transitionSpec = { fadeIn(Motion.fast()) togetherWith fadeOut(Motion.exit(Motion.Fast)) },
-                                label = "mainAction",
-                            ) { m ->
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    when (m) {
-                                        HomeAction.Converting -> {
-                                            Icon(Icons.Rounded.Stop, null, Modifier.size(20.dp))
-                                            Spacer(Modifier.width(8.dp))
-                                            Text("停止转换")
-                                        }
-                                        HomeAction.Stopping -> {
-                                            Icon(Icons.Rounded.Stop, null, Modifier.size(20.dp))
-                                            Spacer(Modifier.width(8.dp))
-                                            Text("正在停止…")
-                                        }
-                                        HomeAction.Ready -> {
-                                            Icon(Icons.Rounded.Compress, null, Modifier.size(20.dp))
-                                            Spacer(Modifier.width(8.dp))
-                                            Text("转换 ${state.convertibleCount} 张照片")
-                                        }
-                                        HomeAction.Done -> {
-                                            Icon(Icons.Rounded.Compress, null, Modifier.size(20.dp))
-                                            Spacer(Modifier.width(8.dp))
-                                            Text("本批次已处理")
-                                        }
-                                    }
+                    AnimatedContent(
+                        targetState = mode,
+                        transitionSpec = { fadeIn(Motion.fast()) togetherWith fadeOut(Motion.exit(Motion.Fast)) },
+                        label = "mainAction",
+                    ) { m ->
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            when (m) {
+                                HomeAction.Converting -> {
+                                    Icon(Icons.Rounded.Stop, null, Modifier.size(20.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("停止转换")
+                                }
+                                HomeAction.Stopping -> {
+                                    Icon(Icons.Rounded.Stop, null, Modifier.size(20.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("正在停止…")
+                                }
+                                HomeAction.Ready -> {
+                                    Icon(Icons.Rounded.Compress, null, Modifier.size(20.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("转换 ${state.convertibleCount} 张照片")
+                                }
+                                HomeAction.Done -> {
+                                    Icon(Icons.Rounded.Compress, null, Modifier.size(20.dp))
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("本批次已处理")
                                 }
                             }
                         }
@@ -293,6 +295,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                 }
             }
         }
+    }
     Scaffold(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
@@ -335,12 +338,14 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                             enter = expandVertically(Motion.standard()) + fadeIn(Motion.effects()),
                             exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
                         ) {
-                            ImportHero(
+                            ImportWorkspace(
                                 defaults = state.defaults,
                                 callbacks = callbacks,
                                 onPick = pick,
                                 onAlbums = openAlbums,
+                                onFolder = { showFolderOptions = true },
                                 showOptions = !wide,
+                                enabled = !importing && !scanning,
                                 importFilter = { IgnoreLivePhotosOption(ignoreLivePhotos, { ignoreLivePhotos = it }, enabled = !importing && !scanning) },
                             )
                         }
@@ -406,23 +411,6 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                     Text("${state.queue.size} 张 · ${formatBytes(state.totalQueueBytes)}", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
                                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    if (!state.isConverting && state.convertibleCount > 1) {
-                                        OutlinedButton(
-                                            onClick = vm::tryOne,
-                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
-                                            modifier = Modifier.heightIn(min = 40.dp),
-                                        ) {
-                                            Text("先试转 1 张", style = MaterialTheme.typography.labelMedium)
-                                        }
-                                    }
-                                    val hasFailed = state.hasFailed
-                                    if (hasFailed) {
-                                        AssistChip(
-                                            onClick = vm::retryFailed,
-                                            label = { Text("重试失败") },
-                                            leadingIcon = { Icon(Icons.Rounded.Refresh, null, Modifier.size(16.dp)) },
-                                        )
-                                    }
                                     var queueMenu by remember { mutableStateOf(false) }
                                     Box {
                                         IconButton(onClick = { queueMenu = true }) {
@@ -460,6 +448,40 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                                             )
                                         }
                                     }
+                                }
+                            }
+                        }
+                    }
+                    if (state.queue.isNotEmpty() && !state.isConverting) {
+                        item(key = "queue-import-actions") {
+                            FlowRow(
+                                modifier = Modifier.fillMaxWidth().testTag("queue-import-actions"),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalArrangement = Arrangement.spacedBy(4.dp),
+                            ) {
+                                ImportActions(
+                                    onPick = pick,
+                                    onAlbums = openAlbums,
+                                    onFolder = { showFolderOptions = true },
+                                    enabled = !importing && !scanning,
+                                )
+                                if (state.convertibleCount > 1) {
+                                    OutlinedButton(
+                                        onClick = vm::tryOne,
+                                        enabled = !importing && !scanning,
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 2.dp),
+                                        modifier = Modifier.heightIn(min = 40.dp),
+                                    ) {
+                                        Text("先试转 1 张", style = MaterialTheme.typography.labelMedium)
+                                    }
+                                }
+                                val hasFailed = state.hasFailed
+                                if (hasFailed) {
+                                    AssistChip(
+                                        onClick = vm::retryFailed,
+                                        label = { Text("重试失败") },
+                                        leadingIcon = { Icon(Icons.Rounded.Refresh, null, Modifier.size(16.dp)) },
+                                    )
                                 }
                             }
                         }
@@ -857,14 +879,6 @@ private fun QueueCard(
 }
 
 @Composable
-private fun FeatureLabel(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String) {
-    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        Icon(icon, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
-        Text(label, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-    }
-}
-
-@Composable
 private fun IgnoreLivePhotosOption(checked: Boolean, onCheckedChange: (Boolean) -> Unit, enabled: Boolean) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 8.dp),
@@ -889,63 +903,45 @@ private fun IgnoreLivePhotosOption(checked: Boolean, onCheckedChange: (Boolean) 
 }
 
 @Composable
-private fun ImportHero(
+private fun ImportWorkspace(
     defaults: ConversionDefaults,
     callbacks: OptionsCallbacks,
     onPick: () -> Unit,
     onAlbums: () -> Unit,
+    onFolder: () -> Unit,
     modifier: Modifier = Modifier,
     showOptions: Boolean = true,
+    enabled: Boolean = true,
     importFilter: @Composable () -> Unit,
 ) {
-    var heroOptionsExpanded by rememberSaveable { mutableStateOf(false) }
-    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
-        Surface(shape = RoundedCornerShape(32.dp), color = MaterialTheme.colorScheme.primaryContainer) {
-            Column(Modifier.fillMaxWidth().padding(24.dp), verticalArrangement = Arrangement.spacedBy(24.dp)) {
-                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween) {
-                    Surface(shape = CircleShape, color = MaterialTheme.colorScheme.primary) {
-                        Text("ULTRA HDR", Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
-                            style = MaterialTheme.typography.labelMedium)
-                    }
-                    // A quiet photo-stack motif, drawn with the app's own tonal palette.
-                    Box(Modifier.size(76.dp), contentAlignment = Alignment.Center) {
-                        Surface(Modifier.size(60.dp).rotate(-16f), shape = RoundedCornerShape(18.dp),
-                            color = MaterialTheme.colorScheme.tertiaryContainer) {}
-                        Surface(Modifier.size(60.dp).rotate(12f), shape = RoundedCornerShape(18.dp),
-                            color = MaterialTheme.colorScheme.primary) {
-                            Box(contentAlignment = Alignment.Center) { Icon(Icons.Rounded.FilterHdr, null, Modifier.size(34.dp)) }
-                        }
-                    }
-                }
-                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    Text("让照片\n轻一点", style = MaterialTheme.typography.displaySmall, fontWeight = FontWeight.Bold)
-                    Text("留下明暗层次，腾出更多空间。", style = MaterialTheme.typography.bodyLarge)
-                }
-                importFilter()
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Button(onClick = onPick, modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
-                        shapes = ButtonDefaults.shapes(), contentPadding = PaddingValues(16.dp)) {
-                        Icon(Icons.Rounded.AddPhotoAlternate, null, Modifier.size(24.dp))
-                        Spacer(Modifier.width(12.dp))
-                        Text("选择照片", style = MaterialTheme.typography.titleMedium)
-                    }
-                    FilledTonalButton(onClick = onAlbums, modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
-                        shapes = ButtonDefaults.shapes()) {
-                        Icon(Icons.Rounded.PhotoLibrary, null, Modifier.size(20.dp))
-                        Spacer(Modifier.width(10.dp))
-                        Text("相册导入")
-                    }
-                }
-            }
+    var importOptionsExpanded by rememberSaveable { mutableStateOf(false) }
+    Column(
+        modifier.fillMaxWidth().padding(top = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(24.dp),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text("添加照片", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+            Text("选择照片，或批量导入相册与文件夹。", style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
-        FlowRow(Modifier.padding(horizontal = 4.dp), horizontalArrangement = Arrangement.spacedBy(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            FeatureLabel(Icons.Rounded.AutoAwesome, "保留 HDR 亮度")
-            FeatureLabel(Icons.Rounded.Security, "离线处理")
+        ImportActions(
+            onPick = onPick,
+            onAlbums = onAlbums,
+            onFolder = onFolder,
+            modifier = Modifier.fillMaxWidth(),
+            prominent = true,
+            enabled = enabled,
+        )
+        Surface(shape = MaterialTheme.shapes.large, color = MaterialTheme.colorScheme.surfaceContainerLow) {
+            Box(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) { importFilter() }
         }
-        if (showOptions) OutputSchemeCard(defaults, callbacks, heroOptionsExpanded,
-            onToggleExpand = { heroOptionsExpanded = !heroOptionsExpanded }, enabled = true)
+        if (showOptions) OutputSchemeCard(defaults, callbacks, importOptionsExpanded,
+            onToggleExpand = { importOptionsExpanded = !importOptionsExpanded }, enabled = true)
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Rounded.Security, null, Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text("照片仅在本机处理", style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
     }
 }
 
@@ -986,10 +982,11 @@ private fun OutputSchemeCard(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
+                FlowRow(
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    modifier = Modifier.weight(1f, fill = false),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                    itemVerticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f).padding(end = 8.dp),
                 ) {
                     Icon(
                         Icons.Rounded.Tune,

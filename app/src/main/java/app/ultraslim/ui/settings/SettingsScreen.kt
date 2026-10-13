@@ -43,7 +43,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmAutoReplace = false },
             title = { Text("开启校验后自动替换？") },
-            text = { Text("将同时开启自动保存。仅当成品更小、完整保存且系统能解码，HDR 和实况视频均通过检查后，才将原图移入系统回收站。\n\n原图不会被直接覆盖；回收站保留期限由系统决定。Android 可能仍需确认，取消会保留原图。后台完成的任务将在回到应用后继续；不支持校验或无法定位原图时不替换。此选项只影响之后开始的任务。") },
+            text = { Text("将同时开启自动保存，成品保存回原相册并保留拍摄时间。仅当成品更小、完整保存且系统能解码，HDR 和实况视频均通过检查后，才将原图移入系统回收站。\n\n原图不会被直接覆盖；回收站保留期限由系统决定。Android 可能仍需确认，取消会保留原图。小窗或后台转换先保存在应用内，回到完整窗口后自动入册并继续替换；不支持校验或无法定位原图时不替换。此选项只影响之后开始的任务。") },
             confirmButton = { TextButton(onClick = { confirmAutoReplace = false; vm.setAutoReplaceOriginals(true) }) { Text("开启") } },
             dismissButton = { TextButton(onClick = { confirmAutoReplace = false }) { Text("取消") } },
         )
@@ -94,10 +94,10 @@ fun SettingsScreen(onBack: () -> Unit) {
         SettingsGroup("保存与原图", "控制成品的去向，原图始终有据可查") {
             SettingItem("仅保留更小结果", "成品没有变小时，保留原图", Icons.Rounded.Compress,
                 defaults.onlySmaller, vm::setOnlySmaller, 0, 3)
-            SettingItem("自动保存到相册", "完成后保存到 UltraSlim 相册", Icons.Rounded.PhotoLibrary,
+            SettingItem("自动保存到相册", "保存到 UltraSlim；自动替换时存回原相册", Icons.Rounded.PhotoLibrary,
                 defaults.autoSave, vm::setAutoSave, 1, 3)
             SettingItem("校验后自动替换原图",
-                if (Build.VERSION.SDK_INT >= 30) "默认关闭；保存并校验后，将原图移入系统回收站" else "需要 Android 11 或更新版本",
+                if (Build.VERSION.SDK_INT >= 30) "存回原相册并校验后，将原图移入系统回收站" else "需要 Android 11 或更新版本",
                 Icons.Rounded.VerifiedUser, defaults.autoReplaceOriginals,
                 { if (it) confirmAutoReplace = true else vm.setAutoReplaceOriginals(false) }, 2, 3,
                 enabled = Build.VERSION.SDK_INT >= 30)
@@ -142,8 +142,11 @@ fun SettingsScreen(onBack: () -> Unit) {
         }
         SettingsGroup("存储与维护") {
             SegmentedListItem(onClick = {
-                PreviewCache.clear(context)
-                scope.launch { snackbar.showSnackbar("已清理缩略图与临时缓存") }
+                // 删目录持 diskLock 且可能上百个文件，不能阻塞主线程。
+                scope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    PreviewCache.clear(context)
+                    snackbar.showSnackbar("已清理缩略图与临时缓存")
+                }
             }, shapes = ListItemDefaults.segmentedShapes(0, 1),
                 leadingContent = { Icon(Icons.Rounded.CleaningServices, null, tint = MaterialTheme.colorScheme.primary) },
                 supportingContent = { Text("仅清理预览与临时缓存，不影响相册照片") },

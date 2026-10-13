@@ -84,10 +84,11 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
                 }
                 busyState.value = BusyState("删除中", 0, records.size)
                 var processed = 0
-                for (entity in records) {
+                for (chunk in records.chunked(50)) {
                     coroutineContext.ensureActive()
-                    OutputStore.delete(app, entity.id)
-                    busyState.value = BusyState("删除中", ++processed, records.size)
+                    OutputStore.deleteBatch(app, chunk.map { it.id })
+                    processed += chunk.size
+                    busyState.value = BusyState("删除中", processed, records.size)
                 }
                 _events.emit("已删除 ${records.size} 条记录，已保存到相册的图片不受影响")
             } catch (e: kotlinx.coroutines.CancellationException) {
@@ -152,37 +153,45 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
     /** 原图 → MediaStore URI 的解析缓存（含逐条查询）；Default 线程解析，选择时只查表。 */
     private val trashableCache = MutableStateFlow<Map<Long, Uri>>(emptyMap())
     val trashableOriginals: StateFlow<Map<Long, Uri>> = trashableCache.asStateFlow()
+    private val trashableInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
 
     /** 补齐缺缓存条目的解析；页面加载或筛选变化时调用，重复调用只解析增量。 */
     fun ensureTrashableResolved(items: List<HistoryEntity>) {
-        val missing = items.filter { it.id !in trashableCache.value }.map { it.id to it.inputUri }
+        // 在飞守卫：同一批 id 未完成解析前不重复派活，避免列表刷新时重复 provider 查询。
+        val missing = items.map { it.id to it.inputUri }
+            .filter { (id, _) -> id !in trashableCache.value && trashableInFlight.add(id) }
         if (missing.isEmpty()) return
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
-            val resolved = missing.mapNotNull { (id, uri) ->
-                MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, Uri.parse(uri))?.let { id to it }
+            try {
+                val resolved = missing.mapNotNull { (id, uri) ->
+                    MediaStoreTrashHelper.activeOriginal(app, Uri.parse(uri))?.let { id to it }
+                }
+                trashableCache.update { it + resolved }
+            } finally {
+                trashableInFlight.removeAll(missing.mapTo(mutableSetOf()) { it.first })
             }
-            trashableCache.update { it + resolved }
         }
     }
 
     private fun trashableOriginalUris(ids: Set<Long>): List<Uri> =
         ids.mapNotNull { trashableCache.value[it] }
 
-    fun requestTrashSelected(ids: Set<Long>): IntentSender? {
+    suspend fun requestTrashSelected(ids: Set<Long>): IntentSender? {
         val uris = trashableOriginalUris(ids)
         if (uris.isEmpty()) {
             _events.tryEmit("所选照片的原图不在系统相册管理范围内")
             return null
         }
-        val sender = MediaStoreTrashHelper.createTrashIntentSender(app, uris)
-        if (sender == null) {
-            _events.tryEmit("系统不支持或无法获取回收站权限")
-        }
-        return sender
+        val request = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { MediaStoreTrashHelper.prepareTrashRequest(app, uris) }
+        request.message?.let { _events.tryEmit(it) }
+        pendingTrashUris = request.uris.toSet()
+        return request.sender
     }
 
+    private var pendingTrashUris = emptySet<Uri>()
     fun onSelectedOriginalsTrashed(count: Int) {
-        _events.tryEmit("已将 $count 张原图移至系统相册回收站（恢复期限以系统回收站为准）")
+        trashableCache.update { cache -> cache.filterValues { it !in pendingTrashUris } }
+        _events.tryEmit("已将 ${pendingTrashUris.size} 张原图移至系统相册回收站（恢复期限以系统回收站为准）")
     }
 
     fun clearAll() {
@@ -199,10 +208,11 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
                 busyState.value = BusyState("清空中", 0, 0)
                 val records = dao.all()
                 var processed = 0
-                for (entity in records) {
+                for (chunk in records.chunked(50)) {
                     coroutineContext.ensureActive()
-                    OutputStore.delete(app, entity.id)
-                    busyState.value = BusyState("清空中", ++processed, records.size)
+                    OutputStore.deleteBatch(app, chunk.map { it.id })
+                    processed += chunk.size
+                    busyState.value = BusyState("清空中", processed, records.size)
                 }
                 app.conversionRepository.clearFinished()
             } catch (e: kotlinx.coroutines.CancellationException) {

@@ -27,7 +27,10 @@ class AutomaticReplacementUiTest {
         val pixels = IntArray(256 * 256) { random.nextInt() or 0xff000000.toInt() }
         val image = Bitmap.createBitmap(pixels, 256, 256, Bitmap.Config.ARGB_8888)
         input.outputStream().use { image.compress(Bitmap.CompressFormat.JPEG, 100, it) }; image.recycle()
-        val source = MediaStoreSaver.save(app, input, "$id-source.jpg", OutputFormat.JPEG)!!
+        val originalDate = 1600000000000L
+        val album = "DCIM/UltraSlimReplacementTest/"
+        val source = MediaStoreSaver.save(app, input, "$id-source.jpg", OutputFormat.JPEG,
+            relativePath = album, dateTaken = originalDate)!!
         try {
             runBlocking {
                 app.settingsRepository.setAutoReplaceOriginals(true)
@@ -56,6 +59,9 @@ class AutomaticReplacementUiTest {
             runBlocking {
                 val history = app.database.historyDao().byTask(id)!!
                 assertEquals("SAVED", history.saveState)
+                val metadata = SourceMedia.read(app, Uri.parse(history.outputUri))!!
+                assertEquals(album, metadata.relativePath)
+                assertEquals(originalDate, metadata.dateTaken)
                 app.contentResolver.openInputStream(Uri.parse(history.outputUri))!!.use { assertTrue(it.read() >= 0) }
             }
         } finally {
@@ -75,4 +81,26 @@ class AutomaticReplacementUiTest {
 
     @Test fun cancelSystemRequestKeepsOriginalAndSavedOutput() = runReplacement(false)
     @Test fun approveSystemRequestTrashesOnlyTestOriginalAfterWorkerSuccess() = runReplacement(true)
+
+    @Test fun journalsForExternallyRemovedOriginalsDoNotReopenSystemConfirmation() {
+        val app = compose.activity.application as UltraSlimApp
+        for (trash in listOf(true, false)) {
+            compose.runOnIdle { app.galleryPublishingAllowed.value = false }
+            runBlocking {
+                AutoReplacementTest().fixture { history, source, _ ->
+                    AutoReplacement.stage(app, history, AutoReplacement.fingerprint(app, source))
+                    AutoReplacement.saved(app, OutputStore.save(app, history))
+                    if (trash) app.contentResolver.update(source, android.content.ContentValues().apply {
+                        put(android.provider.MediaStore.MediaColumns.IS_TRASHED, 1)
+                    }, null, null) else app.contentResolver.delete(source, null, null)
+                    compose.runOnIdle { app.galleryPublishingAllowed.value = true }
+                    compose.waitUntil(10_000) {
+                        runBlocking { app.database.replacementDao().byId(history.id)?.state == if (trash) "DONE" else "SKIPPED" }
+                    }
+                    assertEquals(app.packageName, InstrumentationRegistry.getInstrumentation().uiAutomation.rootInActiveWindow?.packageName?.toString())
+                }
+            }
+        }
+    }
+
 }

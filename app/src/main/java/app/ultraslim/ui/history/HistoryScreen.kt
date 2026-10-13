@@ -136,8 +136,10 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
                                     FilledTonalButton(
                                         onClick = {
                                             lastTrashCount = trashableCount
-                                            val sender = vm.requestTrashSelected(selectedItems.map { it.id }.toSet())
-                                            if (sender != null) trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                                            scope.launch {
+                                                val sender = vm.requestTrashSelected(selectedItems.map { it.id }.toSet())
+                                                if (sender != null) trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
+                                            }
                                         },
                                         enabled = !state.busyNow,
                                     ) {

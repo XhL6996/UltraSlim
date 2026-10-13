@@ -36,7 +36,7 @@ class AutoReplacementTest {
         assertNull(MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, Uri.parse("content://media/external/video/media/123")))
     }
 
-    private suspend fun fixture(action: suspend (HistoryEntity, Uri, File) -> Unit) {
+    internal suspend fun fixture(action: suspend (HistoryEntity, Uri, File) -> Unit) {
         val id = UUID.randomUUID().toString()
         val input = File(app.cacheDir, "$id-source.jpg")
         val output = File(app.filesDir, "outputs/$id.jpg").apply { parentFile!!.mkdirs() }
@@ -57,7 +57,8 @@ class AutoReplacementTest {
             app.database.historyDao().byId(history.id)?.outputUri?.takeIf { it.startsWith("content://") }?.let { app.contentResolver.delete(Uri.parse(it), null, null) }
             app.database.replacementDao().finish(listOf(history.id), "CANCELLED", "测试完成")
             app.database.historyDao().deleteById(history.id)
-            app.contentResolver.delete(source, null, null)
+            if (MediaStoreTrashHelper.originalState(app, source) != MediaStoreTrashHelper.OriginalState.UNAVAILABLE)
+                app.contentResolver.delete(source, null, null)
             app.settingsRepository.setAutoReplaceOriginals(false)
             input.delete(); output.delete()
         }

@@ -26,6 +26,9 @@ internal fun CommitSwipeRow(
 ) {
     var width by remember { mutableIntStateOf(0) }
     var offset by remember { mutableFloatStateOf(0f) }
+    // 显隐判断走 derivedStateOf：拖动每帧改 offset 只在 0↔非 0 切换时重组，
+    // content() 的位移由 Modifier.offset 的 placement lambda 承担，不参与重组。
+    val backgroundVisible by remember { derivedStateOf { offset != 0f } }
     val latestCommit by rememberUpdatedState(onCommit)
     val latestEnabled by rememberUpdatedState(enabled)
     val scope = rememberCoroutineScope()
@@ -53,7 +56,7 @@ internal fun CommitSwipeRow(
             },
         )
     }) {
-        if (offset != 0f) Box(Modifier.matchParentSize()) { background() }
+        if (backgroundVisible) Box(Modifier.matchParentSize()) { background() }
         Box(Modifier.offset { IntOffset(offset.roundToInt(), 0) }) { content() }
     }
 }

@@ -162,10 +162,13 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
             vm.onOriginalTrashed()
         }
     }
-    val trashOriginal = {
-        val sender = vm.requestTrashOriginal()
-        if (sender != null) {
-            trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
+    val trashScope = rememberCoroutineScope()
+    val trashOriginal: () -> Unit = {
+        trashScope.launch {
+            val sender = vm.requestTrashOriginal()
+            if (sender != null) {
+                trashLauncher.launch(IntentSenderRequest.Builder(sender).build())
+            }
         }
     }
 

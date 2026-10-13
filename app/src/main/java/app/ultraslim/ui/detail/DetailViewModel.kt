@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -44,8 +45,12 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
     private val originalTrashed = MutableStateFlow(false)
     private val canTrash = MutableStateFlow(false)
 
+    // 单一 Room 订阅：uiState 与回收站状态共用，且只有 inputUri 变化才重跑
+    // MediaStore 检查（历史行的其他字段更新不再触发 provider 调用）。
+    private val entityFlow = dao.flowById(historyId)
+
     val uiState: StateFlow<DetailUiState> = combine(
-        dao.flowById(historyId),
+        entityFlow,
         saving,
         originalTrashed,
         canTrash,
@@ -61,18 +66,20 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
 
     init {
         viewModelScope.launch {
-            dao.flowById(historyId).collect { entity ->
-                if (entity != null) {
-                    val uri = Uri.parse(entity.inputUri)
-                    withContext(Dispatchers.IO) {
-                        val trashed = MediaStoreTrashHelper.isOriginalTrashed(app, uri)
-                        val accessible = MediaStoreTrashHelper.isOriginalAccessible(app, uri)
-                        val resolvable = MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, uri) != null
-                        originalTrashed.value = trashed
-                        canTrash.value = MediaStoreTrashHelper.isTrashSupported && resolvable && accessible && !trashed
+            entityFlow
+                .distinctUntilChangedBy { it?.inputUri }
+                .collect { entity ->
+                    if (entity != null) {
+                        val uri = Uri.parse(entity.inputUri)
+                        withContext(Dispatchers.IO) {
+                            val trashed = MediaStoreTrashHelper.isOriginalTrashed(app, uri)
+                            val accessible = MediaStoreTrashHelper.isOriginalAccessible(app, uri)
+                            val resolvable = MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, uri) != null
+                            originalTrashed.value = trashed
+                            canTrash.value = MediaStoreTrashHelper.isTrashSupported && resolvable && accessible && !trashed
+                        }
                     }
                 }
-            }
         }
     }
 
@@ -157,14 +164,13 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
         }
     }
 
-    fun requestTrashOriginal(): IntentSender? {
+    suspend fun requestTrashOriginal(): IntentSender? {
         val entity = uiState.value.entity ?: return null
         val uri = Uri.parse(entity.inputUri)
-        val sender = MediaStoreTrashHelper.createTrashIntentSender(app, listOf(uri))
-        if (sender == null) {
-            _events.tryEmit(DetailEvent.Message("原图不在系统相册管理范围内，无法移入回收站"))
-        }
-        return sender
+        // MediaStore 查询 + createTrashRequest 是多次 provider round-trip，不能在主线程跑。
+        val request = withContext(Dispatchers.IO) { MediaStoreTrashHelper.prepareTrashRequest(app, listOf(uri)) }
+        request.message?.let { _events.tryEmit(DetailEvent.Message(it)) }
+        return request.sender
     }
 
     fun onOriginalTrashed() {

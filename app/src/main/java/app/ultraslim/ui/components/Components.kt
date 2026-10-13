@@ -48,8 +48,6 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.foundation.clickable
 import androidx.compose.ui.draw.clip
@@ -58,7 +56,6 @@ import androidx.compose.ui.draw.rotate
 import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
-import androidx.compose.material.icons.rounded.BookmarkBorder
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -579,7 +576,7 @@ fun ConversionOptionsPanel(
             if (showAutoSave) {
                 SwitchRow(
                     title = "自动保存到相册",
-                    hint = "转换完成后自动写入系统 相册/UltraSlim 目录",
+                    hint = if (defaults.autoReplaceOriginals) "存回原相册；小窗/后台完成后回到应用自动保存" else "保存到 UltraSlim；小窗/后台完成后回到应用自动保存",
                     checked = defaults.autoSave,
                     onCheckedChange = callbacks.onAutoSaveChange,
                     enabled = enabled,
@@ -598,7 +595,7 @@ fun ConversionOptionsPanel(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
-                    Column {
+                    Column(Modifier.weight(1f).padding(end = 8.dp)) {
                         Text("进阶参数与元数据", style = MaterialTheme.typography.titleSmall)
                         Text("尺寸缩放、速度档位、精确品质、EXIF 与 GPS", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
@@ -676,31 +673,11 @@ fun ConversionOptionsPanel(
             // 本次参数与全局默认参数快捷同步条
             if (callbacks.onSaveAsDefault != null || callbacks.onResetToDefault != null) {
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        "当前仅对本次任务生效",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        if (callbacks.onResetToDefault != null) {
-                            TextButton(onClick = callbacks.onResetToDefault, enabled = enabled) {
-                                Text("重置为默认")
-                            }
-                        }
-                        if (callbacks.onSaveAsDefault != null) {
-                            OutlinedButton(onClick = callbacks.onSaveAsDefault, enabled = enabled) {
-                                Icon(Icons.Rounded.BookmarkBorder, null, Modifier.size(16.dp))
-                                Spacer(Modifier.width(4.dp))
-                                Text("保存为全局默认")
-                            }
-                        }
-                    }
-                }
+                DefaultOptionsActions(
+                    onSaveAsDefault = callbacks.onSaveAsDefault,
+                    onResetToDefault = callbacks.onResetToDefault,
+                    enabled = enabled,
+                )
             }
         }
     }

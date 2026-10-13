@@ -74,9 +74,16 @@ if(ULTRASLIM_HOST_TEST)
 else()
   add_library(ultraslim SHARED ${TRANSCODE_SRCS} ${CMAKE_CURRENT_SOURCE_DIR}/jni/ultraslim_jni.cpp)
   # NDK r27 defaults to 4 KB. Align both LOAD segments and the RELRO boundary.
+  # Hidden visibility + gc-sections keep the statically linked codecs' symbols
+  # out of the dynamic symbol table (JNIEXPORT functions are unaffected).
+  target_compile_options(ultraslim PRIVATE
+      -fvisibility=hidden -fvisibility-inlines-hidden
+      -ffunction-sections -fdata-sections)
   target_link_options(ultraslim PRIVATE
       "-Wl,-z,max-page-size=16384"
-      "-Wl,-z,common-page-size=16384")
+      "-Wl,-z,common-page-size=16384"
+      "-Wl,--gc-sections"
+      "-Wl,--exclude-libs,ALL")
   target_include_directories(ultraslim PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr ${CMAKE_CURRENT_SOURCE_DIR}/../third_party/libultrahdr/lib/include ${DEPS_PREFIX}/include)
   # Keep the Maven 1.0.1 Kotlin API, rebuilding its JNI component with aligned RELRO.
   add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../third_party/androidx-graphics-path
@@ -110,11 +117,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
   endif()
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     foreach(_t IN LISTS _ultraslim_opt)
-      target_compile_options(${_t} PRIVATE -O2 -ffp-contract=fast)
+      target_compile_options(${_t} PRIVATE -O2 -ffp-contract=fast -ffunction-sections -fdata-sections)
     endforeach()
   else()
     foreach(_t IN LISTS _ultraslim_opt)
-      target_compile_options(${_t} PRIVATE -O3 -flto=thin -ffp-contract=fast -fvectorize)
+      target_compile_options(${_t} PRIVATE -O3 -flto=thin -ffp-contract=fast -fvectorize -ffunction-sections -fdata-sections)
     endforeach()
     if(TARGET ultraslim)
       target_link_options(ultraslim PRIVATE -flto=thin)

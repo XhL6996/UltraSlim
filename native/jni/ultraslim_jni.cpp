@@ -7,20 +7,50 @@
 
 namespace {
 
+// FindClass/GetMethodID 每次调用的开销虽小，但转码循环里每图至少一次；
+// 缓存为全局引用 + 静态初始化（C++11 起线程安全）。
+struct ProbeResultIds {
+  jclass cls;
+  jmethodID ctor;
+};
+
+const ProbeResultIds& probeResultIds(JNIEnv* env) {
+  static const ProbeResultIds ids = [env] {
+    jclass local = env->FindClass("app/ultraslim/bridge/ProbeResult");
+    jclass global = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+    return ProbeResultIds{global, env->GetMethodID(global, "<init>", "(ILjava/lang/String;ZIIIIIZFF)V")};
+  }();
+  return ids;
+}
+
+struct TranscodeResultIds {
+  jclass cls;
+  jmethodID ctor;
+};
+
+const TranscodeResultIds& transcodeResultIds(JNIEnv* env) {
+  static const TranscodeResultIds ids = [env] {
+    jclass local = env->FindClass("app/ultraslim/bridge/TranscodeResult");
+    jclass global = static_cast<jclass>(env->NewGlobalRef(local));
+    env->DeleteLocalRef(local);
+    return TranscodeResultIds{global, env->GetMethodID(global, "<init>", "(ILjava/lang/String;ZIIIIJJDZZF)V")};
+  }();
+  return ids;
+}
+
 jobject toProbeResult(JNIEnv* env, const ultraslim::ProbeResult& r) {
-  jclass cls = env->FindClass("app/ultraslim/bridge/ProbeResult");
-  jmethodID ctor = env->GetMethodID(cls, "<init>", "(ILjava/lang/String;ZIIIIIZFF)V");
+  const auto& ids = probeResultIds(env);
   jstring err = env->NewStringUTF(r.error.c_str());
-  return env->NewObject(cls, ctor, r.errorCode, err, r.hasGainMap ? JNI_TRUE : JNI_FALSE,
+  return env->NewObject(ids.cls, ids.ctor, r.errorCode, err, r.hasGainMap ? JNI_TRUE : JNI_FALSE,
                         r.container, r.width, r.height, r.gainmapWidth, r.gainmapHeight,
                         r.hasExif ? JNI_TRUE : JNI_FALSE, r.maxContentBoost, r.hdrCapacityMax);
 }
 
 jobject toTranscodeResult(JNIEnv* env, const ultraslim::TranscodeResult& r) {
-  jclass cls = env->FindClass("app/ultraslim/bridge/TranscodeResult");
-  jmethodID ctor = env->GetMethodID(cls, "<init>", "(ILjava/lang/String;ZIIIIJJDZZF)V");
+  const auto& ids = transcodeResultIds(env);
   jstring err = env->NewStringUTF(r.error.c_str());
-  return env->NewObject(cls, ctor, r.errorCode, err,
+  return env->NewObject(ids.cls, ids.ctor, r.errorCode, err,
                         r.inputHadGainMap ? JNI_TRUE : JNI_FALSE, r.width, r.height,
                         r.gainmapWidth, r.gainmapHeight, static_cast<jlong>(r.inputBytes),
                         static_cast<jlong>(r.outputBytes), static_cast<jdouble>(r.durationMs),

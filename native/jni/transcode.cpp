@@ -343,6 +343,12 @@ bool decodeJpegSdr(const std::vector<uint8_t>& data, SdrImage& out, std::string&
     JSAMPROW row = out.rgba.data() + static_cast<size_t>(cinfo.output_scanline) * stride;
     if (jpeg_read_scanlines(&cinfo, &row, 1) != 1) break;
   }
+  if (cinfo.output_scanline < cinfo.output_height) {
+    // 截断/损坏的码流：剩余行保持零值会产出灰底图，按失败处理。
+    jpeg_destroy_decompress(&cinfo);
+    err = "JPEG 数据不完整";
+    return false;
+  }
   for (jpeg_saved_marker_ptr m = cinfo.marker_list; m != nullptr; m = m->next) {
     if (m->marker == JPEG_APP0 + 1 && m->data_length >= 6 &&
         memcmp(m->data, "Exif\0\0", 6) == 0) {
@@ -612,7 +618,14 @@ bool probeJxl(const std::vector<uint8_t>& data, ProbeResult& r) {
     } else if (status == JXL_DEC_BOX_NEED_MORE_OUTPUT) {
       const size_t remaining = JxlDecoderReleaseBoxBuffer(dec);
       const size_t used = currBoxData.size() - remaining;
-      currBoxData.resize(currBoxData.size() * 2);
+      const size_t doubled = currBoxData.size() * 2;
+      if (doubled > kMaxBoxBytes) {
+        // 声明尺寸未知时倍增也要受 kMaxBoxBytes 约束，超限视为损坏数据。
+        r.errorCode = 32;
+        r.error = "JXL box 超过大小限制";
+        break;
+      }
+      currBoxData.resize(doubled);
       JxlDecoderSetBoxBuffer(dec, currBoxData.data() + used, currBoxData.size() - used);
     } else if (status == JXL_DEC_BOX_COMPLETE) {
       const size_t remaining = JxlDecoderReleaseBoxBuffer(dec);
@@ -756,7 +769,14 @@ bool decodeJxlToSdr(const std::vector<uint8_t>& data, SdrImage& out,
     } else if (status == JXL_DEC_BOX_NEED_MORE_OUTPUT) {
       const size_t remaining = JxlDecoderReleaseBoxBuffer(dec);
       const size_t used = currBoxData.size() - remaining;
-      currBoxData.resize(currBoxData.size() * 2);
+      const size_t doubled = currBoxData.size() * 2;
+      if (doubled > kMaxBoxBytes) {
+        // 声明尺寸未知时倍增也要受 kMaxBoxBytes 约束，超限视为损坏数据。
+        err = "JXL box 超过大小限制";
+        success = false;
+        break;
+      }
+      currBoxData.resize(doubled);
       JxlDecoderSetBoxBuffer(dec, currBoxData.data() + used, currBoxData.size() - used);
     } else if (status == JXL_DEC_BOX_COMPLETE) {
       const size_t remaining = JxlDecoderReleaseBoxBuffer(dec);
@@ -1115,15 +1135,6 @@ void rgbaToYuv420(const SdrImage& img, std::vector<uint8_t>& yPlane, std::vector
   rgbaToYuv420Direct(img, yPlane.data(), w, uPlane.data(), cw, vPlane.data(), cw, bt709);
 }
 
-void copyPlane(heif_image* image, heif_channel channel, const uint8_t* src, int width, int rows) {
-  int dstStride = 0;
-  uint8_t* dst = heif_image_get_plane(image, channel, &dstStride);
-  if (dst == nullptr) return;
-  for (int row = 0; row < rows; row++) {
-    memcpy(dst + static_cast<size_t>(dstStride) * row, src + static_cast<size_t>(width) * row, width);
-  }
-}
-
 int resolveCodecThreads(int requested) {
   if (requested > 0) return requested;
   unsigned cores = std::thread::hardware_concurrency();
@@ -1184,8 +1195,10 @@ int attachGainMap(heif_context* ctx, heif_image_handle* base, heif_encoder* enco
   std::unique_ptr<heif_encoder, decltype(&heif_encoder_release)> mapOwner(mapEncoder, heif_encoder_release);
   configureEncoder(mapEncoder, gm.codec, ultraslim_codec_speed_level, ultraslim_codec_threads);
   if (avif) {
+    // 无损增益图用独立的 speed 映射（覆盖 configureEncoder 的通用值）；索引先 clamp。
+    const int level = ultraslim_codec_speed_level < 0 || ultraslim_codec_speed_level > 2 ? 1 : ultraslim_codec_speed_level;
     const int speeds[] = {4, 6, 8};
-    heif_encoder_set_parameter_integer(mapEncoder, "speed", speeds[ultraslim_codec_speed_level]);
+    heif_encoder_set_parameter_integer(mapEncoder, "speed", speeds[level]);
   }
   e = heif_encoder_set_lossless(mapEncoder, 1);
   if (e.code != heif_error_Ok) { err = e.message; return 24; }
@@ -1479,8 +1492,10 @@ int encodeJxl(const SdrImage& base, int quality, bool keepExif, int outFd,
               int speedLevel, int threads, const GainMapPayload* gainmap, std::string& err) {
   const int th = threads > 0 ? threads : resolveCodecThreads(threads);
 
-  std::vector<uint8_t> jhgm = gainmap ? gainmap->encodedJxl : std::vector<uint8_t>{};
-  if (gainmap != nullptr && jhgm.empty()) {
+  // 重试时复用缓存的 jhgm，避免整份拷贝无损增益图码流。
+  std::vector<uint8_t> jhgmLocal;
+  const std::vector<uint8_t>* jhgm = gainmap ? &gainmap->encodedJxl : nullptr;
+  if (gainmap != nullptr && jhgm->empty()) {
     if (gainmap->iso.empty() || gainmap->image.width <= 0 || gainmap->image.height <= 0) {
       err = "gain map 数据不完整";
       return 24;
@@ -1566,16 +1581,21 @@ int encodeJxl(const SdrImage& base, int quality, bool keepExif, int outFd,
     if (gm_runner) JxlThreadParallelRunnerDestroy(gm_runner);
 
     size_t jhgm_size = 1 + 2 + gainmap->iso.size() + 1 + 4 + gm_codestream.size();
-    jhgm.resize(jhgm_size);
-    jhgm[0] = 0; // version 0
-    storeBE16(static_cast<uint16_t>(gainmap->iso.size()), jhgm.data() + 1);
-    memcpy(jhgm.data() + 3, gainmap->iso.data(), gainmap->iso.size());
+    jhgmLocal.resize(jhgm_size);
+    jhgmLocal[0] = 0; // version 0
+    storeBE16(static_cast<uint16_t>(gainmap->iso.size()), jhgmLocal.data() + 1);
+    memcpy(jhgmLocal.data() + 3, gainmap->iso.data(), gainmap->iso.size());
     size_t cursor = 3 + gainmap->iso.size();
-    jhgm[cursor++] = 0; // no extra color encoding
-    storeBE32(0, jhgm.data() + cursor); // no alt ICC
+    jhgmLocal[cursor++] = 0; // no extra color encoding
+    storeBE32(0, jhgmLocal.data() + cursor); // no alt ICC
     cursor += 4;
-    memcpy(jhgm.data() + cursor, gm_codestream.data(), gm_codestream.size());
-    if (gainmap->cacheForRetry) gainmap->encodedJxl = jhgm;
+    memcpy(jhgmLocal.data() + cursor, gm_codestream.data(), gm_codestream.size());
+    if (gainmap->cacheForRetry) {
+      gainmap->encodedJxl = jhgmLocal;
+      jhgm = &gainmap->encodedJxl;
+    } else {
+      jhgm = &jhgmLocal;
+    }
   }
 
   // Primary image
@@ -1626,8 +1646,8 @@ int encodeJxl(const SdrImage& base, int quality, bool keepExif, int outFd,
     }
   }
 
-  if (gainmap != nullptr && !jhgm.empty()) {
-    JxlEncoderAddBox(enc, "jhgm", jhgm.data(), jhgm.size(), JXL_FALSE);
+  if (jhgm != nullptr && !jhgm->empty()) {
+    JxlEncoderAddBox(enc, "jhgm", jhgm->data(), jhgm->size(), JXL_FALSE);
   }
 
   if (hasBoxes) JxlEncoderCloseBoxes(enc);
@@ -2244,9 +2264,6 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, DecoderPtr 
       r.error = "解码结果为空";
       return r;
     }
-    // 解码完成后压缩输入不再被读取；提前释放，重建/编码期间少驻留一份完整输入。
-    data.clear();
-    data.shrink_to_fit();
     raw->range = UHDR_CR_FULL_RANGE;  // encoder expects full-range RGB
     r.width = static_cast<int>(raw->w);
     r.height = static_cast<int>(raw->h);
@@ -2270,6 +2287,9 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, DecoderPtr 
         exif = &exifBlock;
       }
     }
+    // EXIF 回退提取完成后压缩输入不再被读取；提前释放，重建/编码期间少驻留一份完整输入。
+    data.clear();
+    data.shrink_to_fit();
 
     if(options.keepExif && exif && exif->data && exif->data_sz) {
       if(containerExif.empty()) containerExif=copyBlock(exif);
@@ -2318,6 +2338,7 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, DecoderPtr 
       return r;
     }
     if (!writeAll(outFd, out->data, out->data_sz)) {
+      if (lseek(outFd, 0, SEEK_SET) >= 0) ftruncate(outFd, 0);
       r.errorCode = 13;
       r.error = std::string("写入输出文件失败: ") + strerror(errno);
       return r;
@@ -2383,6 +2404,8 @@ static TranscodeResult transcodeUnchecked(std::vector<uint8_t> data, DecoderPtr 
       return code;
     });
     if (encErr != 0) {
+      // 与 preserve 失败一致：失败时清掉已写入的部分内容，不留半截文件。
+      if (lseek(outFd, 0, SEEK_SET) >= 0) ftruncate(outFd, 0);
       r.errorCode = encErr;
       r.error = err;
       return r;
@@ -2466,6 +2489,9 @@ std::vector<uint8_t> debugDecodePlaneY(int fd, int& w, int& h) {
 
 std::vector<uint8_t> decodePreviewJpeg(int fd, int maxDim, int quality) {
   std::vector<uint8_t> empty;
+  // 该入口不经过 transcodeUnchecked，thread_local 线程数需自行初始化，
+  // 否则 maybeDownscale/orientPixels 的 parallelRows 全部退化为单线程。
+  if (ultraslim_codec_threads <= 0) ultraslim_codec_threads = resolveCodecThreads(0);
   std::vector<uint8_t> data = readAll(fd);
   if (data.empty()) return empty;
   const int container = sniffContainer(data.data(), data.size());

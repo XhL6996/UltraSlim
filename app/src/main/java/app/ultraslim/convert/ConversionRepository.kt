@@ -164,6 +164,12 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
         _queue.update { list -> list.map { if (it.id == id) transform(it) else it } }; persist()
     }
 
+    /** 批量 update：一次 map + 一次 persist，避免逐条调用造成 O(n²) 持久化写入放大。 */
+    @Synchronized fun updateAll(ids: Collection<String>, transform: (QueueItem) -> QueueItem) {
+        val set = ids.toSet()
+        _queue.update { list -> list.map { if (it.id in set) transform(it) else it } }; persist()
+    }
+
     @Synchronized fun updateByUri(uri: String, transform: (QueueItem) -> QueueItem) {
         _queue.update { list -> list.map { if (it.uri == uri) transform(it) else it } }; persist()
     }

@@ -74,7 +74,12 @@ internal object AutoReplacement {
             check(originalHash != null) { "未能记录转换前的原图校验值" }
             val source = Uri.parse(history.inputUri)
             val target = MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, source) ?: error("无法安全定位相册原图，请在历史中手动处理")
-            check(fingerprint(app, source) == originalHash && fingerprint(app, target) == originalHash) { "原图已发生变化" }
+            check(MediaStoreTrashHelper.originalState(app, target) == MediaStoreTrashHelper.OriginalState.PRESENT) { "原图已删除、在回收站或不可访问" }
+            check(SourceMedia.read(app, target) != null) { "无法确定原相册位置" }
+            // source 与 target 常解析到同一相册项，避免对同一文件做两次全量哈希。
+            val sourceHash = fingerprint(app, source)
+            val targetHash = if (target == source) sourceHash else fingerprint(app, target)
+            check(sourceHash == originalHash && targetHash == originalHash) { "原图已发生变化" }
             val output = Uri.fromFile(File(history.outputUri))
             requireReadable(app, output, history)
             val motion = MotionPhotoHelper.detect(app, source)
@@ -96,7 +101,8 @@ internal object AutoReplacement {
         if (history.saveState != "SAVED" || !history.outputUri.startsWith("content://")) return@withContext
         val ready = item.copy(outputUri = history.outputUri, state = "READY")
         try {
-            validate(app, ready)
+            // 原图哈希在 stage 刚校验过，回收前还会再验一次；这里只验新发布的成品副本。
+            validate(app, ready, recheckSource = false)
             app.database.replacementDao().update(ready)
         } catch (e: CancellationException) { throw e } catch (e: Exception) {
             finish(app, listOf(item), "SKIPPED", "原图保留：${e.message ?: "保存校验失败"}")
@@ -104,24 +110,47 @@ internal object AutoReplacement {
     }
 
     /** Rechecked immediately before requesting trash: files/permissions/settings can change while queued. */
-    suspend fun validate(app: UltraSlimApp, item: ReplacementEntity) = withContext(Dispatchers.IO) {
+    suspend fun validate(app: UltraSlimApp, item: ReplacementEntity, recheckSource: Boolean = true) = withContext(Dispatchers.IO) {
         check(app.settingsRepository.defaults.first().autoReplaceOriginals) { "自动替换已关闭" }
         check(app.database.taskDao().batch(item.batchId)?.cancelled == false) { "批次已取消" }
         val history = app.database.historyDao().byId(item.historyId) ?: error("记录已移除")
         check(history.saveState == "SAVED" && history.outputUri == item.outputUri) { "成品尚未保存" }
         check(item.sourceUri != item.outputUri) { "原图与成品位置相同" }
-        check(fingerprint(app, Uri.parse(item.sourceUri)) == item.sourceHash) { "原图已变化或不可访问" }
+        check(MediaStoreTrashHelper.originalState(app, Uri.parse(item.sourceUri)) == MediaStoreTrashHelper.OriginalState.PRESENT) { "原图已删除、在回收站或不可访问" }
+        if (recheckSource) {
+            check(fingerprint(app, Uri.parse(item.sourceUri)) == item.sourceHash) { "原图已变化或不可访问" }
+        }
         check(fingerprint(app, Uri.parse(item.outputUri)) == item.outputHash) { "成品已变化或不可访问" }
         requireReadable(app, Uri.parse(item.outputUri), history)
+        restoreOriginalAlbum(app, item)
+    }
+
+    /** Also repairs READY journals from versions which always published into UltraSlim. */
+    private fun restoreOriginalAlbum(app: UltraSlimApp, item: ReplacementEntity) {
+        val source = SourceMedia.read(app, Uri.parse(item.sourceUri)) ?: error("无法确定原相册位置")
+        val outputUri = Uri.parse(item.outputUri)
+        val output = SourceMedia.read(app, outputUri) ?: error("无法确定成品位置")
+        check(source.volume == output.volume) { "成品不在原存储卷，原图保留" }
+        if (source.relativePath != output.relativePath) {
+            check(app.galleryPublishingAllowed.value) { "回到应用后才能将成品移回原相册" }
+            MediaStoreSaver.preserveFileTime(app, outputUri, source.dateTaken)
+            val values = android.content.ContentValues().apply {
+                put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, source.relativePath)
+                source.dateTaken?.let { put(android.provider.MediaStore.Images.Media.DATE_TAKEN, it) }
+            }
+            check(app.contentResolver.update(outputUri, values, null, null) == 1) { "成品未能移回原相册，原图保留" }
+            check(SourceMedia.read(app, outputUri)?.relativePath == source.relativePath) { "原相册位置校验失败" }
+        }
     }
 
     suspend fun finish(app: UltraSlimApp, items: List<ReplacementEntity>, state: String, message: String) {
+        if (items.isEmpty()) return
         app.database.replacementDao().finish(items.map { it.historyId }, state, message)
-        items.forEach { note(app, it.historyId, message) }
+        // 单条批量 UPDATE 替代逐条 byId+update，避免 2N 次事务与反复触发表 invalidation。
+        app.database.historyDao().noteReplacement(items.map { it.historyId }, message)
     }
 
     private suspend fun note(app: UltraSlimApp, id: Long, message: String) {
-        val dao = app.database.historyDao()
-        dao.byId(id)?.let { dao.update(it.copy(settingsSummary = it.settingsSummary.substringBefore(" · 替换结果：") + " · 替换结果：$message")) }
+        app.database.historyDao().noteReplacement(listOf(id), message)
     }
 }

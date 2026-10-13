@@ -18,6 +18,8 @@ class UltraSlimApp : Application() {
 
     // Shared with legacy workers to prevent overlapping native encoders during an upgrade.
     internal val conversionMutex = kotlinx.coroutines.sync.Mutex()
+    internal val galleryPublicationRunning = kotlinx.coroutines.flow.MutableStateFlow(false)
+    internal val galleryPublishingAllowed = kotlinx.coroutines.flow.MutableStateFlow(false)
     internal val conversionServiceRunning = kotlinx.coroutines.flow.MutableStateFlow(false)
 
     private val replacementRecovery = kotlinx.coroutines.CompletableDeferred<Unit>()
@@ -27,7 +29,7 @@ class UltraSlimApp : Application() {
 
     val database: AppDatabase by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         Room.databaseBuilder(this, AppDatabase::class.java, "ultraslim.db")
-            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5)
+            .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5, AppDatabase.MIGRATION_5_6)
             .build()
     }
 
@@ -48,16 +50,22 @@ class UltraSlimApp : Application() {
             replacementRecovery.complete(Unit)
             conversionRepository.awaitReady()
             // Promote legacy cache outputs before any cleanup; never delete a referenced result.
-            database.historyDao().all().forEach { entity ->
+            // 单次全表查询：提升后的新路径直接进入 referenced，避免第二次 all()。
+            val allRows = database.historyDao().all().map { entity ->
                 if (!entity.outputUri.startsWith("content://")) {
                     val old = File(entity.outputUri)
                     if (old.isFile && old.canonicalPath.startsWith(cacheDir.canonicalPath + "/")) {
                         val target = File(filesDir, "outputs/${entity.id}_${old.name}").apply { parentFile?.mkdirs() }
-                        if (old.renameTo(target)) database.historyDao().update(entity.copy(outputUri = target.path))
+                        if (old.renameTo(target)) {
+                            val updated = entity.copy(outputUri = target.path)
+                            database.historyDao().update(updated)
+                            return@map updated
+                        }
                     }
                 }
+                entity
             }
-            val referenced = database.historyDao().all().flatMap { listOf(it.inputUri, it.outputUri) } + conversionRepository.queue.value.flatMap { listOf(it.uri, it.outputUri.orEmpty()) }
+            val referenced = allRows.flatMap { listOf(it.inputUri, it.outputUri) } + conversionRepository.queue.value.flatMap { listOf(it.uri, it.outputUri.orEmpty()) }
             val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
             listOf("inputs", "outputs").forEach { folder ->
                 File(filesDir, folder).listFiles()?.forEach { file ->

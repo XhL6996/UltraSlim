@@ -5,7 +5,6 @@ import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
 import android.os.Build
-import android.os.Environment
 import android.provider.MediaStore
 import app.ultraslim.model.OutputFormat
 import java.io.File
@@ -61,13 +60,14 @@ private fun queryAlbumNames(resolver: ContentResolver): Set<String> {
 }
 
 /**
- * Copies a transcoded file from the app cache into MediaStore.Images under
- * `Pictures/UltraSlim`, using the IS_PENDING flow on Android 10+.
+ * Publishes a transcoded file into a chosen MediaStore album (default Pictures/UltraSlim),
+ * using the IS_PENDING flow on Android 10+.
  *
  * Returns the content uri of the new entry, or null on failure. On Android 9
  * and below saving is not attempted (WRITE_EXTERNAL_STORAGE is not declared).
  */
 object MediaStoreSaver {
+    private val STABLE_NAME_REGEX = Regex(".*_Slim_[0-9a-f]{8}(?:MP)?\\.[^.]+")
 
     fun save(
         context: Context,
@@ -76,23 +76,28 @@ object MediaStoreSaver {
         format: OutputFormat,
         names: AlbumNames? = null,
         taskId: String? = null,
+        relativePath: String = "Pictures/UltraSlim/",
+        volume: String = MediaStore.VOLUME_EXTERNAL_PRIMARY,
+        dateTaken: Long? = null,
+        relatedUri: Uri? = null,
     ): Uri? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         if (!sourceFile.isFile) return null
 
         val resolver = context.contentResolver
+        val collection = MediaStore.Images.Media.getContentUri(volume)
         // Stable name enables recovery if the process died after MediaStore publication.
-        val desired = if (taskId != null && !displayName.matches(Regex(".*_Slim_[0-9a-f]{8}(?:MP)?\\.[^.]+"))) {
+        val desired = if (taskId != null && !displayName.matches(STABLE_NAME_REGEX)) {
             // Recover records created by earlier app versions with their original stable name.
             displayName.substringBeforeLast('.') + "_" + taskId + "." + format.extension
         } else displayName
         if (taskId != null) {
-            resolver.query(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY),
+            resolver.query(collection,
                 arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.IS_PENDING),
                 "${MediaStore.Images.Media.DISPLAY_NAME} = ? AND ${MediaStore.Images.Media.RELATIVE_PATH} = ?",
-                arrayOf(desired, "Pictures/UltraSlim/"), null)?.use { cursor ->
+                arrayOf(desired, relativePath), null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
-                    val found = android.content.ContentUris.withAppendedId(MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), cursor.getLong(0))
+                    val found = android.content.ContentUris.withAppendedId(collection, cursor.getLong(0))
                     if (cursor.getInt(1) == 0) return found
                     resolver.delete(found, null, null)
                 }
@@ -103,12 +108,16 @@ object MediaStoreSaver {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, chosen)
             put(MediaStore.Images.Media.MIME_TYPE, format.mimeType)
-            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/UltraSlim/")
+            put(MediaStore.Images.Media.RELATIVE_PATH, relativePath)
+            dateTaken?.takeIf { it > 0 }?.let { put(MediaStore.Images.Media.DATE_TAKEN, it) }
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
 
-        val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        val uri = runCatching { resolver.insert(collection, values) }.getOrNull()
+        val uri = runCatching {
+            if (Build.VERSION.SDK_INT >= 30 && relatedUri != null) resolver.insert(collection, values,
+                android.os.Bundle().apply { putParcelable(MediaStore.QUERY_ARG_RELATED_URI, relatedUri) })
+            else resolver.insert(collection, values)
+        }.getOrNull()
         if (uri == null) {
             names?.release(chosen)
             return null
@@ -119,8 +128,12 @@ object MediaStoreSaver {
                 sourceFile.inputStream().use { it.copyTo(out) }
             } ?: throw IOException("openOutputStream returned null for $uri")
 
+            // DATE_TAKEN is scanner-controlled on current Android. Keep the real file timestamp too,
+            // so pictures without EXIF dates retain chronology when the provider indexes them.
+            preserveFileTime(context, uri, dateTaken)
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
+            dateTaken?.takeIf { it > 0 }?.let { values.put(MediaStore.Images.Media.DATE_TAKEN, it) }
             check(resolver.update(uri, values, null, null) == 1) { "无法发布相册文件" }
             uri
         } catch (e: Exception) {
@@ -129,4 +142,16 @@ object MediaStoreSaver {
             null
         }
     }
+
+    internal fun preserveFileTime(context: Context, uri: Uri, timestamp: Long?) {
+        if (timestamp == null || timestamp <= 0) return
+        runCatching {
+            context.contentResolver.openFileDescriptor(uri, "rw")?.use { descriptor ->
+                // Resolve the descriptor we own; opening /proc/self/fd directly for utime is denied by FUSE.
+                val path = android.system.Os.readlink("/proc/self/fd/${descriptor.fd}")
+                check(File(path).setLastModified(timestamp)) { "Provider declined timestamp update" }
+            }
+        }.onFailure { android.util.Log.w("MediaStoreSaver", "Original file timestamp could not be preserved", it) }
+    }
+
 }
