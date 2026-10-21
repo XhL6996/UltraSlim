@@ -48,6 +48,7 @@ tests/                主机与 Android 共用的测试素材及来源
 scripts/              验证、仓库检查和 Android 色彩检查入口
 docs/                 开发文档、历史验证报告、设计草案
 gradle/               Gradle Wrapper 与依赖版本目录
+.github/             issue / PR 模板
 .gitea/               自托管 CI 配置
 ```
 
@@ -57,7 +58,7 @@ gradle/               Gradle Wrapper 与依赖版本目录
 
 问题报告、测试样本、文档和代码贡献都欢迎。提出问题时请附手机型号（可只写代号）、Android 版本、源文件/输出格式和复现步骤。分享测试图片前先确认可公开，并清除不希望公开的位置等元数据。开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题的报告方式见 [SECURITY.md](SECURITY.md)。
 
-仓库当前通过自托管 Gitea 与 ARM64 macOS runner 构建，外部托管平台可复用 `scripts/verify.sh`，但需要自行准备 runner。
+主仓库托管在 GitHub。构建完整验证需要 macOS + Android NDK 环境，CI 以自托管运行器为主：GitHub Actions 工作流只在维护者自托管 runner 上执行，Gitea 配置保留在 `.gitea/`。外部贡献者可在本机运行 `scripts/verify.sh`，需要自行准备工具链。
 
 ## 许可证
 
