@@ -70,9 +70,14 @@ def main():
             for match in re.finditer(r"/Users/([^/\s`]+)", text):
                 if not match.group(1).startswith("<"):
                     errors.append(f"Personal absolute path in {path}: /Users/{match.group(1)}")
-            # Xiaomi/OPPO-style model codes identify a specific retail device.
-            for match in re.finditer(r"\bM\d{3,4}[A-Z][A-Z0-9]{0,4}\b", text):
+            # Retail model codes identify a specific device: Xiaomi (M####ABC),
+            # OPPO/OnePlus (PLP/CPH/PJD...), Realme (RMX). SoC codes stay allowed
+            # because they describe a chip, not a user's handset.
+            for match in re.finditer(r"\b(?:M\d{3,4}[A-Z][A-Z0-9]{0,4}|P[A-Z]{2}\d{2,4}|CPH\d{3,5}|RMX\d{3,5})\b", text):
                 errors.append(f"Device model identifier in {path}: {match.group(0)}")
+            # Firmware build strings embed the model code and region.
+            for match in re.finditer(r"\b[A-Z]{2,4}\d{2,4}_\d+\.\d+\.\d+[^`\s]*", text):
+                errors.append(f"Firmware build string in {path}: {match.group(0)}")
             # adb serials are 8 lowercase hex characters with at least one letter.
             # Exclude all-digit dates embedded in paths and UUID fragments followed by '-'.
             serial = re.compile(r"(?<![-\w])[0-9a-f]{8}(?![-\w])")

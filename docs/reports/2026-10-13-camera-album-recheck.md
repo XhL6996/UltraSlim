@@ -23,7 +23,7 @@
 
 ## ColorOS 17 实机复查
 
-- 设备 PLP120，系统 `PLP120_17.0.0.109(CN01)` / Android 17。
+- 设备型号（`<device-model>`），系统版本（`<build-number>`）/ Android 17。
 - 原安装为 **1.1.5 / code 17**。拉取设备实际 APK 后检查 DEX：不存在 `SourceMedia`；`OutputStore$save$2$uri$1` 调用旧 `MediaStoreSaver.save` 签名，仅有默认相册参数，没有原目录、卷、日期或 related URI 参数。确认该安装包缺少存回原相册的修复，不是仅凭版本号推断。
 - 原设备数据库完整性检查通过。只有一批 10 张的记录，快照 `autoReplaceOriginals=false`；5 条历史、10 个任务、0 条替换记录。设置文件尚未创建，自动替换使用默认关闭。所查一张旧记录来自 `Pictures/OPPO Share/`，这些记录不能证明之前执行过开启替换的相机任务。
 - 使用现有已验证的 **1.1.8 / code 20** APK，重新验证 16 KB 对齐与 v2 签名后覆盖安装成功。安装前后 history/tasks/batches/replacements 全部行内容一致；没有清除数据或改变设置。
