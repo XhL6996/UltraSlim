@@ -1,12 +1,22 @@
 # UltraSlim
 
+[![License: GPL v3](https://img.shields.io/badge/License-GPL--3.0-blue.svg)](LICENSE)
+[![GitHub Release](https://img.shields.io/github/v/release/linyusenzz/UltraSlim)](https://github.com/linyusenzz/UltraSlim/releases)
+[![Platform](https://img.shields.io/badge/Android-8.0%2B%20%C2%B7%20arm64-green)](#下载)
+
 Android 离线照片转码工具，将 JPEG、HEIC、AVIF、JXL 转为更小的图片，支持 Ultra HDR / ISO 21496-1 Gain Map、纯 SDR 图片和部分动态照片。当前 Android 构建面向 **Android 8.0+ / arm64-v8a**。Android 8/9 支持转换和分享导出；直接保存相册需要 Android 10+。
+
+*Offline Android photo transcoder: re-encode JPEG / HEIC / AVIF / JXL into smaller files while preserving Ultra HDR (ISO 21496-1) gain maps, with batch import, background conversion and a macOS companion for Apple Live Photo pairing. No server, everything on-device.*
 
 <p align="left">
   <img src="docs/images/conversion-phone.png" alt="UltraSlim 转换设置界面" width="300">
 </p>
 
 界面采用 Material 3 Expressive，支持手机、横屏、折叠屏内容分区，以及宽屏成品列表与详情并排。实现与验证边界见 [设计记录](docs/design/2026-10-12-expressive-adaptive.md)。
+
+## 下载
+
+从 [GitHub Releases](https://github.com/linyusenzz/UltraSlim/releases) 下载最新签名 APK（arm64-v8a），发行附件包含 `SHA256SUMS` 校验文件与开源许可快照。覆盖升级必须使用同一发行证书签名的安装包。
 
 ## 功能
 
