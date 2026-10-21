@@ -71,8 +71,11 @@ TranscodeResult transcodeImage(int inFd, int outFd, const TranscodeOptions& opti
  * Decodes the primary (SDR) rendition of an image and re-encodes it as a small
  * JPEG, for previews of files the platform decoder may not understand
  * (e.g. ISO 21496-1 gain map HEIC). Returns an empty vector on failure.
+ * maxWorkingBytes is a conservative pixel-work admission estimate, not a hard
+ * allocator limit for codec internals. Checked before allocating decoded pixels.
  */
-std::vector<uint8_t> decodePreviewJpeg(int fd, int maxDim, int quality = 82);
+std::vector<uint8_t> decodePreviewJpeg(int fd, int maxDim, int quality = 82,
+                                     uint64_t maxWorkingBytes = UINT64_MAX);
 
 /** Debug: decode the primary image with heif_chroma_undefined and return the raw Y plane. */
 std::vector<uint8_t> debugDecodePlaneY(int fd, int& w, int& h);

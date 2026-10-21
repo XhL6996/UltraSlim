@@ -10,7 +10,7 @@
 质量 90、速度 1、原尺寸、preserve 转为 AVIF 后为 3,345,943 字节。
 
 libheif 解码与 macOS ImageIO 均正确保留 P3，gain map 像素和 HDR 参数逐值一致。
-但连接真机（Xiaomi，Android API 37）的 `ImageDecoder` 将原 JPG 识别为
+但连接真机（Android API 37）的 `ImageDecoder` 将原 JPG 识别为
 Display P3，却将 AVIF 识别为 sRGB，且没有将 P3 像素转换成 sRGB。这会导致偏色。
 用户报告的显示端是 Google 相册；本次直接验证的是 Android 系统解码器，未验证
 Google 相册完整界面或云端处理链路。

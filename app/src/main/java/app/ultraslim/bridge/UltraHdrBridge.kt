@@ -95,10 +95,11 @@ object UltraHdrBridge {
     /**
      * Decodes the primary SDR rendition of an image to a small JPEG, for previews
      * the platform decoder cannot handle (e.g. ISO 21496-1 gain map HEIC).
-     * Returns null on failure.
+     * Returns null on failure or if the estimated pixel working set exceeds the
+     * budget. Codec-private allocations are not subject to a hard allocator cap.
      */
     @JvmStatic
-    external fun nativeDecodePreview(fd: Int, maxDim: Int): ByteArray?
+    external fun nativeDecodePreview(fd: Int, maxDim: Int, maxWorkingBytes: Long = Long.MAX_VALUE): ByteArray?
 
     @JvmStatic
     external fun nativeReadHeifXmp(fd: Int): ByteArray?

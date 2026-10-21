@@ -27,6 +27,18 @@ class UltraSlimApp : Application() {
 
     private val appScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
+    internal val conversionRunning by lazy {
+        kotlinx.coroutines.flow.combine(conversionServiceRunning,
+            androidx.work.WorkManager.getInstance(this)
+                .getWorkInfosForUniqueWorkFlow(ConversionWorker.UNIQUE_WORK_NAME)) { service, infos ->
+            service || infos.any { !it.state.isFinished }
+        }
+    }
+
+    val historyRepository by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
+        app.ultraslim.data.HistoryRepository(database, appScope)
+    }
+
     val database: AppDatabase by lazy(LazyThreadSafetyMode.SYNCHRONIZED) {
         Room.databaseBuilder(this, AppDatabase::class.java, "ultraslim.db")
             .addMigrations(AppDatabase.MIGRATION_1_2, AppDatabase.MIGRATION_2_3, AppDatabase.MIGRATION_3_4, AppDatabase.MIGRATION_4_5, AppDatabase.MIGRATION_5_6)
@@ -43,6 +55,7 @@ class UltraSlimApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        app.ultraslim.convert.ImageWork.initialize(filesDir)
         createNotificationChannel()
         appScope.launch {
             // A process death while the system dialog was open must not re-prompt indefinitely.
@@ -51,21 +64,28 @@ class UltraSlimApp : Application() {
             conversionRepository.awaitReady()
             // Promote legacy cache outputs before any cleanup; never delete a referenced result.
             // 单次全表查询：提升后的新路径直接进入 referenced，避免第二次 all()。
-            val allRows = database.historyDao().all().map { entity ->
+            val allRows = database.historyDao().allPaths().mapNotNull { entity ->
                 if (!entity.outputUri.startsWith("content://")) {
                     val old = File(entity.outputUri)
                     if (old.isFile && old.canonicalPath.startsWith(cacheDir.canonicalPath + "/")) {
                         val target = File(filesDir, "outputs/${entity.id}_${old.name}").apply { parentFile?.mkdirs() }
                         if (old.renameTo(target)) {
-                            val updated = entity.copy(outputUri = target.path)
-                            database.historyDao().update(updated)
-                            return@map updated
+                            if (database.historyDao().updateOutputPath(entity.id, entity.outputUri, target.path) == 1) {
+                                return@mapNotNull entity.copy(outputUri = target.path)
+                            }
+                            // 发布或删除抢先更新了记录，清理使用当前路径，不保护孤立副本。
+                            return@mapNotNull database.historyDao().byId(entity.id)?.let {
+                                app.ultraslim.data.HistoryPaths(it.id, it.inputUri, it.outputUri)
+                            }
                         }
                     }
                 }
                 entity
             }
-            val referenced = allRows.flatMap { listOf(it.inputUri, it.outputUri) } + conversionRepository.queue.value.flatMap { listOf(it.uri, it.outputUri.orEmpty()) }
+            val referenced = buildSet {
+                allRows.forEach { add(it.inputUri); add(it.outputUri) }
+                conversionRepository.queue.value.forEach { add(it.uri); it.outputUri?.let(::add) }
+            }
             val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
             listOf("inputs", "outputs").forEach { folder ->
                 File(filesDir, folder).listFiles()?.forEach { file ->
@@ -75,6 +95,13 @@ class UltraSlimApp : Application() {
             }
             cleanStaleOutputs()
         }
+    }
+
+    override fun onTrimMemory(level: Int) {
+        super.onTrimMemory(level)
+        // Bitmap 在 native heap 上，不被系统即时回收；进程被判定为可杀之前清掉预览缓存，
+        // 让后台进程有机会存活，磁盘缓存保留。
+        if (level >= TRIM_MEMORY_RUNNING_LOW) app.ultraslim.ui.components.PreviewCache.trimMemory()
     }
 
     private fun createNotificationChannel() {

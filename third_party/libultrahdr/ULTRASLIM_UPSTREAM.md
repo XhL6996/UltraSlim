@@ -25,6 +25,13 @@ The remaining five contain these local changes:
 | `lib/src/avifultrahdr.cpp` | Speed/thread controls, encoder chroma-parameter tolerance, quality remapping. |
 | `lib/src/jpegrutils.cpp` | Initialize Apple gain-map `use_base_cg` to true. |
 
+Additional local fix on 2026-10-14: `lib/src/ultrahdr_api.cpp` checks both the
+HEIF gain-map metadata getter and fraction-to-float conversion before copying
+metadata. Malformed tmap versions/fractions previously copied uninitialized
+boost values. Such inputs retain gain-map detection but now keep zeroed metadata;
+valid metadata and the serialized ISO layout are unchanged. Covered by the host
+`preview_probe` parity tests for HEIC/AVIF strict and compatibility outputs.
+
 The 209/214 comparison excludes this newly added provenance note. Some upstream
 fixtures/docs are present locally but not tracked due to the vendored .gitignore;
 these were not counted as matched tracked files. Raw audit details are in

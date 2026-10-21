@@ -65,7 +65,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class, ExperimentalLayoutApi::class)
 @Composable
-fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
+fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replacementReview: app.ultraslim.ui.ReplacementReview? = null) {
     val vm: HomeViewModel = viewModel(factory = appViewModelFactory { HomeViewModel(it) })
     val state by vm.uiState.collectAsStateWithLifecycle()
     val scanning by vm.scanning.collectAsStateWithLifecycle()
@@ -74,8 +74,13 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
     val importing by vm.importing.collectAsStateWithLifecycle()
     val importProgress by vm.importProgress.collectAsStateWithLifecycle()
     val scrollBehavior = TopAppBarDefaults.enterAlwaysScrollBehavior()
+    val batchProgress by animateFloatAsState(
+        targetValue = if (state.batchTotal > 0) state.batchProcessed.toFloat() / state.batchTotal else 0f,
+        animationSpec = Motion.effects(), label = "batchProgress",
+    )
+    val convertingItem = remember(state.queue) { state.queue.firstOrNull { it.status == QueueStatus.CONVERTING } }
     val pendingItems = remember(state.queue) {
-        state.queue.filter { it.status != QueueStatus.DONE && it.status != QueueStatus.SKIPPED && it.status != QueueStatus.FAILED }
+        state.queue.filter { it.status == QueueStatus.PENDING || it.status == QueueStatus.PROBING || it.status == QueueStatus.READY }
     }
     val finishedItems = remember(state.queue) {
         state.queue.filter { it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED || it.status == QueueStatus.FAILED }
@@ -240,11 +245,34 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             enter = slideInVertically(Motion.standard()) { it } + fadeIn(Motion.effects()),
             exit = slideOutVertically(Motion.exit()) { it } + fadeOut(Motion.exit()),
         ) {
-            Box(
+            Column(
                 modifier = Modifier.fillMaxWidth()
                     .navigationBarsPadding()
                     .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 12.dp),
             ) {
+                if (state.isConverting || importing || scanning) {
+                    if (state.isConverting && state.batchTotal > 0) {
+                        Text("已处理 ${state.batchProcessed} / ${state.batchTotal} 张", Modifier.testTag("batch-progress-label"),
+                            style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        LinearProgressIndicator(
+                            progress = { batchProgress },
+                            modifier = Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 10.dp).testTag("batch-progress"),
+                        )
+                    }
+                    Row(Modifier.fillMaxWidth().padding(bottom = 8.dp).testTag("conversion-status"),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        CircularProgressIndicator(Modifier.size(24.dp).testTag("conversion-spinner"), strokeWidth = 2.dp)
+                        Text(when {
+                            importing -> importProgress.ifBlank { "正在检查导入的照片…" }
+                            scanning -> scanProgress.ifBlank { "正在检查照片…" }
+                            stopping -> "当前照片处理完成后停止"
+                            else -> state.queue.firstOrNull { it.status == QueueStatus.CONVERTING }?.let { "正在处理：${it.displayName}" }
+                                ?: "正在准备或等待继续…"
+                        }, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                    }
+                }
                 val mode = when {
                     stopping -> HomeAction.Stopping
                     state.isConverting -> HomeAction.Converting
@@ -323,6 +351,9 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
             modifier = Modifier.padding(padding).consumeWindowInsets(padding).padding(horizontal = 12.dp),
             primary = { wide ->
             Column(Modifier.fillMaxSize()) {
+                replacementReview?.let {
+                    app.ultraslim.ui.ReplacementReviewCard(it, Modifier.padding(horizontal = 8.dp, vertical = 8.dp))
+                }
                 LazyColumn(
                     Modifier.weight(1f).fillMaxWidth().testTag("queue-list"),
                     contentPadding = PaddingValues(
@@ -487,9 +518,16 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit) {
                         }
                     }
                     // 待处理（含转换中）在前，按导入时间戳分组显示
-                    if (pendingGroups.isNotEmpty()) {
+                    if (pendingGroups.isNotEmpty() || convertingItem != null) {
                         item(key = "hdr-pending") {
-                            Text("待处理 · ${pendingItems.size}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                            Text("待处理 · ${pendingItems.size + if (convertingItem != null) 1 else 0}", style = MaterialTheme.typography.titleSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
+                        }
+                        convertingItem?.let { active ->
+                            item(key = active.id) {
+                                QueueRow(active, onRemove = {}, onRetry = {}, onOpen = {},
+                                    modifier = Modifier.testTag("queue-row-${active.id}").animateItem(
+                                        fadeInSpec = Motion.fast(), placementSpec = Motion.itemPlacement(), fadeOutSpec = Motion.exit(Motion.Fast)))
+                            }
                         }
                         pendingGroups.forEach { group ->
                             if (pendingGroups.size > 1) {
@@ -812,7 +850,7 @@ private fun QueueCard(
     ) {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                UltraAsyncImage(item.uri, null, ContentScale.Crop, Modifier.size(76.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surfaceContainer), maxDim = 384)
+                UltraAsyncImage(item.uri, null, ContentScale.Crop, Modifier.size(76.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surfaceContainer), maxDim = 384, forceSdr = true)
                 Column(Modifier.weight(1f).padding(horizontal = 12.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Text(if(item.probe != null) "${item.probe.width} × ${item.probe.height}  ·  ${formatBytes(item.sizeBytes)}" else formatBytes(item.sizeBytes), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -855,7 +893,7 @@ private fun QueueCard(
                 enter = expandVertically(Motion.standard()) + fadeIn(Motion.effects()),
                 exit = shrinkVertically(Motion.exit()) + fadeOut(Motion.exit()),
             ) {
-                LinearWavyProgressIndicator(Modifier.fillMaxWidth())
+                LinearWavyProgressIndicator(Modifier.fillMaxWidth().testTag("queue-progress-${item.id}"))
             }
             AnimatedVisibility(
                 visible = item.status == QueueStatus.DONE || item.status == QueueStatus.SKIPPED || item.status == QueueStatus.FAILED,

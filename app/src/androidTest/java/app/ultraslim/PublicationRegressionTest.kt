@@ -8,6 +8,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import app.ultraslim.convert.*
 import app.ultraslim.data.ReplacementEntity
 import app.ultraslim.data.AppDatabase
+import app.ultraslim.data.HistoryEntity
+import androidx.room.withTransaction
 import app.ultraslim.model.OutputFormat
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.*
@@ -50,6 +52,29 @@ class PublicationRegressionTest {
             repeat(2100) { dao.insert(ReplacementEntity(it.toLong(), "test", "source", "output", "sha", "sha", "READY")) }
             dao.finish((0L until 2100L).toList(), "CANCELLED", "cancel all")
             assertEquals("CANCELLED", dao.byId(2099)?.state)
+        } finally { db.close() }
+    }
+
+    @Test fun replacementNotesHandleLargeBatchesAndReplacePreviousOutcome() = runBlocking {
+        val db = androidx.room.Room.inMemoryDatabaseBuilder(app, AppDatabase::class.java).build()
+        try {
+            val dao = db.historyDao()
+            // Exceeds both older Android's 999 and newer SQLite's 32766 bind limit.
+            val ids = (1L..33000L).toList()
+            db.withTransaction {
+                ids.forEach { id -> dao.insert(HistoryEntity(
+                    id = id, displayName = "test.jpg", inputUri = "source", outputUri = "output",
+                    inputBytes = 100, outputBytes = 80, width = 1, height = 1,
+                    gainmapWidth = 0, gainmapHeight = 0, hadGainMap = false,
+                    format = "JPEG", inputFormat = "JPEG", durationMs = 0.0,
+                    maxContentBoost = 1f, createdAt = id, status = "DONE",
+                    settingsSummary = "原参数 · 替换结果：旧结果",
+                )) }
+            }
+            dao.noteReplacement(ids, "原图保留")
+            assertTrue(dao.all().all { it.settingsSummary == "原参数 · 替换结果：原图保留" })
+            dao.noteReplacement(emptyList(), "不应更新")
+            assertEquals("原参数 · 替换结果：原图保留", dao.byId(33000)!!.settingsSummary)
         } finally { db.close() }
     }
 }

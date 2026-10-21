@@ -35,4 +35,4 @@ x265 官方提供 GPL 与商业授权选择；本仓库按开源源码构建，�
 
 AndroidX/Compose/Room/WorkManager/DataStore、Kotlin/coroutines、Coil 等的直接版本见 [版本目录](gradle/libs.versions.toml) 和 [应用依赖](app/build.gradle.kts)。Gradle Wrapper 为其上游构建工具的一部分，保留原文件及版权头。
 
-这里的原生文本快照不是包含全部 Gradle 传递依赖的 SBOM。正式发布 APK 时，应按该次解析结果补齐随包依赖声明及对应源码材料，不能把整个 APK 简写成「所有依赖均为 GPLv3」。
+构建任务 `generateOpenSourceNotices` 按 Release 运行时解析结果生成依赖清单，提取 AAR/JAR 及嵌套 JAR 中的 LICENSE/NOTICE，连同本仓库 GPL 和原生许可文本打入 `assets/open-source-notices.txt`。应用设置中可离线阅读，发行脚本也会提取为独立附件。清单不是自动合规结论，发布时仍应提供准确对应源码；不能把整个 APK 简写成「所有依赖均为 GPLv3」。

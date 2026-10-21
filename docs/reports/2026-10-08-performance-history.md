@@ -39,7 +39,7 @@ build-host-test/transcode_test /tmp/large-hdr.jpg /tmp/result.avif 90 4 60 1 100
 - ARM64 模拟器仪器测试运行 14 项并通过（其中已有 `selectedPhotoPreservation` 仅在显式传入 selectedPhotos=true 时执行，其余正常执行）。覆盖历史选择/筛选/实际右滑、删除取消与确认、108 条记录跨分页日期范围、JNI 转码与 4096×3072 AVIF 预览、存储与数据库迁移。
 - 浅色/深色 320dp 窄屏截图已检查；选择栏没有右侧缺口，动作不会伸出屏幕。
 - Debug/Release 构建、lint（无错误，保留现有建议类警告）、APK 的 16 KB LOAD/RELRO/ZIP 对齐检查通过。
-- 连接手机 M154FF 安装独立测试包时被设备拒绝：`INSTALL_FAILED_USER_RESTRICTED: Install canceled by user`。未宣称完成真机安装、SVE2 执行命中或热稳态验证。
+- 连接手机（`<device-model>`）安装独立测试包时被设备拒绝：`INSTALL_FAILED_USER_RESTRICTED: Install canceled by user`。未宣称完成真机安装、SVE2 执行命中或热稳态验证。
 
 ## 独立 UI 测试包
 

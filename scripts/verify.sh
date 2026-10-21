@@ -15,8 +15,12 @@ gradle_args=(-Pkotlin.incremental=false)
 if [[ "${1:-}" == "--device" ]]; then
   gradle_args+=(-PultraslimDebugSuffix=.verifyqa)
 fi
-./gradlew "${gradle_args[@]}" :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest :app:lintDebug
-python3 scripts/check_apk_alignment.py "$ULTRASLIM_BUILD_ROOT/app/outputs/apk/debug/app-debug.apk" "$ULTRASLIM_BUILD_ROOT/app/outputs/apk/release/app-release-unsigned.apk"
+./gradlew "${gradle_args[@]}" :app:assembleDebug :app:assembleRelease :app:testDebugUnitTest :app:lintDebug :app:lintRelease
+release_apk="$ULTRASLIM_BUILD_ROOT/app/outputs/apk/release/app-release-unsigned.apk"
+if [[ -n "${ULTRASLIM_KEYSTORE:-}" ]]; then
+  release_apk="$ULTRASLIM_BUILD_ROOT/app/outputs/apk/release/app-release.apk"
+fi
+python3 scripts/check_apk_alignment.py "$ULTRASLIM_BUILD_ROOT/app/outputs/apk/debug/app-debug.apk" "$release_apk"
 if [[ "${1:-}" == "--device" ]]; then
   ./gradlew "${gradle_args[@]}" :app:connectedDebugAndroidTest
 fi

@@ -7,6 +7,16 @@ project(ultraslim CXX C)
 
 option(ULTRASLIM_HOST_TEST "Build host-side transcode test executable" OFF)
 
+# 本仓库路径含空格与中文目录名，直接写进 __FILE__/断言串会随 .so 发布出去。
+# 依赖库由 native/deps 另行映射（那里的构建机路径来自 build 目录），这里覆盖 App 自己编译的
+# 源码（transcode.cpp、vendored libultrahdr、androidx.graphics.path）。
+# 用 add_compile_options 而非 CMAKE_C_FLAGS：空格会被 CMake 当参数分隔符拆开。
+# 必须 REALPATH 归一到仓库根：字面量 "${CMAKE_CURRENT_SOURCE_DIR}/.." 并不是
+# ".../third_party/libultrahdr/..." 的文本前缀，直接写会漏掉 vendored libultrahdr
+# 的 assert 串（实测 gainmapmath_neon.cpp 的路径因此残留在 debug .so 里）。
+get_filename_component(ULTRASLIM_REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/.." REALPATH)
+add_compile_options("-ffile-prefix-map=${ULTRASLIM_REPO_ROOT}=/ultraslim-src")
+
 if(ULTRASLIM_HOST_TEST)
   set(DEPS_PREFIX ${CMAKE_CURRENT_SOURCE_DIR}/prefix/host)
 else()
@@ -163,4 +173,9 @@ if(ULTRASLIM_HOST_TEST)
   target_include_directories(avif_quality PRIVATE ${_color_includes})
   target_link_libraries(avif_quality PRIVATE ${_color_libraries})
   add_test(NAME avif_quality COMMAND avif_quality ${CMAKE_CURRENT_BINARY_DIR}/regression-output)
+
+  add_executable(preview_probe host_test/preview_probe.cpp)
+  target_include_directories(preview_probe PRIVATE ${_color_includes})
+  target_link_libraries(preview_probe PRIVATE ${_color_libraries})
+  add_test(NAME preview_probe COMMAND preview_probe ${CMAKE_CURRENT_SOURCE_DIR}/../tests/fixtures/libultrahdr ${CMAKE_CURRENT_BINARY_DIR}/regression-output)
 endif()

@@ -76,6 +76,13 @@ class AdaptiveUiTest {
         compose.onNodeWithText("默认转码偏好").assertIsDisplayed()
         compose.onNodeWithText("外观与显示").assertIsDisplayed()
         capture("adaptive-settings")
+        compose.onNodeWithText("开源许可与声明").performScrollTo().performClick()
+        compose.waitUntil(5_000) {
+            compose.onAllNodesWithText("原创代码：GPL-3.0-only", substring = true).fetchSemanticsNodes().isNotEmpty()
+        }
+        compose.onNodeWithText("原创代码：GPL-3.0-only", substring = true).assertIsDisplayed()
+        capture("open-source-notices")
+        compose.onNodeWithText("关闭").performClick()
         resize(420, 900)
         compose.onNodeWithTag("workspace-compact").assertExists()
         compose.onNodeWithContentDescription("返回").performClick()

@@ -44,7 +44,7 @@ fun AppRoot() {
 @Composable
 private fun AppNavigation() {
     DeferredOutputHost()
-    AutoReplacementHost()
+    val replacementReview = AutoReplacementHost()
     val homeStack = rememberNavBackStack(Home)
     val historyStack = rememberNavBackStack(History)
     var historyTab by rememberSaveable { mutableStateOf(false) }
@@ -66,6 +66,7 @@ private fun AppNavigation() {
     val provider = entryProvider<NavKey> {
         entry<Home> {
             HomeScreen(
+                replacementReview = replacementReview,
                 onOpenSettings = { if (homeStack.last() != Settings) homeStack.add(Settings) },
                 onOpenDetail = { homeStack.add(Detail(it, false)) },
             )

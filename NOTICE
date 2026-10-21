@@ -1,0 +1,14 @@
+UltraSlim
+Copyright (C) 2026 UltraSlim contributors
+
+This program is free software: you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation, version 3. The full license text is in LICENSE.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+Third-party components keep their own copyright and license. See
+THIRD_PARTY_NOTICES.md for the list, the pinned versions and the upstream
+license texts under third_party/licenses/.

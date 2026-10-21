@@ -37,13 +37,15 @@ fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    var showNotices by rememberSaveable { mutableStateOf(false) }
+    if (showNotices) OpenSourceNoticesDialog { showNotices = false }
 
     var confirmAutoReplace by rememberSaveable { mutableStateOf(false) }
     if (confirmAutoReplace) {
         AlertDialog(
             onDismissRequest = { confirmAutoReplace = false },
             title = { Text("开启校验后自动替换？") },
-            text = { Text("将同时开启自动保存，成品保存回原相册并保留拍摄时间。仅当成品更小、完整保存且系统能解码，HDR 和实况视频均通过检查后，才将原图移入系统回收站。\n\n原图不会被直接覆盖；回收站保留期限由系统决定。Android 可能仍需确认，取消会保留原图。小窗或后台转换先保存在应用内，回到完整窗口后自动入册并继续替换；不支持校验或无法定位原图时不替换。此选项只影响之后开始的任务。") },
+            text = { Text("将同时开启自动保存，成品保存回原相册并保留拍摄时间。仅当成品更小、完整保存且系统能解码，HDR 和实况视频均通过检查后，才允许将原图移入系统回收站。转换与保存结束后，首页会显示待替换卡片，由你点击后发起系统确认；大批量分批处理，每批都需主动开始。\n\n原图不会被直接覆盖；回收站保留期限由系统决定。Android 可能仍需确认，取消会保留原图。小窗或后台转换先保存在应用内，回到完整窗口后自动入册，再在首页确认替换；不支持校验或无法定位原图时不替换。此选项只影响之后开始的任务。") },
             confirmButton = { TextButton(onClick = { confirmAutoReplace = false; vm.setAutoReplaceOriginals(true) }) { Text("开启") } },
             dismissButton = { TextButton(onClick = { confirmAutoReplace = false }) { Text("取消") } },
         )
@@ -97,7 +99,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             SettingItem("自动保存到相册", "保存到 UltraSlim；自动替换时存回原相册", Icons.Rounded.PhotoLibrary,
                 defaults.autoSave, vm::setAutoSave, 1, 3)
             SettingItem("校验后自动替换原图",
-                if (Build.VERSION.SDK_INT >= 30) "存回原相册并校验后，将原图移入系统回收站" else "需要 Android 11 或更新版本",
+                if (Build.VERSION.SDK_INT >= 30) "自动存回原相册，完成后在首页确认回收原图" else "需要 Android 11 或更新版本",
                 Icons.Rounded.VerifiedUser, defaults.autoReplaceOriginals,
                 { if (it) confirmAutoReplace = true else vm.setAutoReplaceOriginals(false) }, 2, 3,
                 enabled = Build.VERSION.SDK_INT >= 30)
@@ -168,6 +170,7 @@ fun SettingsScreen(onBack: () -> Unit) {
                     Text("UltraSlim", style = MaterialTheme.typography.titleLarge)
                     Text("版本 $versionName", style = MaterialTheme.typography.bodyMedium)
                     Text(nativeVersion, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    TextButton(onClick = { showNotices = true }) { Text("开源许可与声明") }
                 }
             }
         }
@@ -208,6 +211,30 @@ fun SettingsScreen(onBack: () -> Unit) {
             },
         )
     }
+}
+
+@Composable
+private fun OpenSourceNoticesDialog(onDismiss: () -> Unit) {
+    val context = LocalContext.current
+    val sections by produceState<List<String>?>(null) {
+        value = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            runCatching { context.assets.open("open-source-notices.txt").bufferedReader().use { it.readText() }.split("\n===== ") }
+                .getOrElse { listOf("无法读取开源声明，请重新安装完整安装包。") }
+        }
+    }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("开源许可与声明") },
+        text = {
+            androidx.compose.foundation.lazy.LazyColumn(Modifier.fillMaxWidth().heightIn(max = 500.dp)) {
+                if (sections == null) item { Text("正在读取…") }
+                sections?.forEach { section -> item {
+                    Text(section, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(bottom = 16.dp))
+                } }
+            }
+        },
+        confirmButton = { TextButton(onClick = onDismiss) { Text("关闭") } },
+    )
 }
 
 @Composable

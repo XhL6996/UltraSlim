@@ -33,5 +33,5 @@ keystore.properties
 *.apk
 *.aab
 *.apk.idsig
-/phone_out_sdr.raw
-/phone_out_hdr.raw
+# Raw pixel dumps from device probes hold the user's photos; never commit them.
+*.raw

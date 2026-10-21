@@ -37,7 +37,7 @@
 
 ## 真机部署补充：16 KB 对齐
 
-测试机 M154FF / Android 17 启动 Debug 包时发现兼容性警告。修复主库 LOAD 对齐的同时检查了所有 JNI 库的 RELRO，避免仅处理主库而遗留警告。
+测试机（`<device-model>`）/ Android 17 启动 Debug 包时发现兼容性警告。修复主库 LOAD 对齐的同时检查了所有 JNI 库的 RELRO，避免仅处理主库而遗留警告。
 
 - libultraslim：显式启用 max-page-size/common-page-size=16384。
 - DataStore 升至 1.2.1，使用 RELRO 已对齐的官方原生库。
@@ -64,11 +64,11 @@
 
 验证：主机两个 CTest 通过；Debug/Release 构建、两个 JUnit、lint 通过；Android API 35 ARM64 常规 5 项测试通过（额外真实选图测试默认跳过），另有选图专项测试。最终两种 APK 的全部三个 JNI 库仍通过 LOAD / RELRO / APK 16 KB 对齐检查。
 
-真机限制：1.2 APK 可以覆盖安装到 M154FF，独立测试包安装返回 INSTALL_FAILED_USER_RESTRICTED / Install canceled by user，ADB 输入事件返回缺少 INJECT_EVENTS，截图为黑屏。没有绕过设备限制，没有更改用户相册、清空数据或重跑用户队列；本次不能把真机 UI、三张用户照片的转换效果计作通过。
+真机限制：1.2 APK 可以覆盖安装到该测试机，独立测试包安装返回 INSTALL_FAILED_USER_RESTRICTED / Install canceled by user，ADB 输入事件返回缺少 INJECT_EVENTS，截图为黑屏。没有绕过设备限制，没有更改用户相册、清空数据或重跑用户队列；本次不能把真机 UI、三张用户照片的转换效果计作通过。
 
 
 补充回归：两张通过系统选图器导入的 HEIC 样本，经 Android JNI 转成 AVIF 后导出到主机，24×32 RGB Gain Map 逐像素、HDR 参数均一致。完整 UI 试转/保存流程得到 18,369 → 6,947 字节，仅为此测试样本，不能推断所有照片的节省比例。检查新版成品库、对比页、宽屏、150% 字体；修复未放大时预览吞掉垂直滚动，以及竖图比例突破高度限制的问题。模拟器屏幕与字体已恢复。
 
 边界回归：>8 位 Gain Map 明确拒绝而不截断，HEIC/AVIF HDR 转 JPEG 明确拒绝而不重编码增益图；新增 10 位 AVIF 夹具验证。该夹具同时发现 libheif tmap 解析缺少 COLR 时空指针崩溃，已在幂等依赖补丁中修复并重编两个平台。
 
-最终交付：UltraSlim 1.2（versionCode 3）已覆盖安装到 M154FF，设备 base.apk SHA-256 与交付 APK 一致；所有现有数据保留。最终 lint 为 0 Error / 41 Warning，git diff --check 通过。测试包安装及真机自动输入限制不影响主 APK 安装成功，但仍不能据此宣称用户照片的真机 HDR 显示已验收。
+最终交付：UltraSlim 1.2（versionCode 3）已覆盖安装到该测试机，设备 base.apk SHA-256 与交付 APK 一致；所有现有数据保留。最终 lint 为 0 Error / 41 Warning，git diff --check 通过。测试包安装及真机自动输入限制不影响主 APK 安装成功，但仍不能据此宣称用户照片的真机 HDR 显示已验收。

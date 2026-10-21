@@ -1,3 +1,42 @@
+import java.io.ByteArrayInputStream
+import java.util.zip.ZipInputStream
+
+abstract class GenerateOpenSourceNotices : DefaultTask() {
+    @get:InputFiles @get:PathSensitive(PathSensitivity.RELATIVE)
+    abstract val legalFiles: ConfigurableFileCollection
+    @get:Internal abstract val sourceRoot: DirectoryProperty
+    @get:InputFiles @get:PathSensitive(PathSensitivity.NONE)
+    abstract val runtimeArchives: ConfigurableFileCollection
+    @get:Input abstract val components: ListProperty<String>
+    @get:OutputDirectory abstract val outputDirectory: DirectoryProperty
+
+    @TaskAction fun generate() {
+        val root = sourceRoot.get().asFile
+        val output = outputDirectory.get().asFile.apply { mkdirs() }
+        val text = StringBuilder("UltraSlim — 开源许可与声明\n原创代码：GPL-3.0-only\n\n")
+        legalFiles.files.sortedBy { it.relativeTo(root).path }.forEach {
+            text.append("\n===== ${it.relativeTo(root).invariantSeparatorsPath} =====\n").append(it.readText()).append('\n')
+        }
+        text.append("\n===== 本次 Release 运行时依赖 =====\n")
+        text.append(components.get().sorted().joinToString("\n")).append('\n')
+        // Preserve notices in each AAR and its nested classes/libs JARs before packaging excludes.
+        fun scan(bytes: ByteArray, label: String) {
+            ZipInputStream(ByteArrayInputStream(bytes)).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    if (entry.isDirectory) continue
+                    val name = entry.name.substringAfterLast('/').uppercase()
+                    if (name.contains("LICENSE") || name.contains("NOTICE") || name.startsWith("COPYING") || name == "COPYRIGHT") {
+                        text.append("\n===== $label/${entry.name} =====\n").append(zip.readBytes().toString(Charsets.UTF_8)).append('\n')
+                    } else if (entry.name.endsWith(".jar")) scan(zip.readBytes(), "$label/${entry.name}")
+                }
+            }
+        }
+        runtimeArchives.files.sortedBy { it.name }.forEach { scan(it.readBytes(), it.name) }
+        output.resolve("open-source-notices.txt").writeText(text.toString())
+    }
+}
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -5,6 +44,13 @@ plugins {
     alias(libs.plugins.screenshot)
     alias(libs.plugins.ksp)
 }
+
+val releaseSigningKeys = listOf("ULTRASLIM_KEYSTORE", "ULTRASLIM_STORE_PASSWORD", "ULTRASLIM_KEY_ALIAS", "ULTRASLIM_KEY_PASSWORD")
+val releaseSigningValues = releaseSigningKeys.map { providers.environmentVariable(it).orNull }
+require(releaseSigningValues.all { it == null } || releaseSigningValues.all { !it.isNullOrBlank() }) {
+    "Release signing requires all four ULTRASLIM_KEYSTORE/STORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD variables"
+}
+val hasReleaseSigning = releaseSigningValues.all { !it.isNullOrBlank() }
 
 android {
     namespace = "app.ultraslim"
@@ -16,11 +62,14 @@ android {
         minSdk = 26
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        versionCode = 18
-        versionName = "1.1.6"
+        // 首个公开发行版。此前的 1.x 构建均为 beta；versionCode 必须继续递增，
+        // 否则已装 beta（22）的设备无法覆盖升级。
+        versionCode = 23
+        versionName = "1.0.0"
 
         // App 自身只有中文文案；剥掉 androidx/Compose 带入的其他语言资源。
-        resourceConfigurations += setOf("zh-rCN", "zh-rTW", "zh-rHK", "en")
+        // AGP 9 起 resourceConfigurations 已弃用（Gradle 9.6 有显式警告）。
+        androidResources.localeFilters += setOf("zh-rCN", "zh-rTW", "zh-rHK", "en")
 
         // Filter transitive JNI libraries too, not only our CMake target.
         ndk { abiFilters += listOf("arm64-v8a") }
@@ -32,8 +81,17 @@ android {
         }
     }
 
+    if (hasReleaseSigning) {
+        signingConfigs.create("publicRelease") {
+            storeFile = file(releaseSigningValues[0]!!)
+            storePassword = releaseSigningValues[1]
+            keyAlias = releaseSigningValues[2]
+            keyPassword = releaseSigningValues[3]
+        }
+    }
     buildTypes {
         release {
+            if (hasReleaseSigning) signingConfig = signingConfigs.getByName("publicRelease")
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(
@@ -73,7 +131,11 @@ android {
         // Project-built JNI replacement takes precedence; verification checks the packaged bytes.
         jniLibs.pickFirsts += "lib/arm64-v8a/libandroidx.graphics.path.so"
         // 同步盘冲突副本（"xxx 2.so"）不得进 APK——曾把 3 份 20MB 的 libultraslim.so 打进包。
-        jniLibs.excludes += setOf("**/* [0-9].so", "**/* [0-9].*[0-9].so")
+        // 必须用带空格的通配形式：Gradle 的 Ant 风格模式里 [0-9] 是「匹配 0、-、9 之一」的
+        // 字符类，不是数字范围，原来的 "**/* [0-9].so" 实际什么都没排除（已实测：
+        // libandroidx.graphics.path 2.so 就是这么漏进 APK 的）。冲突副本一律含空格，故直接
+        // 排除所有带空格的 .so。
+        jniLibs.excludes += "**/* *.so"
         resources {
             // Keep AndroidX version metadata for Compose Layout Inspector / Android CLI.
             excludes += setOf(
@@ -134,3 +196,22 @@ screenshotTestImplementation(libs.compose.ui.tooling)
 }
 
 ksp { arg("room.schemaLocation", "$projectDir/schemas") }
+
+val generateOpenSourceNotices = tasks.register<GenerateOpenSourceNotices>("generateOpenSourceNotices") {
+    sourceRoot.set(rootProject.layout.projectDirectory)
+    legalFiles.from(rootProject.files("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md"))
+    legalFiles.from(rootProject.fileTree("third_party/licenses"))
+    legalFiles.from(rootProject.fileTree("third_party/libultrahdr") {
+        include("LICENSE*", "ULTRASLIM_UPSTREAM.md", "adobe-hdr-gain-map-license/NOTICE", "third_party/**/LICENSE*")
+    })
+    legalFiles.from(rootProject.file("third_party/androidx-graphics-path/LICENSE.txt"))
+    val runtime = configurations.named("releaseRuntimeClasspath")
+    runtimeArchives.from(runtime)
+    components.set(runtime.flatMap { it.incoming.artifacts.resolvedArtifacts }.map { artifacts ->
+        artifacts.map { "${it.id.componentIdentifier.displayName} (${it.file.name})" }
+    })
+    outputDirectory.set(layout.buildDirectory.dir("generated/open-source-assets"))
+}
+androidComponents.onVariants { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(generateOpenSourceNotices, GenerateOpenSourceNotices::outputDirectory)
+}

@@ -9,24 +9,8 @@ import android.provider.MediaStore
 import app.ultraslim.model.OutputFormat
 import java.io.File
 import java.io.IOException
-
-/**
- * Names already present in Pictures/UltraSlim for one conversion run.
- * Parallel saves share one instance so each file is queried once.
- */
-class AlbumNames(context: Context) {
-    private val names = queryAlbumNames(context.contentResolver).toMutableSet()
-
-    fun reserve(desired: String): String = synchronized(names) {
-        val unique = disambiguateName(desired, names)
-        names += unique
-        unique
-    }
-
-    fun release(name: String) {
-        synchronized(names) { names -= name }
-    }
-}
+import java.io.InputStream
+import java.security.MessageDigest
 
 private fun disambiguateName(desired: String, existing: Set<String>): String {
     if (desired !in existing) return desired
@@ -38,25 +22,6 @@ private fun disambiguateName(desired: String, existing: Set<String>): String {
         if (candidate !in existing) return candidate
         index++
     }
-}
-
-private fun queryAlbumNames(resolver: ContentResolver): Set<String> {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return emptySet()
-    val names = mutableSetOf<String>()
-    val collection = MediaStore.Images.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-    runCatching {
-        resolver.query(
-            collection,
-            arrayOf(MediaStore.Images.Media.DISPLAY_NAME),
-            "${MediaStore.Images.Media.RELATIVE_PATH} LIKE ?",
-            arrayOf("%UltraSlim%"),
-            null,
-        )?.use { cursor ->
-            val index = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
-            if (index >= 0) while (cursor.moveToNext()) names += cursor.getString(index)
-        }
-    }
-    return names
 }
 
 /**
@@ -74,12 +39,12 @@ object MediaStoreSaver {
         sourceFile: File,
         displayName: String,
         format: OutputFormat,
-        names: AlbumNames? = null,
         taskId: String? = null,
         relativePath: String = "Pictures/UltraSlim/",
         volume: String = MediaStore.VOLUME_EXTERNAL_PRIMARY,
         dateTaken: Long? = null,
         relatedUri: Uri? = null,
+        expectedFingerprint: Fingerprint? = null,
     ): Uri? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         if (!sourceFile.isFile) return null
@@ -91,19 +56,36 @@ object MediaStoreSaver {
             // Recover records created by earlier app versions with their original stable name.
             displayName.substringBeforeLast('.') + "_" + taskId + "." + format.extension
         } else displayName
-        if (taskId != null) {
+        // A name is only a recovery hint. Never delete or adopt an existing item
+        // (including a pending one) unless its readable bytes match our output.
+        val expected = expectedFingerprint
+            ?: runCatching { sourceFile.inputStream().use(::fingerprint) }.getOrNull() ?: return null
+        if (expected.bytes == 0L) return null
+        val existingNames = mutableSetOf<String>()
+        var recovered: Uri? = null
+        val base = desired.substringBeforeLast('.', desired)
+        val extension = desired.substringAfterLast('.', "")
+        fun escapeLike(value: String) = value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        val numbered = escapeLike(base) + " (%)" + if (extension.isEmpty()) "" else "." + escapeLike(extension)
+        val queried = runCatching {
             resolver.query(collection,
-                arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.IS_PENDING),
-                "${MediaStore.Images.Media.DISPLAY_NAME} = ? AND ${MediaStore.Images.Media.RELATIVE_PATH} = ?",
-                arrayOf(desired, relativePath), null)?.use { cursor ->
-                if (cursor.moveToFirst()) {
-                    val found = android.content.ContentUris.withAppendedId(collection, cursor.getLong(0))
-                    if (cursor.getInt(1) == 0) return found
-                    resolver.delete(found, null, null)
+                arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.IS_PENDING,
+                    MediaStore.Images.Media.DISPLAY_NAME),
+                "${MediaStore.Images.Media.RELATIVE_PATH} = ? AND " +
+                    "(${MediaStore.Images.Media.DISPLAY_NAME} = ? OR ${MediaStore.Images.Media.DISPLAY_NAME} LIKE ? ESCAPE '\\')",
+                arrayOf(relativePath, desired, numbered), "${MediaStore.Images.Media._ID} ASC")?.use { cursor ->
+                while (cursor.moveToNext()) {
+                    existingNames += cursor.getString(2)
+                    if (taskId != null && recovered == null && cursor.getInt(1) == 0) {
+                        val found = android.content.ContentUris.withAppendedId(collection, cursor.getLong(0))
+                        if (matches(resolver, found, expected)) recovered = found
+                    }
                 }
-            }
-        }
-        val chosen = if (taskId != null) desired else names?.reserve(desired) ?: disambiguateName(desired, queryAlbumNames(resolver))
+            } ?: throw IOException("无法检查相册中已有文件")
+        }.isSuccess
+        if (!queried) return null
+        recovered?.let { return it }
+        val chosen = disambiguateName(desired, existingNames)
 
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, chosen)
@@ -118,16 +100,30 @@ object MediaStoreSaver {
                 android.os.Bundle().apply { putParcelable(MediaStore.QUERY_ARG_RELATED_URI, relatedUri) })
             else resolver.insert(collection, values)
         }.getOrNull()
-        if (uri == null) {
-            names?.release(chosen)
-            return null
-        }
+        if (uri == null) return null
 
         return try {
+            // 写入时同步计算摘要：数据刚流经内存，不必再多一次整读就能确认写盘内容。
+            // 短写或内容不符在这里失败，发布后的整读校验仍是最终安全门。
+            val digest = MessageDigest.getInstance("SHA-256")
+            var written = 0L
             resolver.openOutputStream(uri)?.use { out ->
-                sourceFile.inputStream().use { it.copyTo(out) }
+                sourceFile.inputStream().use { input ->
+                    val buffer = ByteArray(64 * 1024)
+                    while (true) {
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        if (count > 0) {
+                            out.write(buffer, 0, count)
+                            digest.update(buffer, 0, count)
+                            written += count
+                        }
+                    }
+                }
             } ?: throw IOException("openOutputStream returned null for $uri")
-
+            check(written == expected.bytes && digest.digest().joinToString("") { "%02x".format(it) } == expected.sha256) {
+                "相册副本写入校验失败"
+            }
             // DATE_TAKEN is scanner-controlled on current Android. Keep the real file timestamp too,
             // so pictures without EXIF dates retain chronology when the provider indexes them.
             preserveFileTime(context, uri, dateTaken)
@@ -135,12 +131,40 @@ object MediaStoreSaver {
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
             dateTaken?.takeIf { it > 0 }?.let { values.put(MediaStore.Images.Media.DATE_TAKEN, it) }
             check(resolver.update(uri, values, null, null) == 1) { "无法发布相册文件" }
+            check(matches(resolver, uri, expected)) { "相册副本发布校验失败" }
             uri
         } catch (e: Exception) {
-            names?.release(chosen)
             runCatching { resolver.delete(uri, null, null) }
             null
         }
+    }
+
+    data class Fingerprint(val bytes: Long, val sha256: String)
+
+    /** One read of the private result; callers pass it down to avoid re-hashing the same file. */
+    internal fun fingerprintOf(file: File): Fingerprint? =
+        runCatching { file.inputStream().use(::fingerprint) }.getOrNull()
+
+    private fun fingerprint(input: InputStream): Fingerprint {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(64 * 1024)
+        var bytes = 0L
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (count > 0) { digest.update(buffer, 0, count); bytes += count }
+        }
+        return Fingerprint(bytes, digest.digest().joinToString("") { "%02x".format(it) })
+    }
+
+    private fun matches(resolver: ContentResolver, uri: Uri, expected: Fingerprint): Boolean = runCatching {
+        resolver.openInputStream(uri)?.use(::fingerprint) == expected
+    }.getOrDefault(false)
+
+    /** Final gate before the private result can be discarded by OutputStore. */
+    internal fun matchesAlbumCopy(context: Context, uri: Uri, expected: Fingerprint?): Boolean {
+        val known = expected ?: return false
+        return known.bytes > 0 && matches(context.contentResolver, uri, known)
     }
 
     internal fun preserveFileTime(context: Context, uri: Uri, timestamp: Long?) {

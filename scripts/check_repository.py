@@ -42,7 +42,9 @@ def candidates():
 def main():
     errors = []
     paths = candidates()
-    required = ["LICENSE", "README.md", "CONTRIBUTING.md", "THIRD_PARTY_NOTICES.md",
+    candidate_set = set(paths)
+    required = ["LICENSE", "NOTICE", "README.md", "CONTRIBUTING.md", "SECURITY.md",
+                "CHANGELOG.md", "THIRD_PARTY_NOTICES.md",
                 "docs/README.md", "docs/BUILDING.md", "docs/ARCHITECTURE.md",
                 "docs/COMPATIBILITY.md", "docs/RELEASING.md", "tests/README.md",
                 "gradle/wrapper/gradle-wrapper.jar", "third_party/licenses/manifest.json"]
@@ -63,15 +65,39 @@ def main():
         if re.search(r"(?:ghp_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|AKIA[A-Z0-9]{16})", text):
             errors.append(f"Credential-like token: {path}")
         if p.suffix == ".md":
-            if re.search(r"/Users/[^/\s`]+/", text):
-                errors.append(f"Personal absolute path: {path}")
+            # Trailing separator is optional: a path quoted as `/Users/name` or ending a
+            # sentence must still be caught. `/Users/<user>` is the scrub placeholder.
+            for match in re.finditer(r"/Users/([^/\s`]+)", text):
+                if not match.group(1).startswith("<"):
+                    errors.append(f"Personal absolute path in {path}: /Users/{match.group(1)}")
+            # Xiaomi/OPPO-style model codes identify a specific retail device.
+            for match in re.finditer(r"\bM\d{3,4}[A-Z][A-Z0-9]{0,4}\b", text):
+                errors.append(f"Device model identifier in {path}: {match.group(0)}")
+            # adb serials are 8 lowercase hex characters with at least one letter.
+            # Exclude all-digit dates embedded in paths and UUID fragments followed by '-'.
+            serial = re.compile(r"(?<![-\w])[0-9a-f]{8}(?![-\w])")
+            for line in text.splitlines():
+                if re.search(r"(?:adb|serial|序列号|设备|手机|install)", line, re.I):
+                    for match in serial.finditer(line):
+                        if re.search(r"[a-f]", match.group(0)):
+                            errors.append(f"Possible device serial in {path}: {match.group(0)}")
             # This project's Markdown uses inline links. Ignore external URLs and anchors.
             for target in re.findall(r"\[[^\]]*\]\(([^\n]+?)\)", text):
                 target = target.strip().strip("<>")
                 if not target or target.startswith("#") or urlsplit(target).scheme:
                     continue
                 local = unquote(target.split("#", 1)[0])
-                if not (p.parent / local).exists():
+                if not local:
+                    continue
+                resolved = (p.parent / local).resolve()
+                try:
+                    relative = resolved.relative_to(ROOT).as_posix()
+                except ValueError:
+                    errors.append(f"Link outside repository in {path}: {target}")
+                    continue
+                # Compare against the candidate set: a file that exists locally but is
+                # ignored or untracked is absent from a fresh clone.
+                if relative not in candidate_set:
                     errors.append(f"Broken local link in {path}: {target}")
     fixtures = ROOT / "tests/fixtures/libultrahdr"
     sums = fixtures / "SHA256SUMS"

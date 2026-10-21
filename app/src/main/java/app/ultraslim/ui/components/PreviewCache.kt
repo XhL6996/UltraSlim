@@ -1,12 +1,15 @@
 package app.ultraslim.ui.components
 
+import android.app.ActivityManager
 import android.content.Context
+import app.ultraslim.convert.ConversionBudget
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.ParcelFileDescriptor
 import android.util.LruCache
 import app.ultraslim.bridge.UltraHdrBridge
+import app.ultraslim.convert.ImageWork
 import java.io.File
 import java.security.MessageDigest
 import kotlinx.coroutines.sync.withLock
@@ -25,9 +28,9 @@ internal object PreviewCache {
 
     private val diskLock = Any()
     private val requestLocks = Array(32) { kotlinx.coroutines.sync.Mutex() }
-    // 只串行化原生解码（整读输入文件 + 解码缓冲），磁盘命中路径不经过这里。
-    private val decodeSlots = kotlinx.coroutines.sync.Semaphore(2)
-    private val resolutions = listOf(128, 384, 512, 1600, 4096)
+    // 档位必须是真实存在的档：详情页放大请求 2048，缺档会被 firstOrNull 抬到 4096，
+    // 而 4096 长边 RGBA 超过 MAX_BYTES，LruCache.put 单条超限会先清空整表再丢弃自己。
+    private val resolutions = listOf(128, 384, 512, 1600, 2048, 4096)
 
     // content URI 的 version（size:mtime）每次都要一次 provider round-trip；
     // 列表滚动是秒级窗口，2 秒 TTL 足以消掉重复查询。
@@ -73,23 +76,18 @@ internal object PreviewCache {
             }
         }
 
-        // 3. Heavy native decode: serialized via per-URI requestLocks and global decodeSlots
+        // Native decode shares the encoder's lane; cached previews never wait for it.
         return requestLocks[(uriString.hashCode() and Int.MAX_VALUE) % requestLocks.size].withLock {
             memory.get(key)?.let { return@withLock it }
-            decodeSlots.acquire()
-            try {
-                val bytes = decode(context, uriString, maxDim) ?: return@withLock null
-                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@withLock null
-                synchronized(diskLock) {
-                    dir.mkdirs()
-                    runCatching { file.writeBytes(bytes) }
-                    trim(dir)
-                    memory.put(key, bitmap)
-                }
-                bitmap
-            } finally {
-                decodeSlots.release()
+            val bytes = ImageWork.run("preview $maxDim") { decode(context, uriString, maxDim) } ?: return@withLock null
+            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@withLock null
+            synchronized(diskLock) {
+                dir.mkdirs()
+                runCatching { file.writeBytes(bytes) }
+                trim(dir)
+                memory.put(key, bitmap)
             }
+            bitmap
         }
     }
 
@@ -147,12 +145,18 @@ internal object PreviewCache {
     }.getOrNull()
 
     private fun decode(context: Context, uriString: String, maxDim: Int): ByteArray? = runCatching {
+        // Measure after entering ImageWork: a request may have waited behind an encode.
+        val info = ActivityManager.MemoryInfo().also {
+            context.getSystemService(ActivityManager::class.java).getMemoryInfo(it)
+        }
+        val budget = ConversionBudget.previewBytes(info.availMem, info.totalMem, info.threshold, info.lowMemory)
+        if (budget == 0L) return@runCatching null
         if (uriString.startsWith("content://")) {
             context.contentResolver.openFileDescriptor(Uri.parse(uriString), "r")
-                ?.use { UltraHdrBridge.nativeDecodePreview(it.fd, maxDim) }
+                ?.use { UltraHdrBridge.nativeDecodePreview(it.fd, maxDim, budget) }
         } else {
             ParcelFileDescriptor.open(File(uriString), ParcelFileDescriptor.MODE_READ_ONLY)
-                .use { UltraHdrBridge.nativeDecodePreview(it.fd, maxDim) }
+                .use { UltraHdrBridge.nativeDecodePreview(it.fd, maxDim, budget) }
         }
     }.getOrNull()
 
@@ -178,5 +182,11 @@ internal object PreviewCache {
             val dir = File(context.cacheDir, "previews")
             dir.deleteRecursively()
         }
+    }
+
+    /** Drops in-memory entries under system memory pressure; disk cache is kept for a later hit. */
+    fun trimMemory() {
+        memory.evictAll()
+        versionCache.evictAll()
     }
 }

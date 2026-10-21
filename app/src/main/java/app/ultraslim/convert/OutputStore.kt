@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.core.content.FileProvider
+import androidx.room.withTransaction
+import kotlinx.coroutines.flow.first
 import app.ultraslim.UltraSlimApp
 import app.ultraslim.data.HistoryEntity
 import app.ultraslim.model.OutputFormat
@@ -21,6 +23,8 @@ object OutputStore {
         val replacement = app.database.replacementDao().byId(current.id)?.takeIf { it.state == "PREPARED" }
         val source = Uri.parse(replacement?.sourceUri ?: current.inputUri)
         val metadata = withContext(Dispatchers.IO) { SourceMedia.read(app, source) }
+        // 私有成品只读一次：指纹在写盘时复用，发布后的相册副本仍整读校验两次。
+        val expected = withContext(Dispatchers.IO) { MediaStoreSaver.fingerprintOf(File(current.outputUri)) }
         val uri = try { withContext(Dispatchers.IO) {
             val file = File(current.outputUri)
             val format = OutputFormat.parse(current.format)
@@ -28,40 +32,57 @@ object OutputStore {
             val date = metadata?.dateTaken ?: SourceMedia.captureTime(app, source)
             val sameAlbum = if (replacement != null && metadata != null) MediaStoreSaver.save(app, file,
                 current.displayName, format, taskId = task, relativePath = metadata.relativePath,
-                volume = metadata.volume, dateTaken = date, relatedUri = source) else null
+                volume = metadata.volume, dateTaken = date, relatedUri = source,
+                expectedFingerprint = expected) else null
             if (sameAlbum != null) sameAlbum else {
                 if (replacement != null) AutoReplacement.finish(app, listOf(replacement), "SKIPPED",
                     "无法保存回原相册，成品保存到 UltraSlim，原图保留")
-                MediaStoreSaver.save(app, file, current.displayName, format, taskId = task, dateTaken = date)
+                MediaStoreSaver.save(app, file, current.displayName, format, taskId = task, dateTaken = date,
+                    expectedFingerprint = expected)
             }
         } } catch(e: kotlinx.coroutines.CancellationException) { throw e } catch(e: Exception) { null }
         // finish() may have added a replacement outcome while saving.
+        val verified = uri?.takeIf { withContext(Dispatchers.IO) {
+            MediaStoreSaver.matchesAlbumCopy(app, it, expected)
+        } }
         val latest = app.database.historyDao().byId(current.id) ?: current
-        val updated = if (uri != null) latest.copy(outputUri = uri.toString(), saveState = "SAVED") else latest.copy(saveState = "FAILED")
+        val updated = if (verified != null) latest.copy(outputUri = verified.toString(), saveState = "SAVED") else latest.copy(saveState = "FAILED")
         app.database.historyDao().update(updated)
-        if (uri != null) withContext(Dispatchers.IO) { File(current.outputUri).delete() }
+        if (verified != null) withContext(Dispatchers.IO) { File(current.outputUri).delete() }
         updated
     }
-    suspend fun delete(app: UltraSlimApp, id: Long) = saveLock.withLock {
-        val row = app.database.historyDao().byId(id) ?: return@withLock
-        app.database.replacementDao().delete(id)
-        app.database.historyDao().deleteById(id)
-        if (!row.outputUri.startsWith("content://")) withContext(Dispatchers.IO) { File(row.outputUri).delete() }
-        row.taskId?.let { app.conversionRepository.remove(it) }
-    }
+    class ConversionInProgress : IllegalStateException("请等待当前转换结束后删除记录")
 
-    /** 批量删除：一次 saveLock、批量 SQL、队列清理只做一次 persist。 */
-    suspend fun deleteBatch(app: UltraSlimApp, ids: List<Long>) = saveLock.withLock {
-        if (ids.isEmpty()) return@withLock
-        val rows = ids.chunked(500).flatMap { app.database.historyDao().byIds(it) }
-        app.database.replacementDao().deleteAll(ids)
-        app.database.historyDao().deleteByIds(ids)
-        withContext(Dispatchers.IO) {
-            rows.forEach { row ->
-                if (!row.outputUri.startsWith("content://")) File(row.outputUri).delete()
+    suspend fun delete(app: UltraSlimApp, id: Long) = deleteBatch(app, listOf(id))
+
+    /** 与整个转换批次互斥；saveLock 仍负责与手动/延迟发布互斥。 */
+    suspend fun deleteBatch(app: UltraSlimApp, ids: List<Long>) {
+        if (ids.isEmpty()) return
+        if (!app.conversionMutex.tryLock()) throw ConversionInProgress()
+        try {
+            // 包含已经排队、尚未取得 conversionMutex 的服务或旧 Worker。
+            if (app.conversionRunning.first()) throw ConversionInProgress()
+            saveLock.withLock {
+                app.conversionRepository.awaitReady()
+                val rows = ids.chunked(500).flatMap { app.database.historyDao().byIds(it) }
+                // 取消只发生在批次之间，不能留下已删历史但仍引用私有成品的队列。
+                withContext(kotlinx.coroutines.NonCancellable) {
+                    app.database.withTransaction {
+                        app.database.replacementDao().deleteAll(ids)
+                        app.database.historyDao().deleteByIds(ids)
+                    }
+                    withContext(Dispatchers.IO) {
+                        rows.forEach { row ->
+                            if (!row.outputUri.startsWith("content://")) File(row.outputUri).delete()
+                        }
+                    }
+                    app.conversionRepository.removeIds(rows.mapNotNull { it.taskId })
+                    app.conversionRepository.flush()
+                }
             }
+        } finally {
+            app.conversionMutex.unlock()
         }
-        app.conversionRepository.removeIds(rows.mapNotNull { it.taskId })
     }
     fun uri(context: Context, value: String, displayName: String? = null): Uri = if (value.startsWith("content://")) Uri.parse(value)
         else FileProvider.getUriForFile(context, "${context.packageName}.files", File(value), displayName ?: File(value).name)

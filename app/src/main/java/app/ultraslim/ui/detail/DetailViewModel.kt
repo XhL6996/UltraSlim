@@ -20,6 +20,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.shareIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -48,6 +49,7 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
     // 单一 Room 订阅：uiState 与回收站状态共用，且只有 inputUri 变化才重跑
     // MediaStore 检查（历史行的其他字段更新不再触发 provider 调用）。
     private val entityFlow = dao.flowById(historyId)
+        .shareIn(viewModelScope, SharingStarted.WhileSubscribed(5000), replay = 1)
 
     val uiState: StateFlow<DetailUiState> = combine(
         entityFlow,
@@ -182,8 +184,15 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
     fun deleteRecord() {
         if (saving.value) return
         viewModelScope.launch {
-            OutputStore.delete(app, historyId)
-            _events.emit(DetailEvent.Deleted)
+            saving.value = true
+            try {
+                OutputStore.delete(app, historyId)
+                _events.emit(DetailEvent.Deleted)
+            } catch (e: OutputStore.ConversionInProgress) {
+                _events.emit(DetailEvent.Message(e.message.orEmpty()))
+            } finally {
+                saving.value = false
+            }
         }
     }
 }

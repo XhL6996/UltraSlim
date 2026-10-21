@@ -67,8 +67,8 @@ int main(int argc,char**argv){
   auto file=out+"/rotate-"+std::to_string(orientation)+".jpg";orientedJpeg(file,orientation);
   for(bool keep:{false,true}){o.keepExif=keep;auto r=convert(file,file+(keep?"-exif":"-none"),o);check(r.width==32&&r.height==64,"orientation normalized independently of EXIF retention");}
  }
- // Odd SDR AVIF grids must not rely on a padded canvas plus clap: Android
- // rejects those files even though libheif and Apple ImageIO can decode them.
+ // SDR 4:2:0 grids use an even coded canvas and an exact visible aperture.
+ // Assert decoded geometry, not storage geometry; Android 15/16 are checked separately.
  for (auto dimensions : {std::pair<int,int>{5001,513}, {513,5001}, {5002,513}}) {
   const auto file=out+"/sdr-grid-"+std::to_string(dimensions.first)+"x"+std::to_string(dimensions.second)+".jpg";
   orientedJpeg(file,1,dimensions.first,dimensions.second);
@@ -77,8 +77,16 @@ int main(int argc,char**argv){
   check(!result.hasGainMap,"SDR grid stays SDR");
   auto*ctx=heif_context_alloc();check(heif_context_read_from_file(ctx,target.c_str(),nullptr).code==heif_error_Ok,"read SDR grid");
   heif_image_handle*h=nullptr;check(heif_context_get_primary_image_handle(ctx,&h).code==heif_error_Ok,"SDR grid handle");
-  check(heif_image_handle_get_ispe_width(h)==dimensions.first && heif_image_handle_get_ispe_height(h)==dimensions.second,
-        "SDR grid stores exact odd canvas without padding/clap");
+  check(heif_image_handle_get_ispe_width(h)==((dimensions.first+1)&~1) &&
+        heif_image_handle_get_ispe_height(h)==((dimensions.second+1)&~1), "SDR grid has legal even 4:2:0 canvas");
+  check(heif_image_handle_get_width(h)==dimensions.first && heif_image_handle_get_height(h)==dimensions.second,
+        "SDR grid preserves original visible dimensions");
+  heif_image*decoded=nullptr;
+  check(heif_decode_image(h,&decoded,heif_colorspace_RGB,heif_chroma_interleaved_RGB,nullptr).code==heif_error_Ok,
+        "SDR grid decodes with its clean aperture");
+  check(heif_image_get_primary_width(decoded)==dimensions.first && heif_image_get_primary_height(decoded)==dimensions.second,
+        "SDR decoded pixels retain original dimensions");
+  heif_image_release(decoded);
   heif_image_handle_release(h);heif_context_free(ctx);
  }
  // Exercise independent codec settings concurrently (TLS must not bleed across calls).

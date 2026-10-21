@@ -1,11 +1,11 @@
 # 极速模式（硬件编码）设计稿 — 实测后暂缓
 
-> 状态：**暂缓**（2026-10-07 实测后结论）。触发条件已实测：M154FF（SM8975，平台 "art"）无硬件 AV1 编码器；
+> 状态：**暂缓**（2026-10-07 实测后结论）。触发条件已实测：测试机（SM8975，平台 "art"）无硬件 AV1 编码器；
 > 有 `c2.qti.hevc.encoder` / `c2.qti.hevc.encoder.cq` / `c2.qti.heic.encoder`（Qualcomm 硬件 HEIC 图像编码器）。
 
 ## 实测结论（NDK MediaCodec 探针，2026-10-07）
 
-用独立可执行探针（`AMediaCodec` + NV12 ByteBuffer 输入，5888×4416 真实照片）在 M154FF 上实测：
+用独立可执行探针（`AMediaCodec` + NV12 ByteBuffer 输入，5888×4416 真实照片）在该机型上实测：
 
 | 编码器 | 结果 |
 |---|---|

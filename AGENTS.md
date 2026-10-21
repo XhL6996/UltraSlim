@@ -42,7 +42,7 @@ build/host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 - **HEIC 相册兼容**：App 新任务默认开启 `heicGainmapCompatibility`，与 AVIF 开关独立；原生/JNI 默认 false，旧快照缺字段按 false。兼容增益图采用 HEVC YCbCr 4:2:0：RGB 转 BT.601 限定域，存在色度采样与舍入损失；单通道使用 full-range Y + 中性 U/V，保持灰度值。保留增益图尺寸和 HDR 参数，不能标为 RGB 逐值无损。严格关闭时仍用原有 GBR/mono；部分相册可能偏色或不识别 HDR。API 34+ 保存兼容 HEIC/AVIF 前必须由 `HdrOutputValidation` 确认平台读取增益图，否则不发布。主图边长 >4096 的 HEIC 也采用 2048 网格，解决单图解码失败；HEVC ICC 和 AV1 一样排在 NCLX 之后。tmap 的 HLG 标记不是本次偏色原因，不改为 PQ。
 - **AVIF 相册兼容**：App 新任务默认开启 `avifGainmapCompatibility`；用户显式关闭仍保留，原生/JNI 默认 false，旧快照缺字段按 false。彩色增益图转换为实际 BT.601 限定域 YCbCr 4:4:4，再 AOM 无损编码；不缩小或重建，不保证 RGB 逐值无损。关闭开关时保留 Identity GBR，但必须提示部分 Apple / Android 相册会偏色。不要将兼容模式标为逐值无损。
 - AVIF 增益图超过 512 像素时使用 512×512 HEIF grid，避免单包超出 MediaCodec 输入缓冲。主图任一边超过 4096 时用 2048×2048 grid，保持原分辨率、ICC/NCLX 和 EXIF。`patch_avif_grid.py` 同时修复 libheif grid 的内存 ISPE，防止后续 tmap 写成 0×0；分块不得复用单图 gainmap 缓存。
-- 奇数尺寸 HDR AVIF 主图，以及边长 >4096 的奇数尺寸 SDR AVIF，使用 AOM 4:4:4，避免 4:2:0 偶数画布及 clap：HDR 可能丢失 gainmap，SDR 分块图也会被 Android 系统拒绝解码。通常尺寸仍用 SVT。该例外比 SVT 慢，但不裁剪、不缩放原图或 gainmap。
+- 奇数尺寸 HDR AVIF 主图使用 AOM 4:4:4，避免 4:2:0 偶数画布及 clap 影响 gainmap。纯 SDR（包括边长 >4096 的奇数尺寸）使用 SVT 4:2:0，分块画布补齐偶数并由 clap 恢复原始可见尺寸；Android 15/16 的采样与全尺寸解码已验证，Android 16 反而拒绝原来的奇数 SDR 4:4:4 分块图。补齐仅影响编码画布，不缩放或裁掉源像素；HDR 例外保持不变。
 - SDR 保存前在 API 29+ 且系统声明支持目标 MIME 时经 `SdrOutputValidation` 做平台解码检查；失败不发布且保留原图。系统不支持的格式（如 JXL）不以平台解码失败否定文件有效性。
 - `tmap` compatible brand 只在 libheif 实际创建 tone-map item 时添加，禁止因编译了增益图功能就给所有 HEIC/AVIF 输出加此标记；纯 SDR 带 `tmap` 却没有 item 会被 libavif 拒绝，即使 Android ImageDecoder / Apple ImageIO 能读取也不代表封装合规。修改该补丁后必须重建 host 和 Android libheif。
 - App 在 API 34+ 保存兼容 HDR AVIF 前检查平台能否解码主图并读出 gainmap；失败不保存，保留原图并明确提示。API 34 以下没有此系统检查能力。平台可读不代表色彩逐值无损或所有相册视觉验收通过。
@@ -50,7 +50,7 @@ build/host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 - 两条转码路径，按请求自动选择：
   - **preserve（原样保留 gainmap）**：默认且唯一的 HDR 路径；主图重压缩/缩放/换格式，严格模式下 gainmap 像素逐值保留（HEIF/AVIF 走无损 GBR/mono 直写）；显式相册兼容选项按上文规则转换，不承诺彩色样本逐值无损。旧 gainmapScale / gainmapQuality / multiChannelGainmap 参数对保留行为无影响（仅为接口/快照兼容保留）。*不要*对 gainmap 做下采样——实验证明即使 2x bilinear 下采样也会砍掉高光增益。
   - **rebuild（重建 gainmap）**：仅在显式传 `preserveGainMap=false` 时走的 libultrahdr 全解码重编码逃生通道（自一致、已验证）。preserve 不支持的情况（>8 位增益图、容器 HDR 转 JPEG）明确报错（errorCode 31）并保持输出为空，绝不静默回退 rebuild。
-- 验证方法：rendition_dump/gm_dump（host_test/）把文件解出 SDR/HDR 渲染版，在线性域（hlgInvOetf 之后）对比均值——*必须*用线性域，任何非线性 tonemap 都会因 Jensen 不等式产生伪"亮度差"。真机照片（小米 5888x4416、多通道 gainmap）与样本均已验证 ±3%。
+- 验证方法：rendition_dump/gm_dump（host_test/）把文件解出 SDR/HDR 渲染版，在线性域（hlgInvOetf 之后）对比均值——*必须*用线性域，任何非线性 tonemap 都会因 Jensen 不等式产生伪"亮度差"。真机照片（5888x4416、多通道 gainmap）与样本均已验证 ±3%。
 - Android 15 及更早的平台解码器不认识 ISO 21496-1 tmap HEIC，预览一律走 `nativeDecodePreview` 原生兜底（UltraAsyncImage，带 PreviewCache）。
 - 编码输出固定 8-bit（base + gainmap），所以 x265 只编 8-bit；AV1 编码走 **SVT-AV1**（比 aomenc 快数倍），AV1 解码走 dav1d（aom 解码器在大图上有横向拖影，仅保留无损 gainmap 编码用途），HEVC 解码走 libde265（支持 HEIC/AVIF 输入）。
 - 速度档位（speedLevel 0/1/2）：HEVC 映射 x265 preset slow/medium/veryfast，AV1 映射 "speed" 4/6/9；经 vendored libultrahdr 补丁注入（`heifultrahdr.cpp` / `avifultrahdr.cpp`，读取全局弱符号 `ultraslim_codec_speed_level`，强定义在 transcode.cpp）。svt 插件没有 "chroma" 参数，`set_internal_color_format` 已改为容错。
@@ -100,9 +100,18 @@ build/host-test/transcode_test <输入图片> <输出.heic|.avif> [quality=90] [
 
 - 原生正确性：HDR 重建路径的输入内存释放（`data.clear()`）必须发生在 HEIF EXIF 回退提取**之后**；SDR/重建编码失败统一 `ftruncate(0)` 清输出 fd；`decodeJpegSdr` 短读视为失败（截断码流不再产出灰底图）；JXL box 倍增受 `kMaxBoxBytes` 约束（errorCode 32）。
 - `ultraslim` target 已加 `-fvisibility=hidden` + `--gc-sections` + `--exclude-libs,ALL`（动态符号 10,262 → 216，.so 约 20.6MB → 17.5MB）；`core`/`image_io` 带 `-ffunction-sections` 才能让 gc-sections 生效。`decodePreviewJpeg` 入口自行初始化 `ultraslim_codec_threads`（不经过 transcodeUnchecked），否则 parallelRows 退化为单线程。
-- 同步盘冲突副本（`xxx 2.so` / `libheif 3.a`）曾泄漏进 APK（3 份 20MB .so）；packaging 已加 `jniLibs.excludes += "**/* [0-9].so"` 防御，prefix 副本已清理。项目仍在同步目录时此防御不能撤。
+- 同步盘冲突副本（`xxx 2.so` / `libheif 3.a`）曾泄漏进 APK（3 份 20MB .so）；packaging 加 `jniLibs.excludes += "**/* *.so"` 防御，prefix 副本已清理。项目仍在同步目录时此防御不能撤。**勿改回 `"**/* [0-9].so"`**：Gradle 的 Ant 模式里 `[0-9]` 是「匹配 `0`、`-`、`9` 之一」的字符类而非数字范围，那个写法一个文件都排除不掉（2026-10-17 实测查实，见下文该批次）。
 - Room 版本 6：新增 `(saveState, createdAt)` 索引（flowPage/flowCount/pendingPublications）。批量 API：`HistoryDao.noteReplacement/deleteByIds`、`ReplacementDao.deleteAll`、`OutputStore.deleteBatch`、`ConversionRepository.updateAll`——批量场景禁止逐条 update（每条都触发全量 diff + 表 invalidation）。
 - Home 统计改用单条 `flowStats()` + 500ms 节流（原 totalSaved+countDone 两次全表聚合且未节流）；扫描/导入进度按批（16/8 张）发射；`scannedProbes` 在扫描结束 finally 清空（persist 有权限时返回原 URI，键才匹配）。
 - `PreviewCache` 的 content URI version（size:mtime）有 2 秒 TTL 缓存，内存命中不再必先做 provider 查询；大图档降采样走 `inSampleSize`；设置页清缓存挪到 IO 线程。`DetailViewModel.requestTrashOriginal` 改 suspend + IO（原在主线程做 MediaStore 查询）；DetailViewModel 只有一条 flowById 订阅，按 inputUri 去重后才做回收站检查。
 - 自动替换管线：`stage` 中 source/target 解析到同一 URI 时只哈希一次；`saved()` 的 validate 跳过原图重哈希（`recheckSource=false`，回收前的 trash 时校验仍保留）——saved 时机不做破坏性操作，安全性不依赖这次哈希。
 - 依赖：room 2.8.5 / work 2.12.0 / coroutines 1.11.0 / coreKtx 1.19.1 / splashscreen 1.2.0 / serialization 1.11.0 / coil 3.6.3；硬编码版本已全部迁入 libs.versions.toml。defaultConfig 加了 resourceConfigurations（zh/en）。
+
+## 优化批次（2026-10-17）
+
+- 原生内存与重试：新增 `PreparedBasePlanes` / `PreparedGainMapPlanes`，把与质量无关的 RGBA→YUV / `heif_image` 创建提到 `encodeWithRetry` 之外，转换后立即释放 RGBA，retrySmaller 只重跑编码器；JXL 同样先把 RGBA→RGB 转换一次（libjxl 非流式 `AddImageFrame` 内部 `CopyBuffers()`，缓冲无需活过调用）。HEIC/AVIF/JXL 的 SDR 路径与该结构共用。正确性由 `gainmap_preservation` 的「缓存重试 == 独立低质量编码」逐字节断言保障。
+- `probeImageMemory` 接受 `BytesView` 视图，重建路径不再为校验整份复制输出；`orientPixels` 翻转改原地 swap、转置分块；色度子采样 NEON（640 万例逐值一致）。
+- **不要**去"优化" `encodeJpegToMem` 的缓冲接管：`jpeg_mem_dest` 的最终指针/长度只在 `term_mem_destination`（压缩结束）写回，提前读取会把输出截断到初始缓冲大小；实测收益仅 1–2%（26MP q90：78.89ms → 76.91ms），且现有测试固件都小于 256KB 初始缓冲、测不出截断。保持由 libjpeg 自管缓冲。
+- 已实测并否决的伪优化，勿重复尝试：容器重复解析（单次 0.01–0.03ms，占 26MP 整次转码 2126ms 的 0.002%；且 HEIF 的「双解析」是 `hasExif` 的唯一来源，`uhdr_dec_get_exif` 对 HEIF/AVIF 返回 null）；`parallelRows` 进程级线程池（spawn+join 0.03ms/次）；依赖库 LTO。
+- 构建路径脱敏：`native/CMakeLists.txt` 的 `-ffile-prefix-map` 必须先用 `get_filename_component(... REALPATH)` 把 `${CMAKE_CURRENT_SOURCE_DIR}/..` 归一到仓库根再映射——字面量 `.../native/..` 不是 `.../third_party/libultrahdr/...` 的文本前缀，否则 vendored 源码的 `__FILE__`（assert 串）会残留构建机绝对路径。
+- 2026-10-17 批次完整数据、验证结论与仍未立项的缺口见 [docs/TODO-optimizations.md](docs/TODO-optimizations.md) 与 [docs/reports/2026-10-17-optimization-batch.md](docs/reports/2026-10-17-optimization-batch.md)。

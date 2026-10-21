@@ -116,9 +116,11 @@ JNIEXPORT jstring JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeVersion
 }
 
 JNIEXPORT jbyteArray JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeDecodePreview(
-    JNIEnv* env, jclass /*unused*/, jint fd, jint maxDim) {
+    JNIEnv* env, jclass /*unused*/, jint fd, jint maxDim, jlong maxWorkingBytes) {
+  if (maxWorkingBytes <= 0) return nullptr;
   std::vector<uint8_t> jpeg;
-  try { jpeg = ultraslim::decodePreviewJpeg(static_cast<int>(fd), std::max(64,std::min(4096,int(maxDim)))); } catch(const std::exception&) { return nullptr; }
+  try { jpeg = ultraslim::decodePreviewJpeg(static_cast<int>(fd), std::max(64,std::min(4096,int(maxDim))), 82,
+                                           static_cast<uint64_t>(maxWorkingBytes)); } catch(const std::exception&) { return nullptr; }
   if (jpeg.empty()) return nullptr;
   jbyteArray arr = env->NewByteArray(static_cast<jsize>(jpeg.size()));
   if (arr == nullptr) return nullptr;

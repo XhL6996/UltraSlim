@@ -87,13 +87,17 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
                 }
                 ready.complete(Unit)
                 for (ignored in writes) {
-                    val (items, target) = synchronized(this@ConversionRepository) { _queue.value to revision }
+                    val snapshot = synchronized(this@ConversionRepository) {
+                        if (persistedRevision >= revision) null else _queue.value to revision
+                    } ?: continue // A flush wakeup may already be covered by the previous write.
+                    val (items, target) = snapshot
                     val next = items.associateBy { it.id }
                     val changed = items.filter { persisted[it.id] != it }
                     val removed = persisted.keys.filter { it !in next }
                     var failure: Exception? = null
                     try {
-                        dao.applyChanges(changed, removed)
+                        // Changes can cancel each other before this snapshot is drained.
+                        if (changed.isNotEmpty() || removed.isNotEmpty()) dao.applyChanges(changed, removed)
                         persisted = next
                     } catch (e: Exception) {
                         if (e is kotlinx.coroutines.CancellationException) throw e
@@ -128,8 +132,19 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
         _incoming.value = emptyList()
     }
 
+    /** Called with the repository monitor held; unchanged snapshots need no write or emission. */
+    private fun replaceQueue(items: List<QueueItem>) {
+        if (items == _queue.value) return
+        _queue.value = items
+        persist()
+    }
+
     @Synchronized fun addAll(items: List<QueueItem>) {
-        _queue.update { existing -> existing + items.filter { item -> existing.none { it.uri == item.uri } } }; persist()
+        if (items.isEmpty()) return
+        val existing = _queue.value
+        val uris = existing.mapTo(HashSet()) { it.uri }
+        val added = items.filter { uris.add(it.uri) }
+        if (added.isNotEmpty()) replaceQueue(existing + added)
     }
 
     data class RemovedItem(val item: QueueItem, val index: Int)
@@ -155,23 +170,24 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
     }
 
     @Synchronized fun removeIds(ids: Collection<String>) {
+        if (ids.isEmpty()) return
         val set = ids.toSet()
-        _queue.update { list -> list.filterNot { it.id in set && it.status != QueueStatus.CONVERTING } }
-        persist()
+        replaceQueue(_queue.value.filterNot { it.id in set && it.status != QueueStatus.CONVERTING })
     }
 
     @Synchronized fun update(id: String, transform: (QueueItem) -> QueueItem) {
-        _queue.update { list -> list.map { if (it.id == id) transform(it) else it } }; persist()
+        replaceQueue(_queue.value.map { if (it.id == id) transform(it) else it })
     }
 
     /** 批量 update：一次 map + 一次 persist，避免逐条调用造成 O(n²) 持久化写入放大。 */
     @Synchronized fun updateAll(ids: Collection<String>, transform: (QueueItem) -> QueueItem) {
+        if (ids.isEmpty()) return
         val set = ids.toSet()
-        _queue.update { list -> list.map { if (it.id in set) transform(it) else it } }; persist()
+        replaceQueue(_queue.value.map { if (it.id in set) transform(it) else it })
     }
 
     @Synchronized fun updateByUri(uri: String, transform: (QueueItem) -> QueueItem) {
-        _queue.update { list -> list.map { if (it.uri == uri) transform(it) else it } }; persist()
+        replaceQueue(_queue.value.map { if (it.uri == uri) transform(it) else it })
     }
 
     @Synchronized fun claim(id: String, batchId: String): QueueItem? {
@@ -183,31 +199,20 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
 
     fun find(id: String): QueueItem? = _queue.value.firstOrNull { it.id == id }
 
-    fun findByUri(uri: String): QueueItem? = _queue.value.firstOrNull { it.uri == uri }
-
     /** Failed and skipped items remain available for inspection and retry. */
     @Synchronized fun clearFinished() {
-        _queue.update { list ->
-            list.filterNot {
-                it.status == QueueStatus.DONE
-            }
-        }
-        persist()
+        replaceQueue(_queue.value.filterNot { it.status == QueueStatus.DONE })
     }
 
     /** 待处理项（未在转换中的）：PENDING / PROBING / READY。 */
     @Synchronized fun clearPending() {
-        _queue.update { list ->
-            list.filterNot { it.status == QueueStatus.PENDING || it.status == QueueStatus.PROBING || it.status == QueueStatus.READY }
-        }
-        persist()
+        replaceQueue(_queue.value.filterNot {
+            it.status == QueueStatus.PENDING || it.status == QueueStatus.PROBING || it.status == QueueStatus.READY
+        })
     }
 
     /** 全部清除；正在转换的条目等它落地后再清。 */
     @Synchronized fun clearAll() {
-        _queue.update { list ->
-            list.filterNot { it.status != QueueStatus.CONVERTING }
-        }
-        persist()
+        replaceQueue(_queue.value.filter { it.status == QueueStatus.CONVERTING })
     }
 }

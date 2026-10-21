@@ -17,6 +17,39 @@ import java.security.MessageDigest
 
 /** A durable, opt-in journal. Originals are only ever sent to the system's recoverable trash. */
 internal object AutoReplacement {
+    /**
+     * 一次确认点击内的共享查询。设置、批次取消状态、原图回收站状态在整轮复核中逐行相同，
+     * 而批量规模可达 2000 行，逐行重复 DataStore/provider 往返是这一轮的主要固定开销。
+     */
+    internal class Pass(private val app: UltraSlimApp) {
+        private var enabled: Boolean? = null
+        private val batchCancelled = HashMap<String, Boolean?>()
+        private val originalStates = HashMap<String, MediaStoreTrashHelper.OriginalState>()
+
+        suspend fun autoReplaceEnabled(): Boolean {
+            enabled?.let { return it }
+            val value = app.settingsRepository.defaults.first().autoReplaceOriginals
+            enabled = value
+            return value
+        }
+
+        /** null 表示批次不存在；与 batch(...)?.cancelled == false 的语义一致。 */
+        suspend fun batchActive(batchId: String): Boolean {
+            if (!batchCancelled.containsKey(batchId)) {
+                batchCancelled[batchId] = app.database.taskDao().batch(batchId)?.cancelled
+            }
+            return batchCancelled[batchId] == false
+        }
+
+        suspend fun originalState(uri: Uri): MediaStoreTrashHelper.OriginalState {
+            val key = uri.toString()
+            originalStates[key]?.let { return it }
+            val state = MediaStoreTrashHelper.originalState(app, uri)
+            originalStates[key] = state
+            return state
+        }
+    }
+
     fun fingerprint(app: UltraSlimApp, uri: Uri): String =
         app.contentResolver.openInputStream(uri)?.use { input ->
             val digest = MessageDigest.getInstance("SHA-256")
@@ -110,15 +143,20 @@ internal object AutoReplacement {
     }
 
     /** Rechecked immediately before requesting trash: files/permissions/settings can change while queued. */
-    suspend fun validate(app: UltraSlimApp, item: ReplacementEntity, recheckSource: Boolean = true) = withContext(Dispatchers.IO) {
-        check(app.settingsRepository.defaults.first().autoReplaceOriginals) { "自动替换已关闭" }
-        check(app.database.taskDao().batch(item.batchId)?.cancelled == false) { "批次已取消" }
+    suspend fun validate(app: UltraSlimApp, item: ReplacementEntity, recheckSource: Boolean = true,
+                         pass: Pass? = null) = withContext(Dispatchers.IO) {
+        val enabled = pass?.autoReplaceEnabled() ?: app.settingsRepository.defaults.first().autoReplaceOriginals
+        check(enabled) { "自动替换已关闭" }
+        val batchActive = pass?.batchActive(item.batchId) ?: (app.database.taskDao().batch(item.batchId)?.cancelled == false)
+        check(batchActive) { "批次已取消" }
         val history = app.database.historyDao().byId(item.historyId) ?: error("记录已移除")
         check(history.saveState == "SAVED" && history.outputUri == item.outputUri) { "成品尚未保存" }
         check(item.sourceUri != item.outputUri) { "原图与成品位置相同" }
-        check(MediaStoreTrashHelper.originalState(app, Uri.parse(item.sourceUri)) == MediaStoreTrashHelper.OriginalState.PRESENT) { "原图已删除、在回收站或不可访问" }
+        val sourceUri = Uri.parse(item.sourceUri)
+        val originalState = pass?.originalState(sourceUri) ?: MediaStoreTrashHelper.originalState(app, sourceUri)
+        check(originalState == MediaStoreTrashHelper.OriginalState.PRESENT) { "原图已删除、在回收站或不可访问" }
         if (recheckSource) {
-            check(fingerprint(app, Uri.parse(item.sourceUri)) == item.sourceHash) { "原图已变化或不可访问" }
+            check(fingerprint(app, sourceUri) == item.sourceHash) { "原图已变化或不可访问" }
         }
         check(fingerprint(app, Uri.parse(item.outputUri)) == item.outputHash) { "成品已变化或不可访问" }
         requireReadable(app, Uri.parse(item.outputUri), history)

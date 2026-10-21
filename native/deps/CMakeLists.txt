@@ -16,6 +16,18 @@ set(COMMON_CMAKE_ARGS
     -DCMAKE_BUILD_TYPE=Release
     -DBUILD_SHARED_LIBS=OFF
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON)
+
+# 依赖源码里的 __FILE__ / 断言串会把构建机绝对路径写进产物（含用户名与中文目录名），
+# 发布出去即泄露本机目录结构。映射从 superbuild 的 build 目录开始，覆盖所有依赖源码树。
+#
+# 不能写成 -DCMAKE_C_FLAGS=...：本仓库路径含空格，CMake 传参时会被拆成两段
+# （clang: error: no such file or directory），必须借 add_compile_options 让 CMake 加引号。
+# 注入文件在各依赖自己的 project() 之后执行；REV 让该文件的改动也能使已有 superbuild 失效。
+file(SHA256 ${CMAKE_CURRENT_SOURCE_DIR}/patches/file_prefix_map.cmake ULTRASLIM_PATH_MAP_REV)
+list(APPEND COMMON_CMAKE_ARGS
+    -DULTRASLIM_MAP_ROOT=${CMAKE_CURRENT_BINARY_DIR}
+    -DULTRASLIM_PATH_MAP_REV=${ULTRASLIM_PATH_MAP_REV}
+    -DCMAKE_PROJECT_INCLUDE=${CMAKE_CURRENT_SOURCE_DIR}/patches/file_prefix_map.cmake)
 if(DEFINED CMAKE_TOOLCHAIN_FILE AND NOT "${CMAKE_TOOLCHAIN_FILE}" STREQUAL "")
   list(APPEND COMMON_CMAKE_ARGS -DCMAKE_TOOLCHAIN_FILE:FILEPATH=${CMAKE_TOOLCHAIN_FILE})
 endif()
@@ -196,9 +208,14 @@ ExternalProject_Add_Step(libheif patch_inputs
             ${CMAKE_CURRENT_SOURCE_DIR}/patches/libheif_pr1503.patch)
 
 # ---------------------------------------------------------------- libjxl (JPEG XL encoder/decoder)
+# GIT_SHALLOW only accepts branch names and tags, so the tag is cloned shallowly and the
+# resulting commit is verified below; a moved tag fails the build instead of silently
+# changing the linked code.
+set(ULTRASLIM_LIBJXL_TAG v0.11.1)
+set(ULTRASLIM_LIBJXL_COMMIT 794a5dcf0d54f9f0b20d288a12e87afb91d20dfc)
 ExternalProject_Add(libjxl
     GIT_REPOSITORY https://github.com/libjxl/libjxl.git
-    GIT_TAG v0.11.1
+    GIT_TAG ${ULTRASLIM_LIBJXL_TAG}
     GIT_SHALLOW TRUE
     GIT_SUBMODULES "third_party/brotli" "third_party/highway" "third_party/skcms"
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
@@ -217,3 +234,8 @@ ExternalProject_Add(libjxl
                -DJPEGXL_ENABLE_PLUGINS=OFF
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target jxl jxl_cms jxl_threads brotli --parallel
     INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)
+ExternalProject_Add_Step(libjxl verify_pin
+    COMMAND ${CMAKE_COMMAND} -DSRC_DIR=<SOURCE_DIR> -DEXPECTED=${ULTRASLIM_LIBJXL_COMMIT}
+            -P ${CMAKE_CURRENT_SOURCE_DIR}/patches/verify_git_pin.cmake
+    COMMENT "Verifying libjxl resolves to the pinned commit"
+    DEPENDEES update DEPENDERS patch ALWAYS TRUE)

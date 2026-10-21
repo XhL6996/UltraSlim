@@ -53,23 +53,23 @@ internal class ConversionRunner(
         val ids = runCatching { JSONArray(batch.itemIds).let { j -> List(j.length()) { j.getString(it) } } }.getOrDefault(emptyList())
         val options = runCatching { decodeDefaults(batch.settings) }.getOrNull()
         if (options == null) {
-            (ids.asSequence() + repo.queue.value.asSequence().filter { it.batchId == batchId }.map { it.id })
-                .distinct().forEach { id -> repo.update(id) { it.copy(status = QueueStatus.FAILED, error = "任务参数无法解析，请重新选择图片转换") } }
+            val affectedIds = ids.toMutableSet().apply {
+                repo.queue.value.filter { it.batchId == batchId }.mapTo(this) { it.id }
+            }
+            repo.updateAll(affectedIds) { it.copy(status = QueueStatus.FAILED, error = "任务参数无法解析，请重新选择图片转换") }
             repo.flush()
             return Outcome.FAILED
         }
         try { setForeground(getForegroundInfo()) } catch (e: Exception) {
             if (e is CancellationException) throw e
             // 重试批次中已完成项不能被覆盖；只标记尚未落地的条目。
-            ids.forEach { id -> repo.update(id) { if (it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED) it
-                else it.copy(status = QueueStatus.FAILED, error = "后台任务启动失败，请回到应用重试：${e.message}") } }
+            repo.updateAll(ids) { if (it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED) it
+                else it.copy(status = QueueStatus.FAILED, error = "后台任务启动失败，请回到应用重试：${e.message}") }
             repo.flush()
             return Outcome.FAILED
         }
         var done = 0; var saved = 0L
         val started = System.currentTimeMillis()
-        val prefetchScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
-        var prefetchDeferred: Deferred<PrefetchedMeta?>? = null
         try {
             for ((index, id) in ids.withIndex()) {
                 currentCoroutineContext().ensureActive()
@@ -111,10 +111,7 @@ internal class ConversionRunner(
                     val originalHash = if (options.autoReplaceOriginals) withContext(Dispatchers.IO) {
                         runCatching { AutoReplacement.fingerprint(app, source) }.getOrNull()
                     } else null
-                    val cachedMeta = prefetchDeferred?.let { runCatching { it.await() }.getOrNull() }?.takeIf { it.id == id }
-                    prefetchDeferred = null
-
-                    val probe = cachedMeta?.probe ?: withContext(Dispatchers.IO) {
+                    val probe = ImageWork.run {
                         app.contentResolver.openFileDescriptor(source, "r")?.use { UltraHdrBridge.nativeProbe(it.fd) }
                     } ?: error("无法读取原图，请重新选择或授权")
                     check(probe.isSuccess) { probe.error }
@@ -122,39 +119,25 @@ internal class ConversionRunner(
                     if (!probe.hasGainMap && !options.allowSdr) {
                         repo.update(id) { it.copy(status = QueueStatus.SKIPPED, error = "按设置跳过 SDR 图片") }; continue
                     }
-                    val mem = ActivityManager.MemoryInfo().also { app.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }
-                    val pixels = probe.width.toLong() * probe.height
-                    check(pixels > 0 && pixels * (if (probe.hasGainMap) 40 else 16) < mem.availMem * 3 / 5) { "当前可用内存不足，请关闭其他应用后重试" }
-                    val motionInfo = cachedMeta?.motionInfo ?: withContext(Dispatchers.IO) { MotionPhotoHelper.detect(app, source) }
+                    val motionInfo = withContext(Dispatchers.IO) { MotionPhotoHelper.detect(app, source) }
                     val motionXmp = if (motionInfo != null && options.format == OutputFormat.HEIC)
                         MotionPhotoContainer.xmp(motionInfo, options.format.mimeType) else null
 
-                    // Pipelining: Asynchronously prefetch next image's probe & motion info while current image is being transcoded
-                    val nextId = ids.getOrNull(index + 1)
-                    if (nextId != null) {
-                        prefetchDeferred = prefetchScope.async {
-                            runCatching {
-                                val nextItem = repo.find(nextId) ?: return@async null
-                                if (nextItem.status == QueueStatus.DONE || nextItem.status == QueueStatus.SKIPPED) return@async null
-                                val nextSource = Uri.parse(nextItem.uri)
-                                val nextProbe = app.contentResolver.openFileDescriptor(nextSource, "r")?.use {
-                                    UltraHdrBridge.nativeProbe(it.fd)
-                                } ?: return@async null
-                                if (!nextProbe.isSuccess) return@async null
-                                val nextMotion = MotionPhotoHelper.detect(app, nextSource)
-                                PrefetchedMeta(nextId, nextProbe, nextMotion)
-                            }.getOrNull()
-                        }
-                    }
-
                     val file = File(app.filesDir, "outputs/$id.${options.format.extension}").apply { parentFile?.mkdirs() }
-                    suspend fun transcode(quality: Int) = withContext(Dispatchers.IO) {
+                    suspend fun transcode(quality: Int) = ImageWork.run("encode ${options.format} ${probe.width}x${probe.height}") {
+                        val mem = ActivityManager.MemoryInfo().also { app.getSystemService(ActivityManager::class.java).getMemoryInfo(it) }
+                        check(ConversionBudget.canStart(probe.width, probe.height, probe.gainmapWidth, probe.gainmapHeight,
+                            probe.hasGainMap, item.sizeBytes, mem.availMem, mem.totalMem, mem.threshold, mem.lowMemory)) {
+                            "可用内存不足以安全处理这张照片，已保留原图；请稍后重试"
+                        }
+                        val threads = ConversionBudget.threads(Runtime.getRuntime().availableProcessors())
+                        android.util.Log.i("UltraSlimConversion", "encode format=${options.format} size=${probe.width}x${probe.height} threads=$threads available=${mem.availMem}")
                         app.contentResolver.openFileDescriptor(source, "r")!!.use { input ->
                             ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_WRITE or ParcelFileDescriptor.MODE_CREATE or ParcelFileDescriptor.MODE_TRUNCATE).use { output ->
                                 UltraHdrBridge.nativeTranscode(input.fd, output.fd, options.format.codecId, quality,
                                     options.gainmapQuality, options.gainmapScale, options.multiChannelGainmap, options.keepExif,
                                     options.allowSdr, options.speedLevel, options.resizePercent,
-                                    Runtime.getRuntime().availableProcessors().coerceIn(2, 8), options.keepLocation, motionXmp, options.onlySmaller,
+                                    threads, options.keepLocation, motionXmp, options.onlySmaller,
                                     avifGainmapCompatibility = options.avifGainmapCompatibility,
                                     heicGainmapCompatibility = options.heicGainmapCompatibility)
                             }
@@ -224,14 +207,14 @@ internal class ConversionRunner(
                 } finally { withContext(NonCancellable) { repo.flush() } }
             }
         } finally {
-            prefetchScope.cancel()
-            ids.forEach { id -> repo.update(id) { if (it.status == QueueStatus.CONVERTING) it.copy(status = QueueStatus.READY, error = "已中断，可继续") else it } }
+            repo.updateAll(ids) { if (it.status == QueueStatus.CONVERTING) it.copy(status = QueueStatus.READY, error = "已中断，可继续") else it }
             withContext(NonCancellable) { repo.flush() }
         }
         if (app.database.taskDao().batch(batchId)?.cancelled == false) {
-            val pendingSave = options.autoSave && ids.any { id -> repo.find(id)?.let {
-                it.status == QueueStatus.DONE && it.outputUri?.startsWith("content://") != true
-            } == true }
+            val pendingSave = options.autoSave && ids.toHashSet().let { batchIds ->
+                repo.queue.value.any { it.id in batchIds &&
+                    it.status == QueueStatus.DONE && it.outputUri?.startsWith("content://") != true }
+            }
             showSummary(done, saved, pendingSave)
         }
         return Outcome.COMPLETE
@@ -294,9 +277,3 @@ internal class ConversionRunner(
         runCatching { NotificationManagerCompat.from(applicationContext).notify(SUMMARY_ID, notification) }
     }
 }
-
-private data class PrefetchedMeta(
-    val id: String,
-    val probe: app.ultraslim.bridge.ProbeResult,
-    val motionInfo: MotionPhotoInfo?,
-)

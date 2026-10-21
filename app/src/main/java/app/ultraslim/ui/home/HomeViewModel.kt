@@ -10,6 +10,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.work.WorkInfo
 import androidx.work.WorkManager
+import app.ultraslim.convert.ImageWork
 import app.ultraslim.UltraSlimApp
 import app.ultraslim.bridge.UltraHdrBridge
 import app.ultraslim.convert.MotionPhotoHelper
@@ -58,6 +59,7 @@ import kotlinx.coroutines.flow.sample
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 sealed interface HomeEvent {
@@ -80,6 +82,8 @@ data class HomeUiState(
     val isConverting: Boolean = false,
     val totalQueueBytes: Long = 0L,
     val hasFailed: Boolean = false,
+    val batchTotal: Int = 0,
+    val batchProcessed: Int = 0,
 ) {
     val convertibleCount: Int
         get() = queue.count {
@@ -111,6 +115,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     /** Set when the user cancels a run, so the summary event reads as a cancellation. */
     private var cancelledRun = false
     private var activeBatch: String? = null
+    private val activeBatchIds = MutableStateFlow<List<String>>(emptyList())
     private var scanJob: Job? = null
     private val runDefaults = MutableStateFlow(ConversionDefaults())
     private val _stopping = MutableStateFlow(false)
@@ -131,24 +136,27 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     /** 可移入系统回收站的原图 URI（已完成且产出更小的条目）；Default 线程预解析。 */
     private val _trashableOriginalUris = MutableStateFlow<List<Uri>>(emptyList())
     val trashableOriginalUris: StateFlow<List<Uri>> = _trashableOriginalUris.asStateFlow()
+    private val trashResolutionLock = kotlinx.coroutines.sync.Mutex()
+    private val resolvedOriginals = mutableMapOf<String, Uri>()
 
-    private val workRunning: Flow<Boolean> = combine(app.conversionServiceRunning,
-        workManager.getWorkInfosForUniqueWorkFlow(ConversionWorker.UNIQUE_WORK_NAME)) { service, infos ->
-        service || infos.any { !it.state.isFinished }
-    }
-        .distinctUntilChanged()
+    private val workRunning: Flow<Boolean> = app.conversionRunning.distinctUntilChanged()
 
     // 批次中每张图至少 3 次 repo.update；sample 把 UI 侧的全列表重算（过滤/分组/求和）
     // 收敛到每个时间窗口一次，避免 500 张批次触发上千次 O(n log n) 分组。
-    // 统计用一条 flowStats 聚合查询（原为 totalSaved+countDone 两次全表聚合），
-    // 且同样节流去重——转换中每次 insert 都会触发 Room invalidation。
+    // 统计由 Repository 在查询前合并 invalidation，并与成品库共享。
     @OptIn(kotlinx.coroutines.FlowPreview::class)
     val uiState: StateFlow<HomeUiState> = combine(
         repo.queue.sample(QUEUE_SAMPLE_MILLIS),
         runDefaults,
-        dao.flowStats().sample(STATS_SAMPLE_MILLIS).distinctUntilChanged(),
+        app.historyRepository.stats,
         workRunning,
-    ) { queue, defaults, stats, running ->
+        activeBatchIds,
+    ) { queue, defaults, stats, running, batchIds ->
+        val byId = queue.associateBy { it.id }
+        val ids = batchIds.ifEmpty { queue.map { it.id } }
+        val processed = ids.count { id -> byId[id]?.status.let {
+            it == null || it == QueueStatus.DONE || it == QueueStatus.SKIPPED || it == QueueStatus.FAILED
+        } }
         HomeUiState(
             queue = queue,
             defaults = defaults,
@@ -157,6 +165,8 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             isConverting = running || queue.any { it.status == QueueStatus.CONVERTING },
             totalQueueBytes = queue.sumOf { it.sizeBytes },
             hasFailed = queue.any { it.status == QueueStatus.FAILED },
+            batchTotal = ids.size,
+            batchProcessed = processed,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
 
@@ -165,28 +175,23 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             repo.awaitReady()
             val latest = app.database.taskDao().latestBatch()
             activeBatch = latest?.id
+            activeBatchIds.value = runCatching {
+                latest?.itemIds?.let { encoded -> JSONArray(encoded).let { array -> List(array.length()) { array.getString(it) } } }
+            }.getOrNull().orEmpty()
             runDefaults.value = if (latest != null && repo.queue.value.any { it.batchId == latest.id && it.status !in listOf(QueueStatus.DONE, QueueStatus.FAILED, QueueStatus.SKIPPED) }) decodeDefaults(latest.settings) else settings.defaults.first()
             settings.defaults.map { it.autoReplaceOriginals }.distinctUntilChanged().collect { enabled ->
                 runDefaults.value = runDefaults.value.copy(autoReplaceOriginals = enabled,
                     autoSave = if (enabled) true else runDefaults.value.autoSave)
             }
         }
-        // 回收站原图解析含逐条 MediaStore 查询，全部移到 Default 线程；
-        // 组合期与点击回调只读缓存结果。
-        viewModelScope.launch(Dispatchers.Default) {
+        // 批次中只补新增原图；实际发起回收前仍由 refreshAndGetTrashable 全量校验。
+        viewModelScope.launch(Dispatchers.IO) {
             repo.queue
                 .sample(TRASH_RESOLVE_SAMPLE_MILLIS)
-                .map { list -> list.filter { it.status == QueueStatus.DONE && it.result != null && it.result.outputBytes < it.result.inputBytes }.map { it.id } }
+                .map { list -> list.filter { it.status == QueueStatus.DONE && it.result != null && it.result.outputBytes < it.result.inputBytes }.map { it.uri }.distinct() }
                 .distinctUntilChanged()
-                .collectLatest { ids ->
-                    val uris = mutableListOf<Uri>()
-                    for (id in ids) {
-                        coroutineContext.ensureActive()
-                        repo.find(id)?.let { item ->
-                            MediaStoreTrashHelper.activeOriginal(app, Uri.parse(item.uri))?.let(uris::add)
-                        }
-                    }
-                    _trashableOriginalUris.value = uris.distinct()
+                .collectLatest { sources ->
+                    resolveTrashable(sources, refresh = false)
                 }
         }
         viewModelScope.launch {
@@ -515,13 +520,13 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }.flowOn(Dispatchers.IO)
 
     private suspend fun probeHasGainMap(uri: Uri): Boolean = probePermits.withPermit {
-        withContext(Dispatchers.IO) {
+        ImageWork.run {
             val probe = runCatching {
                 app.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
                     UltraHdrBridge.nativeProbe(pfd.fd)
                 }
             }.getOrNull()
-            if (probe != null && probe.isSuccess) scannedProbes[uri.toString()] = probe
+            if (probe != null && probe.isSuccess && probe.hasGainMap) scannedProbes[uri.toString()] = probe
             probe != null && probe.isSuccess && probe.hasGainMap
         }
     }
@@ -611,7 +616,8 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
                 repo.updateAll(eligible.map { it.id }) { it.copy(batchId = batchId) }
                 repo.flush()
                 lastRunIds = eligible.mapTo(mutableSetOf()) { it.id }
-                activeBatch = batchId; cancelledRun = false; _stopping.value = false
+                activeBatch = batchId; activeBatchIds.value = eligible.map { it.id }
+                cancelledRun = false; _stopping.value = false
                 ConversionService.start(app, batchId)
             } catch (e: Exception) { _events.emit(HomeEvent.Info("无法启动转换：${e.message}")) }
             finally { starting = false }
@@ -658,7 +664,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         repo.update(id) {
             if (it.status == QueueStatus.PENDING) it.copy(status = QueueStatus.PROBING) else it
         }
-        val probe = scannedProbes.remove(uri.toString()) ?: withContext(Dispatchers.IO) {
+        val probe = scannedProbes.remove(uri.toString()) ?: ImageWork.run {
             runCatching {
                 app.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
                     UltraHdrBridge.nativeProbe(pfd.fd)
@@ -746,14 +752,31 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         )
     }
 
-    /** 在 Default 线程重新解析并缓存；批次结束的 snackbar 需要新鲜数据时调用。 */
-    suspend fun refreshAndGetTrashable(): List<Uri> = withContext(Dispatchers.Default) {
-        val uris = repo.queue.value
+    private suspend fun resolveTrashable(sources: List<String>, refresh: Boolean): List<Uri> =
+        trashResolutionLock.withLock {
+            if (refresh) resolvedOriginals.clear()
+            resolvedOriginals.keys.retainAll(sources.toSet())
+            val pending = sources.filter { !resolvedOriginals.containsKey(it) }
+            if (pending.isNotEmpty()) {
+                coroutineContext.ensureActive()
+                // 整批一次状态查询，避免逐条 provider round-trip。
+                val parsed = pending.map { it to Uri.parse(it) }
+                val states = MediaStoreTrashHelper.originalStates(app, parsed.map { it.second })
+                parsed.forEach { (source, uri) ->
+                    if (states[uri] == MediaStoreTrashHelper.OriginalState.PRESENT) {
+                        MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, uri)?.let { resolvedOriginals[source] = it }
+                    }
+                }
+            }
+            sources.mapNotNull { resolvedOriginals[it] }.distinct().also { _trashableOriginalUris.value = it }
+        }
+
+    /** 回收请求及批次结束时重新校验，同时刷新增量缓存。 */
+    suspend fun refreshAndGetTrashable(): List<Uri> = withContext(Dispatchers.IO) {
+        val sources = repo.queue.value
             .filter { it.status == QueueStatus.DONE && it.result != null && it.result.outputBytes < it.result.inputBytes }
-            .mapNotNull { MediaStoreTrashHelper.activeOriginal(app, Uri.parse(it.uri)) }
-            .distinct()
-        _trashableOriginalUris.value = uris
-        uris
+            .map { it.uri }.distinct()
+        resolveTrashable(sources, refresh = true)
     }
 
     suspend fun requestTrashOriginals(): android.content.IntentSender? {
@@ -777,7 +800,6 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     companion object {
         private const val SCAN_PARALLELISM = 4
         private const val QUEUE_SAMPLE_MILLIS = 150L
-        private const val STATS_SAMPLE_MILLIS = 500L
         private const val TRASH_RESOLVE_SAMPLE_MILLIS = 500L
     }
 }

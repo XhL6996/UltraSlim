@@ -64,15 +64,27 @@ data class HistoryEntity(
 @Dao
 interface HistoryDao {
 
-    @Query("SELECT * FROM history WHERE :filter = '' OR saveState = :filter ORDER BY createdAt DESC LIMIT :limit")
-    fun flowPage(limit: Int, filter: String): Flow<List<HistoryEntity>>
+    fun flowPage(limit: Int, filter: String): Flow<List<HistoryEntity>> =
+        if (filter.isEmpty()) flowPageAll(limit) else flowPageFiltered(limit, filter)
+
+    @Query("SELECT * FROM history ORDER BY createdAt DESC LIMIT :limit")
+    fun flowPageAll(limit: Int): Flow<List<HistoryEntity>>
+
+    @Query("SELECT * FROM history WHERE saveState = :filter ORDER BY createdAt DESC LIMIT :limit")
+    fun flowPageFiltered(limit: Int, filter: String): Flow<List<HistoryEntity>>
 
     @Query("SELECT * FROM history WHERE saveState = 'PENDING' ORDER BY id")
     fun pendingPublications(): Flow<List<HistoryEntity>>
 
     /** 与 [flowPage] 同筛选的计数，供"加载更多"页脚比较。 */
-    @Query("SELECT COUNT(*) FROM history WHERE :filter = '' OR saveState = :filter")
-    fun flowCount(filter: String): Flow<Int>
+    fun flowCount(filter: String): Flow<Int> =
+        if (filter.isEmpty()) flowCountAll() else flowCountFiltered(filter)
+
+    @Query("SELECT COUNT(*) FROM history")
+    fun flowCountAll(): Flow<Int>
+
+    @Query("SELECT COUNT(*) FROM history WHERE saveState = :filter")
+    fun flowCountFiltered(filter: String): Flow<Int>
 
     @Query("SELECT * FROM history WHERE taskId = :taskId LIMIT 1")
     suspend fun byTask(taskId: String): HistoryEntity?
@@ -82,6 +94,14 @@ interface HistoryDao {
 
     @Query("SELECT * FROM history")
     suspend fun all(): List<HistoryEntity>
+
+    /** Startup cleanup only needs references, not every image's metadata. */
+    @Query("SELECT id, inputUri, outputUri FROM history")
+    suspend fun allPaths(): List<HistoryPaths>
+
+    /** A concurrent publication must not be overwritten by legacy cache promotion. */
+    @Query("UPDATE history SET outputUri = :outputUri WHERE id = :id AND outputUri = :expectedOutputUri")
+    suspend fun updateOutputPath(id: Long, expectedOutputUri: String, outputUri: String): Int
 
     @Query("SELECT * FROM history WHERE createdAt >= :start AND createdAt < :end ORDER BY createdAt DESC")
     suspend fun inDateRange(start: Long, end: Long): List<HistoryEntity>
@@ -110,19 +130,25 @@ interface HistoryDao {
     @Query("DELETE FROM history")
     suspend fun deleteAll()
 
-    @Query("SELECT SUM(inputBytes - outputBytes) FROM history WHERE status = 'DONE'")
-    fun totalSaved(): Flow<Long?>
-
-    @Query("SELECT COUNT(*) FROM history WHERE status = 'DONE'")
-    fun countDone(): Flow<Int>
-
-    @Query("SELECT COUNT(*) as countDone, COALESCE(SUM(inputBytes), 0) as totalInputBytes, COALESCE(SUM(outputBytes), 0) as totalOutputBytes, COALESCE(SUM(CASE WHEN hadGainMap THEN 1 ELSE 0 END), 0) as gainmapCount FROM history WHERE status = 'DONE'")
+    @Query(HISTORY_STATS_SQL)
     fun flowStats(): Flow<HistoryStats>
+
+    @Query(HISTORY_STATS_SQL)
+    suspend fun stats(): HistoryStats
 
     /** 批量追加替换结果摘要，替代逐条 byId+update（AutoReplacement.finish）。 */
     @Query("UPDATE history SET settingsSummary = (CASE WHEN instr(settingsSummary, ' · 替换结果：') > 0 THEN substr(settingsSummary, 1, instr(settingsSummary, ' · 替换结果：') - 1) ELSE settingsSummary END) || ' · 替换结果：' || :message WHERE id IN (:ids)")
-    suspend fun noteReplacement(ids: List<Long>, message: String)
+    suspend fun noteReplacementChunk(ids: List<Long>, message: String)
+
+    @Transaction
+    suspend fun noteReplacement(ids: List<Long>, message: String) {
+        ids.chunked(500).forEach { noteReplacementChunk(it, message) }
+    }
 }
+
+data class HistoryPaths(val id: Long, val inputUri: String, val outputUri: String)
+
+private const val HISTORY_STATS_SQL = "SELECT COUNT(*) as countDone, COALESCE(SUM(inputBytes), 0) as totalInputBytes, COALESCE(SUM(outputBytes), 0) as totalOutputBytes, COALESCE(SUM(CASE WHEN hadGainMap THEN 1 ELSE 0 END), 0) as gainmapCount FROM history WHERE status = 'DONE'"
 
 data class HistoryStats(
     val countDone: Int = 0,

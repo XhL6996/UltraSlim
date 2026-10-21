@@ -99,8 +99,14 @@ class ConversionService : Service() {
                     withContext(NonCancellable) {
                         val repo = app.conversionRepository
                         repo.awaitReady()
-                        if (interrupted) repo.queue.value.filter { it.batchId == id && it.status !in listOf(QueueStatus.DONE, QueueStatus.SKIPPED, QueueStatus.FAILED) }
-                            .forEach { item -> repo.update(item.id) { it.copy(status = QueueStatus.READY, error = stopReason) } }
+                        if (interrupted) {
+                            val batchIds = repo.queue.value.filter { it.batchId == id }.map { it.id }
+                            repo.updateAll(batchIds) {
+                                if (it.batchId == id && it.status != QueueStatus.DONE &&
+                                    it.status != QueueStatus.SKIPPED && it.status != QueueStatus.FAILED)
+                                    it.copy(status = QueueStatus.READY, error = stopReason) else it
+                            }
+                        }
                         repo.flush()
                     }
                 } finally {

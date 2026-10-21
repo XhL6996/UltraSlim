@@ -94,6 +94,7 @@ import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -101,6 +102,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.Alignment
@@ -501,6 +503,17 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
     var viewSize by remember { mutableStateOf(IntSize(1, 1)) }
     var zoomScale by remember { mutableFloatStateOf(1f) }
     var panOffset by remember { mutableStateOf(Offset.Zero) }
+    // 只在真正跨越阈值时改变图像请求档位。直接在组合期用 zoomScale > 1f 会在双击动画的
+    // 某一帧翻转 key，取消正在进行的解码并从头再来一次整幅解码。
+    var highResZoom by remember { mutableStateOf(false) }
+    // zoomedIn 用 derivedStateOf：捏合期间每帧变化的 zoomScale 不应每帧重组整张卡片。
+    val zoomedIn by remember { derivedStateOf { zoomScale > 1f } }
+    LaunchedEffect(Unit) {
+        snapshotFlow { zoomScale }.collect { z ->
+            if (!highResZoom && z >= 1.05f) highResZoom = true
+            else if (highResZoom && z <= 0.98f) highResZoom = false
+        }
+    }
     val scope = rememberCoroutineScope()
     val density = LocalDensity.current
     val haptic = LocalHapticFeedback.current
@@ -573,8 +586,8 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
                     )
                 }
                 // 未放大且卷帘模式：整图横向拖动 = 移动分割线；纵向让给页面滚动
-                .pointerInput(zoomScale <= 1f && compareMode == 0) {
-                    if (zoomScale <= 1f && compareMode == 0) {
+                .pointerInput(zoomedIn && compareMode == 0) {
+                    if (!zoomedIn && compareMode == 0) {
                         detectHorizontalDragGestures { change, dragAmount ->
                             change.consume()
                             fraction = (fraction + dragAmount / viewSize.width).coerceIn(0f, 1f)
@@ -595,7 +608,7 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
                 contentDescription = "压缩后 SDR",
                 contentScale = ContentScale.Fit,
                 forceSdr = true,
-                maxDim = if(zoomScale > 1f) 2048 else 1600,
+                maxDim = if(highResZoom) 2048 else 1600,
                 modifier = Modifier.fillMaxSize(),
             )
 
@@ -606,7 +619,7 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
                 contentDescription = "原图 SDR",
                 contentScale = ContentScale.Fit,
                 forceSdr = true,
-                maxDim = if(zoomScale > 1f) 2048 else if(outputLong in 1 until 1600) outputLong else 1600,
+                maxDim = if(highResZoom) 2048 else if(outputLong in 1 until 1600) outputLong else 1600,
                 modifier = Modifier.fillMaxSize().drawWithContent {
                     clipRect(right = size.width * effectiveFraction) { this@drawWithContent.drawContent() }
                 },
@@ -672,7 +685,7 @@ private fun HeroCompareCard(entity: HistoryEntity, modifier: Modifier = Modifier
                     label = { Text("按住对比") },
                 )
             }
-            if (zoomScale > 1f) {
+            if (zoomedIn) {
                 AssistChip(
                     onClick = {
                         cancelZoomAnim()

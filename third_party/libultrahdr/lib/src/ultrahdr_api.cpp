@@ -1717,11 +1717,13 @@ uhdr_error_info_t uhdr_dec_probe(uhdr_codec_private_t* dec) {
               int meta_len = heif_image_handle_get_gain_map_metadata_size(base_handle);
               if (meta_len > 0) {
                 std::vector<uint8_t> meta(meta_len);
-                heif_image_handle_get_gain_map_metadata(base_handle, meta.data());
                 ultrahdr::uhdr_gainmap_metadata_frac frac;
-                if (ultrahdr::uhdr_gainmap_metadata_frac::decodeGainmapMetadata(meta, &frac).error_code == UHDR_CODEC_OK) {
-                  ultrahdr::uhdr_gainmap_metadata_ext_t metadata;
-                  ultrahdr::uhdr_gainmap_metadata_frac::gainmapMetadataFractionToFloat(&frac, &metadata);
+                ultrahdr::uhdr_gainmap_metadata_ext_t metadata;
+                // UltraSlim: invalid tmap versions/fractions must keep the zeroed
+                // metadata, never copy an uninitialized conversion result.
+                if (heif_image_handle_get_gain_map_metadata(base_handle, meta.data()).code == heif_error_Ok &&
+                    ultrahdr::uhdr_gainmap_metadata_frac::decodeGainmapMetadata(meta, &frac).error_code == UHDR_CODEC_OK &&
+                    ultrahdr::uhdr_gainmap_metadata_frac::gainmapMetadataFractionToFloat(&frac, &metadata).error_code == UHDR_CODEC_OK) {
                   std::copy(metadata.max_content_boost, metadata.max_content_boost + 3,
                             handle->m_metadata.max_content_boost);
                   std::copy(metadata.min_content_boost, metadata.min_content_boost + 3,

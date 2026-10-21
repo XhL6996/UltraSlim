@@ -6,7 +6,8 @@
 - [架构与目录约定](ARCHITECTURE.md)：模块边界、转换数据流、文件归属。
 - [格式与兼容性](COMPATIBILITY.md)：HDR、SDR、动态照片与后台限制。
 - [发布准备](RELEASING.md)：源码、依赖、签名和发行附件。
-- [贡献说明](../CONTRIBUTING.md)与[第三方声明](../THIRD_PARTY_NOTICES.md)。
+- [版本记录](../CHANGELOG.md)：公开发行版本与包含的功能（此前 1.x 均为 beta）。
+- [贡献说明](../CONTRIBUTING.md)、[安全问题](../SECURITY.md)与[第三方声明](../THIRD_PARTY_NOTICES.md)。
 - [macOS 配套工具](../apple-live/README.md)。
 
 ## 历史与方案

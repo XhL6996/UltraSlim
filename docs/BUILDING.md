@@ -64,7 +64,7 @@ scripts/verify.sh --device
 ## 产物与签名
 
 - Debug：`$ULTRASLIM_BUILD_ROOT/app/outputs/apk/debug/app-debug.apk`。
-- Release：`$ULTRASLIM_BUILD_ROOT/app/outputs/apk/release/app-release-unsigned.apk`。
+- Release：未配置签名时为 `$ULTRASLIM_BUILD_ROOT/app/outputs/apk/release/app-release-unsigned.apk`；配置四个发行环境变量后为同目录的 `app-release.apk`，见 [签名入口](RELEASING.md#外部密钥签名入口)。
 - 测试、lint 报告：`$ULTRASLIM_BUILD_ROOT/app/reports/`。
 - Gradle 本机 Debug 签名不等于正式发行签名；换机器通常无法直接覆盖以前的 Debug 包。不得把个人 keystore 放进仓库。
 

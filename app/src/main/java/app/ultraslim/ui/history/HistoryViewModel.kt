@@ -5,7 +5,6 @@ import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.ultraslim.UltraSlimApp
-import app.ultraslim.convert.ConversionWorker
 import app.ultraslim.convert.MediaStoreTrashHelper
 import app.ultraslim.convert.OutputStore
 import app.ultraslim.data.HistoryEntity
@@ -75,9 +74,7 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
         _deleteCandidates.value = emptyList()
         busyJob = viewModelScope.launch {
             try {
-                val active = androidx.work.WorkManager.getInstance(app)
-                    .getWorkInfosForUniqueWorkFlow(ConversionWorker.UNIQUE_WORK_NAME)
-                    .first().any { !it.state.isFinished }
+                val active = app.conversionRunning.first()
                 if (active) {
                     _events.emit("请等待当前转换结束后删除记录")
                     return@launch
@@ -91,6 +88,8 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
                     busyState.value = BusyState("删除中", processed, records.size)
                 }
                 _events.emit("已删除 ${records.size} 条记录，已保存到相册的图片不受影响")
+            } catch (e: OutputStore.ConversionInProgress) {
+                _events.emit(e.message.orEmpty())
             } catch (e: kotlinx.coroutines.CancellationException) {
                 _events.emit("已停止删除；未删除的记录保持不变")
             } finally {
@@ -104,7 +103,7 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
         combine(limit, filter) { l, f -> l to f }.flatMapLatest { (l, f) -> dao.flowPage(l, f) },
         filter.flatMapLatest { f -> dao.flowCount(f) },
         busyState,
-        dao.flowStats(),
+        app.historyRepository.stats,
     ) { items, count, working, stats ->
         HistoryUiState(
             items = items,
@@ -163,8 +162,12 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
         if (missing.isEmpty()) return
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
             try {
+                // 整页一次批量查询替代逐条 provider round-trip（100 条/页原本约 200 次）。
+                val byUri = MediaStoreTrashHelper.originalStates(app, missing.map { Uri.parse(it.second) })
                 val resolved = missing.mapNotNull { (id, uri) ->
-                    MediaStoreTrashHelper.activeOriginal(app, Uri.parse(uri))?.let { id to it }
+                    val parsed = Uri.parse(uri)
+                    if (byUri[parsed] != MediaStoreTrashHelper.OriginalState.PRESENT) null
+                    else MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, parsed)?.let { id to it }
                 }
                 trashableCache.update { it + resolved }
             } finally {
@@ -198,9 +201,7 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
         if (busyState.value != null) return
         busyJob = viewModelScope.launch {
             try {
-                val active = androidx.work.WorkManager.getInstance(app)
-                    .getWorkInfosForUniqueWorkFlow(ConversionWorker.UNIQUE_WORK_NAME)
-                    .first().any { !it.state.isFinished }
+                val active = app.conversionRunning.first()
                 if (active) {
                     _events.emit("请等待当前转换结束后清空历史")
                     return@launch
@@ -214,7 +215,8 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
                     processed += chunk.size
                     busyState.value = BusyState("清空中", processed, records.size)
                 }
-                app.conversionRepository.clearFinished()
+            } catch (e: OutputStore.ConversionInProgress) {
+                _events.emit(e.message.orEmpty())
             } catch (e: kotlinx.coroutines.CancellationException) {
                 _events.emit("已停止清空；未删除的记录保持不变")
             } finally {
