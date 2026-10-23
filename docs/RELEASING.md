@@ -39,6 +39,6 @@ scripts/build_release.sh
 
 此脚本关闭 Gradle 配置缓存，构建并执行 Release lint、16 KB 对齐与签名验证，拒绝常见 Android Debug 证书，并根据 `scripts/release_identity.json` 校验已公开版本的证书 SHA-256、包名和递增的 versionCode；APK 版本还须与源码声明一致。全部通过后在 APK 同目录生成 `SHA256SUMS` 和 `OPEN_SOURCE_NOTICES.txt`。它不会生成密钥、提交、推送或发布。正式密钥应由维护者稳定保管；覆盖升级必须使用同一发行证书。
 
-发行基线从 GitHub v1.0.0 的实际下载 APK 提取，并核对该附件的 SHA-256。每次新版本发布并从公开下载地址验证后，更新 `release_identity.json` 的已发布版本号、APK 散列和来源链接；证书指纹保持不变。不要为了让检查通过而把基线改成当前临时密钥。相应防误发回归可运行 `python3 scripts/test_release_identity.py`。
+发行证书最初从 GitHub v1.0.0 的实际下载 APK 提取；当前已发布版本、APK 散列和来源见 `release_identity.json`。每次新版本发布并从公开下载地址验证后，更新这三项，证书指纹保持不变。不要为了让检查通过而把基线改成当前临时密钥。相应防误发回归可运行 `python3 scripts/test_release_identity.py`。
 
 签名机制参考 [Android 官方签名文档](https://developer.android.com/studio/publish/app-signing)。源代码归档、完整测试、真机验收仍按上文执行，脚本成功不等于所有发行条件已满足。

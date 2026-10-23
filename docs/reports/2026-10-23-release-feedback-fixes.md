@@ -42,6 +42,8 @@ MediaStore 索引和文件时间写入会受到设备 provider/FUSE 行为影响
 
 1.0.1 的已验证 Release 构建在保管正式密钥的 Mac 上完成签名，证书与 1.0.0 一致。签名前后的所有原 ZIP 条目逐字节相同；签名、包名 `app.ultraslim`、versionCode 24、versionName 1.0.1 与 16 KB 对齐检查通过。正式 APK SHA-256：`a139ecd1dc4bbadd92323ad840e90c7ca7f47e9ff7f06fc23fc371d6f3208826`。签名与包身份兼容不等于已完成真机覆盖升级验收。
 
+GitHub v1.0.1 已作为最新正式版发布，tag 对应 `f9985125884fe673d77ca4a3ee14c8759caa06bf`。APK、对应源码 ZIP、许可声明及 SHA256SUMS 四个附件的远端摘要均与上传文件一致；从公开下载地址重新获取 APK 与校验文件，散列一致，并再次通过签名与包身份校验。随后将主分支的发行基线更新为 versionCode 24，供下一版防误发检查使用。
+
 ## 验证
 
 - Linux/Clang 主机构建通过；CTest 6/6 通过：transcode_regression、gainmap_preservation、upstream_color、avif_quality、preview_probe、metadata_regression。
