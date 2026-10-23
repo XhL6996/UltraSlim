@@ -48,6 +48,12 @@ class AutomaticReplacementUiTest {
         val image = Bitmap.createBitmap(pixels, 256, 256, Bitmap.Config.ARGB_8888)
         input.outputStream().use { image.compress(Bitmap.CompressFormat.JPEG, 100, it) }; image.recycle()
         val originalDate = 1600000000000L
+        // DATE_TAKEN is scanner-owned: seed real EXIF so publication can index it.
+        androidx.exifinterface.media.ExifInterface(input).apply {
+            setAttribute(androidx.exifinterface.media.ExifInterface.TAG_DATETIME_ORIGINAL, "2020:09:13 12:26:40")
+            setAttribute(androidx.exifinterface.media.ExifInterface.TAG_OFFSET_TIME_ORIGINAL, "+00:00")
+            saveAttributes()
+        }
         val album = "DCIM/UltraSlimReplacementTest/"
         val source = MediaStoreSaver.save(app, input, "$id-source.jpg", OutputFormat.JPEG,
             relativePath = album, dateTaken = originalDate)!!

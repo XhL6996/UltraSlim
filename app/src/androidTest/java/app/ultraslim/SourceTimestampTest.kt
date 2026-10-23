@@ -55,12 +55,16 @@ class SourceTimestampTest {
         }
     }
 
-    @Test fun publicationRetainsCaptureAndFileTimesSeparatelyWithoutAddingExif() {
+    @Test fun publicationRetainsExifCaptureAndFileTimesSeparately() = publication(exif = true)
+
+    @Test fun publicationWithoutExifPreservesBytesAndFileTimeDespiteReadOnlyCaptureIndex() = publication(exif = false)
+
+    private fun publication(exif: Boolean) {
         assumeTrue(Build.VERSION.SDK_INT >= 29)
         val file = File(app.cacheDir, "timestamp-${UUID.randomUUID()}.jpg")
         var uri: Uri? = null
         try {
-            app.contentResolver.openInputStream(source())!!.use { input -> file.outputStream().use { input.copyTo(it) } }
+            app.contentResolver.openInputStream(source(exif = exif))!!.use { input -> file.outputStream().use { input.copyTo(it) } }
             val originalBytes = file.readBytes()
             uri = MediaStoreSaver.save(app, file, file.name, OutputFormat.JPEG,
                 dateTaken = capture, fileModifiedTime = modified)
@@ -68,7 +72,12 @@ class SourceTimestampTest {
             assertArrayEquals(originalBytes, app.contentResolver.openInputStream(uri!!)!!.use { it.readBytes() })
             app.contentResolver.query(uri!!, arrayOf(MediaStore.Images.Media.DATE_TAKEN, MediaStore.MediaColumns.DATE_MODIFIED), null, null, null)!!.use {
                 assertTrue(it.moveToFirst())
-                assertEquals(capture, it.getLong(0))
+                if (exif) assertEquals(capture, it.getLong(0))
+                else {
+                    // DATE_TAKEN is documented read-only. A provider can ignore the
+                    // best-effort update; never synthesize EXIF to satisfy this index.
+                    assertTrue(it.isNull(0) || it.getLong(0) == 0L || it.getLong(0) == capture)
+                }
                 assertEquals(modified / 1000, it.getLong(1))
             }
         } finally { uri?.let { app.contentResolver.delete(it, null, null) }; file.delete() }
