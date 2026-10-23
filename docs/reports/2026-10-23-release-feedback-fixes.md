@@ -1,6 +1,6 @@
 # 公开版反馈与可靠性修复（2026-10-23）
 
-基线：GitHub main `52953091847977fc2c605e43cf6506d1f87a96af`，公开版 1.0.0 / versionCode 23。修复版本为 1.0.1 / versionCode 24，正式 APK 尚未签名发行；同步源码不代表已发布新的 GitHub Release。
+基线：GitHub main `52953091847977fc2c605e43cf6506d1f87a96af`，公开版 1.0.0 / versionCode 23。修复版本为 1.0.1 / versionCode 24；正式安装包见 [GitHub Release](https://github.com/linyusenzz/UltraSlim/releases/tag/v1.0.1)。
 
 ## 温控等待
 
@@ -39,6 +39,8 @@ MediaStore 索引和文件时间写入会受到设备 provider/FUSE 行为影响
 - 证书 SHA-256：`e54990c754cbede4e7ab638d800a33b893f1d2f5f29bbacd11528905419a4d39`
 
 `build_release.sh` 在签名验证后检查固定证书、包名、递增 versionCode 和源码版本。6 项 Python 回归覆盖正确下一版、错误证书、测试包名、旧版本、源码版本不一致及缺少/多个签名者。仅拒绝 Android Debug 证书不足以防止错用另一把正式密钥。
+
+1.0.1 的已验证 Release 构建在保管正式密钥的 Mac 上完成签名，证书与 1.0.0 一致。签名前后的所有原 ZIP 条目逐字节相同；签名、包名 `app.ultraslim`、versionCode 24、versionName 1.0.1 与 16 KB 对齐检查通过。正式 APK SHA-256：`a139ecd1dc4bbadd92323ad840e90c7ca7f47e9ff7f06fc23fc371d6f3208826`。签名与包身份兼容不等于已完成真机覆盖升级验收。
 
 ## 验证
 
