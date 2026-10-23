@@ -264,7 +264,7 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                         horizontalArrangement = Arrangement.spacedBy(12.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (!saved && android.os.Build.VERSION.SDK_INT >= 29) {
+                        if (!saved && (state.outputToFolder || android.os.Build.VERSION.SDK_INT >= 29)) {
                             Button(
                                 onClick = { vm.saveToAlbum() },
                                 enabled = !state.saving,
@@ -273,7 +273,7 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                             ) {
                                 Icon(Icons.Rounded.SaveAlt, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text(if (state.saving) "保存中…" else "保存到相册")
+                                Text(if (state.saving) "保存中…" else if (state.outputToFolder) "保存到文件夹" else "保存到相册")
                             }
                         } else {
                             Button(
@@ -283,7 +283,7 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                             ) {
                                 Icon(Icons.Rounded.PhotoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(8.dp))
-                                Text("在相册中查看")
+                                Text(if (state.outputToFolder) "打开图片" else "在相册中查看")
                             }
                         }
                         OutlinedButton(
@@ -322,6 +322,8 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
                 entity = entity,
                 canTrashOriginal = state.canTrashOriginal,
                 originalTrashed = state.originalTrashed,
+                outputToFolder = state.outputToFolder,
+                saveError = state.saveError,
                 onTrashOriginal = trashOriginal,
                 modifier = Modifier.padding(innerPadding),
             )
@@ -332,7 +334,7 @@ fun DetailScreen(historyId: Long, onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { showDeleteConfirm = false },
             title = { Text("删除这条记录？") },
-            text = { Text("删除记录及尚未保存的应用内成品；已保存到相册的图片不受影响。") },
+            text = { Text("删除记录及尚未保存的应用内成品；已保存的图片不受影响。") },
             confirmButton = {
                 TextButton(
                     onClick = {
@@ -358,6 +360,8 @@ private fun DetailContent(
     canTrashOriginal: Boolean,
     originalTrashed: Boolean,
     onTrashOriginal: () -> Unit,
+    outputToFolder: Boolean = false,
+    saveError: String? = null,
     modifier: Modifier = Modifier,
 ) {
     val saved = entity.outputUri.startsWith("content://")
@@ -456,7 +460,12 @@ private fun DetailContent(
                         tint = if (entity.saveState == "FAILED") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
                     )
                     Text(
-                        if (entity.saveState == "FAILED") "保存到相册失败；成品已在应用内保留，可点击底部重试或分享。" else "成品已在应用沙盒内保留，可点击下方按钮保存到系统相册。",
+                        if (entity.saveState == "FAILED" && saveError != null) {
+                            "保存失败：$saveError；成品仍保留，可重试保存或导出。"
+                        } else if (outputToFolder) {
+                            if (entity.saveState == "FAILED") "保存到文件夹失败；成品仍保留，请在设置中重新授权该文件夹后重试，或导出文件。"
+                            else "成品已保留，可点击下方按钮保存到所选文件夹。"
+                        } else if (entity.saveState == "FAILED") "保存到相册失败；成品已在应用内保留，可点击底部重试或分享。" else "成品已在应用沙盒内保留，可点击下方按钮保存到系统相册。",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )

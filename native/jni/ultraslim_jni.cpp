@@ -2,6 +2,11 @@
 #include <jni.h>
 #include <exception>
 #include <algorithm>
+#include <cerrno>
+#include <sys/stat.h>
+#include <android/log.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 #include "transcode.h"
 
@@ -113,6 +118,44 @@ JNIEXPORT jobject JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeTransco
 JNIEXPORT jstring JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeVersion(JNIEnv* env,
                                                                                  jclass /*unused*/) {
   return env->NewStringUTF("libultrahdr 2.0.2 · libheif 4a3f74bc · libjxl 0.11.1 · x265 4.1 · SVT-AV1 3.0.0 · dav1d 1.5.1 · libde265 1.0.16 · libjpeg-turbo 3.1.1 · aom 3.12.1（无损增益图）");
+}
+
+JNIEXPORT jboolean JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeSetModifiedTime(
+    JNIEnv*, jclass, jint fd, jlong timestampMillis) {
+  if (fd < 0 || timestampMillis <= 0) return JNI_FALSE;
+  struct stat info {};
+  if (fstat(fd, &info) != 0 || !S_ISREG(info.st_mode)) return JNI_FALSE;
+  const timespec times[2] = {{0, UTIME_OMIT},
+      {static_cast<time_t>(timestampMillis / 1000), static_cast<long>((timestampMillis % 1000) * 1000000)}};
+  int result;
+  do { result = futimens(fd, times); } while (result < 0 && errno == EINTR);
+  if (result != 0) {
+    __android_log_print(ANDROID_LOG_WARN, "UltraSlimFileTime",
+        "futimens failed: errno=%d; file uid=%u, caller uid=%u, mode=%o", errno,
+        static_cast<unsigned int>(info.st_uid), static_cast<unsigned int>(getuid()),
+        static_cast<unsigned int>(info.st_mode));
+    return JNI_FALSE;
+  }
+  if (fstat(fd, &info) != 0) return JNI_FALSE;
+  return info.st_mtim.tv_sec == times[1].tv_sec && info.st_mtim.tv_nsec == times[1].tv_nsec
+      ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jint JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeSetPathModifiedTime(
+    JNIEnv* env, jclass, jbyteArray path, jlong timestampMillis) {
+  if (!path || timestampMillis <= 0) return EINVAL;
+  const jsize length = env->GetArrayLength(path);
+  if (length <= 0 || length > 4096) return EINVAL;
+  std::vector<char> value(static_cast<size_t>(length) + 1, '\0');
+  env->GetByteArrayRegion(path, 0, length, reinterpret_cast<jbyte*>(value.data()));
+  if (env->ExceptionCheck()) return EINVAL;
+  if (std::find(value.begin(), value.end() - 1, '\0') != value.end() - 1) return EINVAL;
+  const timespec times[2] = {{0, UTIME_OMIT},
+      {static_cast<time_t>(timestampMillis / 1000), static_cast<long>((timestampMillis % 1000) * 1000000)}};
+  int result;
+  do { result = utimensat(AT_FDCWD, value.data(), times, 0); } while (result < 0 && errno == EINTR);
+  const int error = result == 0 ? 0 : errno;
+  return error;
 }
 
 JNIEXPORT jbyteArray JNICALL Java_app_ultraslim_bridge_UltraHdrBridge_nativeDecodePreview(

@@ -137,17 +137,20 @@ internal class ConversionRunner(
                     if (existing != null) {
                         var verifiedSave = false
                         if (options.autoSave && app.database.taskDao().batch(batchId)?.cancelled == false &&
-                            app.galleryPublishingAllowed.value) {
+                            (options.outputToFolder || app.galleryPublishingAllowed.value)) {
                             existing = OutputStore.save(app, existing)
                             verifiedSave = existing.saveState == "SAVED"
                         }
                         if (options.autoReplaceOriginals) AutoReplacement.saved(app, existing, outputVerified = verifiedSave)
                         val recovered = existing
+                        val recoveryError = withContext(Dispatchers.IO) { OutputSaveError.read(recovered) }
                         repo.update(id) { it.copy(status = QueueStatus.DONE, outputUri = recovered.outputUri, historyId = recovered.id,
-                            error = if(recovered.saveState == "SAVED") null else if (options.autoSave && recovered.saveState == "PENDING") "已转换，回到应用后自动保存" else "转换完成，待保存；可在详情重试") }
+                            error = if(recovered.saveState == "SAVED") null else if (recoveryError != null) "保存失败：$recoveryError"
+                                else if (options.autoSave && recovered.saveState == "PENDING") "已转换，回到应用后自动保存" else "转换完成，待保存；可在详情重试") }
                         continue
                     }
                     val source = Uri.parse(item.uri)
+                    val timestamps = withContext(Dispatchers.IO) { SourceMedia.timestamps(app, source) }
                     val originalHash = if (options.autoReplaceOriginals) withContext(Dispatchers.IO) {
                         runCatching { AutoReplacement.fingerprint(app, source) }.getOrNull()
                     } else null
@@ -214,7 +217,15 @@ internal class ConversionRunner(
                     } else if (!result.hasGainMap) {
                         withContext(Dispatchers.IO) { SdrOutputValidation.requireReadable(file, options.format) }
                     }
-                    val name = outputName(item.displayName, options.format.extension, id, item.createdAt, motionPhoto = liveAttached)
+                    // Pin both dates, including explicit unknown values, before the history checkpoint.
+                    withContext(Dispatchers.IO) {
+                        timestamps.outputModifiedAt?.let {
+                            check(file.setLastModified(it)) { "无法保留成品修改时间" }
+                        }
+                        OutputMetadataStore.write(file, timestamps)
+                    }
+                    val name = outputName(item.displayName, options.format.extension, id, item.createdAt,
+                        motionPhoto = liveAttached, keepFilename = options.keepFilename)
                     val liveSummary = if (motionInfo != null) {
                         if (liveAttached) " · 实况已保留(无损直通)" else " · 原图实况(导出静止HDR)"
                     } else ""
@@ -228,7 +239,7 @@ internal class ConversionRunner(
                         taskId = id, batchId = batchId, saveState = "PENDING", settingsSummary = summary, hasExif = result.hasExif)
                     val historyId = withContext(NonCancellable) { app.database.historyDao().insert(entity) }
                     entity = entity.copy(id = historyId)
-                    val mayPublish = options.autoSave && app.galleryPublishingAllowed.value &&
+                    val mayPublish = options.autoSave && (options.outputToFolder || app.galleryPublishingAllowed.value) &&
                         app.database.taskDao().batch(batchId)?.cancelled == false
                     val outputFingerprint = if (options.autoReplaceOriginals || mayPublish) {
                         withContext(Dispatchers.IO) { MediaStoreSaver.fingerprintOf(file) }
@@ -247,18 +258,23 @@ internal class ConversionRunner(
                     var verifiedSave = false
                     // 指纹和自动替换校验会挂起；此时用户可能已切后台或取消批次，不能复用先前状态。
                     if (options.autoSave && app.database.taskDao().batch(batchId)?.cancelled == false &&
-                        app.galleryPublishingAllowed.value) {
+                        (options.outputToFolder || app.galleryPublishingAllowed.value)) {
                         entity = OutputStore.save(app, entity, outputFingerprint)
                         verifiedSave = entity.saveState == "SAVED"
                     }
                     if (options.autoReplaceOriginals) AutoReplacement.saved(app, entity, outputVerified = verifiedSave)
+                    val publicationError = withContext(Dispatchers.IO) { OutputSaveError.read(entity) }
                     repo.update(id) { it.copy(status = QueueStatus.DONE, progress = 100, result = result,
                         outputUri = entity.outputUri, historyId = historyId,
-                        error = if (entity.saveState == "FAILED") "转换完成，保存失败；可在详情重试保存" else if (entity.saveState != "SAVED") { if (options.autoSave) "已转换，回到应用后自动保存" else "待保存，可直接分享" } else null) }
+                        error = if (entity.saveState == "FAILED") "保存失败：${publicationError ?: "请在详情重试保存"}" else if (entity.saveState != "SAVED") { if (options.autoSave) "已转换，回到应用后自动保存" else "待保存，可直接分享" } else null) }
                     done++; saved += result.inputBytes - result.outputBytes
                 } catch (e: CancellationException) { throw e } catch (e: Exception) {
                     if (app.database.historyDao().byTask(id) == null) {
-                        withContext(Dispatchers.IO) { File(app.filesDir, "outputs/$id.${options.format.extension}").delete() }
+                        withContext(Dispatchers.IO) {
+                            val file = File(app.filesDir, "outputs/$id.${options.format.extension}")
+                            file.delete()
+                            OutputMetadataStore.delete(file)
+                        }
                     }
                     repo.update(id) { it.copy(status = QueueStatus.FAILED, error = e.message ?: "转换失败") }
                 } finally { withContext(NonCancellable) { repo.flush() } }

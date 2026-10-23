@@ -86,6 +86,16 @@ class UltraSlimApp : Application() {
             val referenced = buildSet {
                 allRows.forEach { add(it.inputUri); add(it.outputUri) }
                 conversionRepository.queue.value.forEach { add(it.uri); it.outputUri?.let(::add) }
+                // Original-name publication receipts must survive process death and delayed retries.
+                allRows.filter { !it.outputUri.startsWith("content://") }.forEach {
+                    add(it.outputUri + ".publication")
+                    add(it.outputUri + ".publication.bak")
+                    add(it.outputUri + ".publication.new")
+                    add(it.outputUri + ".save-error")
+                    add(it.outputUri + ".timestamps")
+                    add(it.outputUri + ".timestamps.bak")
+                    add(it.outputUri + ".timestamps.new")
+                }
             }
             val cutoff = System.currentTimeMillis() - 24L * 60 * 60 * 1000
             listOf("inputs", "outputs").forEach { folder ->

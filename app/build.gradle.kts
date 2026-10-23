@@ -161,6 +161,8 @@ dependencies {
     androidTestImplementation("androidx.compose.ui:ui-test-junit4")
     androidTestImplementation(libs.androidx.room.testing)
     androidTestImplementation(libs.androidx.test.ext.junit)
+    // Compose's transitive Espresso 3.5 uses hidden APIs removed on Android 17.
+    androidTestImplementation(libs.androidx.test.espresso.core)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.core.splashscreen)
     implementation(libs.androidx.exifinterface)

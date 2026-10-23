@@ -298,11 +298,11 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
     }
     if (deleting.isNotEmpty()) AlertDialog(onDismissRequest = vm::cancelDelete,
         title = { Text("删除 ${deleting.size} 条记录？") },
-        text = { Text("删除这些转换记录及未保存的应用内成品。已保存到相册的图片和原图不受影响。") },
+        text = { Text("删除这些转换记录及未保存的应用内成品。已保存的图片和原图不受影响。") },
         confirmButton = { TextButton(onClick = { selected = selected - deleting.map { it.id }.toSet(); vm.deleteConfirmed() }) { Text("删除") } },
         dismissButton = { TextButton(onClick = vm::cancelDelete) { Text("取消") } })
     if (confirmClear) AlertDialog(onDismissRequest = { confirmClear = false }, title = { Text("清空历史？") },
-        text = { Text("删除全部转换记录和未保存的应用内成品。已保存到相册的图片不受影响。") },
+        text = { Text("删除全部转换记录和未保存的应用内成品。已保存的图片不受影响。") },
         confirmButton = { TextButton(onClick = { confirmClear = false; finishSelection(); vm.clearAll() }) { Text("清空") } },
         dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("取消") } })
     if (confirmBusyLeave) AlertDialog(onDismissRequest = { confirmBusyLeave = false },
@@ -329,7 +329,7 @@ internal fun HistoryRow(entity: HistoryEntity, selecting: Boolean, checked: Bool
                 Text("${formatBytes(entity.inputBytes)} → ${formatBytes(entity.outputBytes)}", style = MaterialTheme.typography.titleSmall)
                 Text("体积 ${formatSavedPercent(entity.inputBytes, entity.outputBytes)}", style = MaterialTheme.typography.labelMedium,
                     color = if (entity.outputBytes > entity.inputBytes) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
-                Text(when (entity.saveState) { "SAVED" -> "已保存到相册"; "FAILED" -> "保存失败 · 可重试 / 导出"; else -> "待保存 · 可直接分享" },
+                Text(when (entity.saveState) { "SAVED" -> "已保存"; "FAILED" -> "保存失败 · 可重试 / 导出"; else -> "待保存 · 可直接分享" },
                     style = MaterialTheme.typography.labelSmall, color = if (entity.saveState == "FAILED") MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary)
             }
         }

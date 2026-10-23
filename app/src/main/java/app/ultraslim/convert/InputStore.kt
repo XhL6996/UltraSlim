@@ -35,6 +35,8 @@ object InputStore {
                     check(size > 0) { "图片为空" }
                 }
             } ?: error("无法读取图片，请重新授权")
+            // The fallback copy must not substitute the import clock for the input's real mtime.
+            check(file.setLastModified(timestamps.modifiedAt ?: 0L)) { "无法保留导入图片修改时间" }
             InputMetadataStore.write(context, id, timestamps)
             return FileProvider.getUriForFile(context, "${context.packageName}.files", file)
         } catch(e: Exception) { file.delete(); throw e }

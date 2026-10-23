@@ -9,7 +9,9 @@ import app.ultraslim.convert.AppleLiveExporter
 import app.ultraslim.convert.InputStore
 import app.ultraslim.convert.MediaStoreTrashHelper
 import app.ultraslim.convert.OutputStore
+import app.ultraslim.convert.OutputSaveError
 import app.ultraslim.data.HistoryEntity
+import app.ultraslim.data.decodeDefaults
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -37,6 +39,8 @@ data class DetailUiState(
     val loading: Boolean = true,
     val originalTrashed: Boolean = false,
     val canTrashOriginal: Boolean = false,
+    val outputToFolder: Boolean = false,
+    val saveError: String? = null,
 )
 
 internal data class OriginalAccess(val trashed: Boolean, val canTrash: Boolean)
@@ -71,12 +75,16 @@ class DetailViewModel internal constructor(
         // A delayed provider response belongs only to the URI it checked. A newly
         // linked photo stays unavailable for trash until its own check completes.
         val access = status?.takeIf { it.inputUri == entity?.inputUri }?.access
+        val options = entity?.let { app.database.taskDao().batch(it.batchId) }
+            ?.let { runCatching { decodeDefaults(it.settings) }.getOrNull() }
         DetailUiState(
             entity = entity,
             saving = isSaving,
             loading = false,
             originalTrashed = access?.trashed == true,
             canTrashOriginal = access?.let { it.canTrash && !it.trashed } == true,
+            outputToFolder = options?.outputToFolder == true,
+            saveError = entity?.let { withContext(Dispatchers.IO) { OutputSaveError.read(it) } },
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DetailUiState())
 
@@ -108,7 +116,12 @@ class DetailViewModel internal constructor(
             saving.value = true
             try {
                 val saved = OutputStore.save(app, entity)
-                _events.emit(DetailEvent.Message(if (saved.saveState == "SAVED") "已保存到相册/UltraSlim" else "保存失败，成品仍保留；可重试或导出文件"))
+                val error = withContext(Dispatchers.IO) { OutputSaveError.read(saved) }
+                _events.emit(DetailEvent.Message(if (saved.saveState == "SAVED") {
+                    if (uiState.value.outputToFolder) "已保存到所选文件夹" else "已保存到相册/UltraSlim"
+                } else if (error != null) "保存失败：$error；成品仍保留"
+                else if (uiState.value.outputToFolder) "保存失败，成品仍保留；请在设置中重新授权该文件夹后重试，或导出文件"
+                else "保存失败，成品仍保留；可重试或导出文件"))
             } catch (e: Exception) {
                 _events.emit(DetailEvent.Message("保存失败：${e.message}"))
             } finally {

@@ -31,7 +31,7 @@ data class HistoryEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val displayName: String,
     val inputUri: String,
-    /** MediaStore content uri when saved to the album, otherwise a durable private file path. */
+    /** MediaStore/SAF content URI when saved, otherwise a durable private file path. */
     val outputUri: String,
     val inputBytes: Long,
     val outputBytes: Long,

@@ -1,8 +1,10 @@
 package app.ultraslim.ui.settings
 
+import android.net.Uri
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import app.ultraslim.UltraSlimApp
+import app.ultraslim.convert.FolderOutput
 import app.ultraslim.data.ConversionDefaults
 import app.ultraslim.data.ThemeMode
 import app.ultraslim.data.ThemeSettings
@@ -12,6 +14,8 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class SettingsViewModel(private val app: UltraSlimApp) : ViewModel() {
 
@@ -38,10 +42,16 @@ class SettingsViewModel(private val app: UltraSlimApp) : ViewModel() {
     fun setMultiChannel(enabled: Boolean) = viewModelScope.launch { repo.setMultiChannelGainmap(enabled) }
 
     fun setKeepExif(keep: Boolean) = viewModelScope.launch { repo.setKeepExif(keep) }
+    fun setKeepFilename(keep: Boolean) = viewModelScope.launch { repo.setKeepFilename(keep) }
 
     fun setAllowSdr(allow: Boolean) = viewModelScope.launch { repo.setAllowSdr(allow) }
 
     fun setAutoSave(enabled: Boolean) = viewModelScope.launch { repo.setAutoSave(enabled) }
+
+    suspend fun setOutputDirectory(tree: Uri?) {
+        val name = if (tree == null) "" else withContext(Dispatchers.IO) { FolderOutput.retain(app, tree) }
+        repo.setOutputDirectory(tree?.toString().orEmpty(), name)
+    }
 
     fun setAutoReplaceOriginals(v: Boolean) = viewModelScope.launch { repo.setAutoReplaceOriginals(v) }
 

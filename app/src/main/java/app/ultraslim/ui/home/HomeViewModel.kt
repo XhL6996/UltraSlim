@@ -15,6 +15,7 @@ import app.ultraslim.UltraSlimApp
 import app.ultraslim.bridge.UltraHdrBridge
 import app.ultraslim.convert.MotionPhotoHelper
 import app.ultraslim.convert.FolderImages
+import app.ultraslim.convert.FolderOutput
 import app.ultraslim.convert.InputStore
 import app.ultraslim.convert.ConversionRepository
 import app.ultraslim.convert.ConversionService
@@ -217,10 +218,17 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             }
             runDefaults.value = if (unfinished && snapshot?.isValid == true) requireNotNull(snapshot.options)
                 else settings.defaults.first()
-            settings.defaults.map { it.autoReplaceOriginals }.distinctUntilChanged().collect { enabled ->
-                runDefaults.value = runDefaults.value.copy(autoReplaceOriginals = enabled,
-                    autoSave = if (enabled) true else runDefaults.value.autoSave)
-            }
+            var previousDirectory: Pair<String, String>? = null
+            settings.defaults.map { Triple(it.autoReplaceOriginals, it.outputDirectoryUri, it.outputDirectoryName) }
+                .distinctUntilChanged().collect { (enabled, directory, name) ->
+                    // Replacement toggles must also preserve a folder chosen only for this scheme.
+                    val directoryChanged = previousDirectory != (directory to name)
+                    previousDirectory = directory to name
+                    runDefaults.value = runDefaults.value.copy(autoReplaceOriginals = enabled,
+                        outputDirectoryUri = if (directoryChanged) directory else runDefaults.value.outputDirectoryUri,
+                        outputDirectoryName = if (directoryChanged) name else runDefaults.value.outputDirectoryName,
+                        autoSave = if (enabled || (directoryChanged && directory.isNotBlank())) true else runDefaults.value.autoSave)
+                }
         }
         // 批次中只补新增原图；实际发起回收前仍由 refreshAndGetTrashable 全量校验。
         viewModelScope.launch(Dispatchers.IO) {
@@ -659,7 +667,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
                 if (eligible.isEmpty()) { _events.emit(HomeEvent.Info("没有待转换的图片")); return@launch }
                 val batchId = UUID.randomUUID().toString()
                 val options = runDefaults.value.copy(autoReplaceOriginals = !isTrialRun &&
-                    runDefaults.value.autoSave && settings.defaults.first().autoReplaceOriginals)
+                    runDefaults.value.autoReplaceOriginals && runDefaults.value.autoSave && settings.defaults.first().autoReplaceOriginals)
                 app.database.taskDao().putBatch(BatchEntity(batchId, JSONArray(eligible.map { it.id }).toString(), options.encode()))
                 repo.updateAll(eligible.map { it.id }) { it.copy(batchId = batchId) }
                 repo.flush()
@@ -682,11 +690,24 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     fun setGainmapScale(v: Int) = change { it.copy(gainmapScale = v) }
     fun setMultiChannel(v: Boolean) = change { it.copy(multiChannelGainmap = v) }
     fun setKeepExif(v: Boolean) = change { it.copy(keepExif = v) }
+    fun setKeepFilename(v: Boolean) = change { it.copy(keepFilename = v) }
     fun setKeepLocation(v: Boolean) = change { it.copy(keepLocation = v) }
     fun setAvifGainmapCompatibility(v: Boolean) = change { it.copy(avifGainmapCompatibility = v) }
     fun setHeicGainmapCompatibility(v: Boolean) = change { it.copy(heicGainmapCompatibility = v) }
     fun setAllowSdr(v: Boolean) = change { it.copy(allowSdr = v) }
     fun setAutoSave(v: Boolean) = change { it.copy(autoSave = v, autoReplaceOriginals = it.autoReplaceOriginals && v) }
+    fun setOutputDirectory(tree: Uri) {
+        if (uiState.value.isConverting || starting) return
+        viewModelScope.launch {
+            try {
+                val name = withContext(Dispatchers.IO) { FolderOutput.retain(app, tree) }
+                // Recheck the batch lock after the provider finishes granting access.
+                change { it.copy(outputDirectoryUri = tree.toString(), outputDirectoryName = name,
+                    autoSave = true, autoReplaceOriginals = false) }
+            } catch (e: CancellationException) { throw e }
+            catch (e: Exception) { _events.emit(HomeEvent.Info("无法使用此文件夹，请重新选择：${e.message.orEmpty()}")) }
+        }
+    }
     fun setOnlySmaller(v: Boolean) = change { it.copy(onlySmaller = v) }
     fun setSpeedLevel(v: Int) = change { it.copy(speedLevel = v) }
     fun setResizePercent(v: Int) = change { it.copy(resizePercent = v) }

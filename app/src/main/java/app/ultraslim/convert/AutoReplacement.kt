@@ -186,13 +186,13 @@ internal object AutoReplacement {
         check(source.volume == output.volume) { "成品不在原存储卷，原图保留" }
         if (source.relativePath != output.relativePath) {
             check(app.galleryPublishingAllowed.value) { "回到应用后才能将成品移回原相册" }
-            MediaStoreSaver.preserveFileTime(app, outputUri, source.modifiedAt ?: source.dateTaken)
             val values = android.content.ContentValues().apply {
                 put(android.provider.MediaStore.MediaColumns.RELATIVE_PATH, source.relativePath)
                 source.dateTaken?.let { put(android.provider.MediaStore.Images.Media.DATE_TAKEN, it) }
             }
             check(app.contentResolver.update(outputUri, values, null, null) == 1) { "成品未能移回原相册，原图保留" }
             MediaStoreSaver.preserveCaptureTime(app, outputUri, source.dateTaken)
+            MediaStoreSaver.requireFileTime(app, outputUri, source.modifiedAt ?: source.dateTaken)
             check(SourceMedia.read(app, outputUri)?.relativePath == source.relativePath) { "原相册位置校验失败" }
         }
     }

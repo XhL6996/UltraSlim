@@ -5,6 +5,8 @@ import android.content.ClipboardManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,6 +42,20 @@ fun SettingsScreen(onBack: () -> Unit) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snackbar = remember { SnackbarHostState() }
+    var choosingDirectory by remember { mutableStateOf(false) }
+    val chooseDirectory: (Uri?) -> Unit = { tree ->
+        scope.launch {
+            choosingDirectory = true
+            try {
+                vm.setOutputDirectory(tree)
+            } catch (e: kotlinx.coroutines.CancellationException) { throw e }
+            catch (e: Exception) { snackbar.showSnackbar("无法使用此文件夹，请重新选择：${e.message.orEmpty()}") }
+            finally { choosingDirectory = false }
+        }
+    }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
+        if (tree != null) chooseDirectory(tree)
+    }
     var showNotices by rememberSaveable { mutableStateOf(false) }
     if (showNotices) OpenSourceNoticesDialog { showNotices = false }
 
@@ -48,7 +64,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         AlertDialog(
             onDismissRequest = { confirmAutoReplace = false },
             title = { Text("开启校验后自动替换？") },
-            text = { Text("将同时开启自动保存，成品保存回原相册并保留拍摄时间。仅当成品更小、完整保存且系统能解码，HDR 和实况视频均通过检查后，才允许将原图移入系统回收站。转换与保存结束后，首页会显示待替换卡片，由你点击后发起系统确认；大批量分批处理，每批都需主动开始。\n\n原图不会被直接覆盖；回收站保留期限由系统决定。Android 可能仍需确认，取消会保留原图。小窗或后台转换先保存在应用内，回到完整窗口后自动入册，再在首页确认替换；不支持校验或无法定位原图时不替换。此选项只影响之后开始的任务。") },
+            text = { Text("将同时开启自动保存，输出位置恢复为原相册并保留拍摄时间。仅当成品更小、完整保存且系统能解码，HDR 和实况视频均通过检查后，才允许将原图移入系统回收站。转换与保存结束后，首页会显示待替换卡片，由你点击后发起系统确认；大批量分批处理，每批都需主动开始。\n\n原图不会被直接覆盖；回收站保留期限由系统决定。Android 可能仍需确认，取消会保留原图。小窗或后台转换先保存在应用内，回到完整窗口后自动入册，再在首页确认替换；不支持校验或无法定位原图时不替换。此选项只影响之后开始的任务。") },
             confirmButton = { TextButton(onClick = { confirmAutoReplace = false; vm.setAutoReplaceOriginals(true) }) { Text("开启") } },
             dismissButton = { TextButton(onClick = { confirmAutoReplace = false }) { Text("取消") } },
         )
@@ -87,15 +103,46 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
         }
         SettingsGroup("保存与原图", "控制成品的去向，原图始终有据可查") {
+            val customFolder = defaults.outputToFolder
+            val count = if (!defaults.autoSave) 3 else if (customFolder) 5 else 4
             SettingItem("仅保留更小结果", "成品没有变小时，保留原图", Icons.Rounded.Compress,
-                defaults.onlySmaller, vm::setOnlySmaller, 0, 3)
-            SettingItem("自动保存到相册", "保存到 UltraSlim；自动替换时存回原相册", Icons.Rounded.PhotoLibrary,
-                defaults.autoSave, vm::setAutoSave, 1, 3)
+                defaults.onlySmaller, vm::setOnlySmaller, 0, count)
+            SettingItem(if (customFolder) "自动保存到文件夹" else "自动保存到相册",
+                if (customFolder) "保存到 ${defaults.outputDirectoryName.ifBlank { "所选文件夹" }}" else "保存到 UltraSlim；自动替换时存回原相册",
+                Icons.Rounded.SaveAlt, defaults.autoSave, vm::setAutoSave, 1, count)
+            if (defaults.autoSave) SegmentedListItem(
+                onClick = {
+                    try { folderPicker.launch(defaults.outputDirectoryUri.takeIf { it.isNotBlank() }?.let(Uri::parse)) }
+                    catch (_: android.content.ActivityNotFoundException) {
+                        scope.launch { snackbar.showSnackbar("未找到系统文件夹选择器") }
+                    }
+                },
+                enabled = !choosingDirectory,
+                shapes = ListItemDefaults.segmentedShapes(2, count),
+                leadingContent = { Icon(Icons.Rounded.FolderOpen, null, tint = MaterialTheme.colorScheme.primary) },
+                supportingContent = {
+                    Text(if (customFolder) "${defaults.outputDirectoryName.ifBlank { "所选文件夹" }} · 新批次保存到此文件夹"
+                        else if (defaults.autoReplaceOriginals) "原相册 · 选择文件夹后关闭自动替换"
+                        else "Pictures/UltraSlim · 点击选择其他文件夹", style = MaterialTheme.typography.bodySmall)
+                },
+                trailingContent = { Icon(Icons.AutoMirrored.Rounded.ArrowForward, null) },
+                colors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+            ) { Text("输出文件夹", style = MaterialTheme.typography.titleMedium) }
+            if (defaults.autoSave && customFolder) SegmentedListItem(
+                onClick = { chooseDirectory(null) },
+                enabled = !choosingDirectory,
+                shapes = ListItemDefaults.segmentedShapes(3, count),
+                leadingContent = { Icon(Icons.Rounded.PhotoLibrary, null, tint = MaterialTheme.colorScheme.primary) },
+                supportingContent = { Text("之后开始的批次保存到 Pictures/UltraSlim", style = MaterialTheme.typography.bodySmall) },
+                colors = ListItemDefaults.segmentedColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow),
+                contentPadding = PaddingValues(horizontal = 16.dp, vertical = 16.dp),
+            ) { Text("恢复默认相册", style = MaterialTheme.typography.titleMedium) }
             SettingItem("校验后自动替换原图",
                 if (Build.VERSION.SDK_INT >= 30) "自动存回原相册，完成后在首页确认回收原图" else "需要 Android 11 或更新版本",
                 Icons.Rounded.VerifiedUser, defaults.autoReplaceOriginals,
-                { if (it) confirmAutoReplace = true else vm.setAutoReplaceOriginals(false) }, 2, 3,
-                enabled = Build.VERSION.SDK_INT >= 30)
+                { if (it) confirmAutoReplace = true else vm.setAutoReplaceOriginals(false) }, count - 1, count,
+                enabled = Build.VERSION.SDK_INT >= 30 && !choosingDirectory)
         }
         SettingsGroup("画面与兼容性") {
             val compatibleFormat = defaults.format == OutputFormat.AVIF || defaults.format == OutputFormat.HEIC
@@ -110,6 +157,10 @@ fun SettingsScreen(onBack: () -> Unit) {
             }
             SettingItem("允许纯 SDR 转换", "也转换没有增益图的普通照片", Icons.Rounded.Image,
                 defaults.allowSdr, vm::setAllowSdr, if (compatibleFormat) 1 else 0, if (compatibleFormat) 2 else 1)
+        }
+        SettingsGroup("文件名") {
+            SettingItem("保留文件名", "沿用原文件名并更换扩展名；重名时添加 SHA-256 短摘要", Icons.Rounded.Image,
+                defaults.keepFilename, vm::setKeepFilename, 0, 1)
         }
         SettingsGroup("照片信息与隐私") {
             SettingItem("保留 EXIF 信息", "保留拍摄器材、曝光参数与拍摄时间", Icons.Rounded.CameraAlt,

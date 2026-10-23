@@ -54,6 +54,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.draw.rotate
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material.icons.rounded.FolderOpen
+import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Lock
@@ -364,6 +366,8 @@ class OptionsCallbacks(
     val onHeicGainmapCompatibilityChange: (Boolean) -> Unit = {},
     val onSaveAsDefault: (() -> Unit)? = null,
     val onResetToDefault: (() -> Unit)? = null,
+    val onChooseOutputDirectory: ((String) -> Unit)? = null,
+    val onKeepFilenameChange: (Boolean) -> Unit = {},
 )
 
 /** Named bundles of conversion parameters shown as quick-select chips. */
@@ -575,13 +579,54 @@ fun ConversionOptionsPanel(
             }
             if (showAutoSave) {
                 SwitchRow(
-                    title = "自动保存到相册",
-                    hint = if (defaults.autoReplaceOriginals) "存回原相册；小窗/后台完成后回到应用自动保存" else "保存到 UltraSlim；小窗/后台完成后回到应用自动保存",
+                    title = if (defaults.outputToFolder) "自动保存到文件夹" else "自动保存到相册",
+                    hint = when {
+                        defaults.outputToFolder -> "保存到 ${defaults.outputDirectoryName.ifBlank { "所选文件夹" }}"
+                        defaults.autoReplaceOriginals -> "存回原相册；小窗/后台完成后回到应用自动保存"
+                        else -> "保存到 UltraSlim；小窗/后台完成后回到应用自动保存"
+                    },
                     checked = defaults.autoSave,
                     onCheckedChange = callbacks.onAutoSaveChange,
                     enabled = enabled,
                 )
             }
+
+            callbacks.onChooseOutputDirectory?.takeIf { showAutoSave && defaults.autoSave }?.let { chooseDirectory ->
+                Surface(
+                    onClick = { chooseDirectory(defaults.outputDirectoryUri) },
+                    enabled = enabled,
+                    shape = MaterialTheme.shapes.large,
+                    color = MaterialTheme.colorScheme.secondaryContainer,
+                ) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        Icon(Icons.Rounded.FolderOpen, null)
+                        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("输出文件夹", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                when {
+                                    defaults.autoReplaceOriginals -> "原相册 · 选择文件夹后关闭自动替换"
+                                    defaults.outputToFolder -> defaults.outputDirectoryName.ifBlank { "所选文件夹" }
+                                    else -> "Pictures/UltraSlim · 点击选择文件夹"
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        Icon(Icons.AutoMirrored.Rounded.ArrowForward, null, Modifier.size(20.dp))
+                    }
+                }
+            }
+
+            SwitchRow(
+                title = "保留文件名",
+                hint = "沿用原文件名并更换扩展名；重名时添加 SHA-256 短摘要",
+                checked = defaults.keepFilename,
+                onCheckedChange = callbacks.onKeepFilenameChange,
+                enabled = enabled,
+            )
 
             // === 第三层：进阶参数折叠区 ===
             var advanced by remember { mutableStateOf(false) }

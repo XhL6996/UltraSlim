@@ -35,4 +35,6 @@ x265 官方提供 GPL 与商业授权选择；本仓库按开源源码构建，�
 
 AndroidX/Compose/Room/WorkManager/DataStore、Kotlin/coroutines、Coil 等的直接版本见 [版本目录](gradle/libs.versions.toml) 和 [应用依赖](app/build.gradle.kts)。Gradle Wrapper 为其上游构建工具的一部分，保留原文件及版权头。
 
+设备测试显式使用 AndroidX Test Espresso 3.7.0（Apache-2.0），修复 Android 17 上旧传递版本的输入注入反射失败。该依赖仅进入设备测试 APK，不进入应用运行时包；其固定版本见同一版本目录，许可条款同已有 [Apache-2.0 文本](third_party/androidx-graphics-path/LICENSE.txt)。Google Maven `espresso-core-3.7.0.aar` 的 SHA-256 为 `5dd90e366838bf044cb52eae06474debd285df18a7a77c40441ac8e8951bb00f`。
+
 构建任务 `generateOpenSourceNotices` 按 Release 运行时解析结果生成依赖清单，提取 AAR/JAR 及嵌套 JAR 中的 LICENSE/NOTICE，连同本仓库 GPL 和原生许可文本打入 `assets/open-source-notices.txt`。应用设置中可离线阅读，发行脚本也会提取为独立附件。清单不是自动合规结论，发布时仍应提供准确对应源码；不能把整个 APK 简写成「所有依赖均为 GPLv3」。

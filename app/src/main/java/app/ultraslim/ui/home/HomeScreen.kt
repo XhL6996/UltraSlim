@@ -100,6 +100,9 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replace
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
         if (tree != null) vm.importFolder(tree, includeSubfolders, ignoreLivePhotos)
     }
+    val outputFolderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { tree ->
+        if (tree != null) vm.setOutputDirectory(tree)
+    }
     if (showFolderOptions) AlertDialog(
         onDismissRequest = { showFolderOptions = false },
         icon = { Icon(Icons.Rounded.FolderOpen, null) },
@@ -202,7 +205,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replace
         }
     }
     LaunchedEffect(state.isConverting) { if (state.isConverting) optionsExpanded = false }
-    val callbacks = remember(vm) {
+    val callbacks = remember(vm, outputFolderPicker, scope, snackbar) {
         OptionsCallbacks(
             onFormatChange = vm::setFormat,
             onQualityChange = vm::setQuality,
@@ -210,6 +213,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replace
             onGainmapScaleChange = vm::setGainmapScale,
             onMultiChannelChange = vm::setMultiChannel,
             onKeepExifChange = vm::setKeepExif,
+            onKeepFilenameChange = vm::setKeepFilename,
             onAllowSdrChange = vm::setAllowSdr,
             onAutoSaveChange = vm::setAutoSave,
             onPreset = vm::applyPreset,
@@ -221,6 +225,13 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replace
             onHeicGainmapCompatibilityChange = vm::setHeicGainmapCompatibility,
             onSaveAsDefault = vm::saveCurrentAsDefault,
             onResetToDefault = vm::resetToDefault,
+            onChooseOutputDirectory = { directory ->
+                try {
+                    outputFolderPicker.launch(directory.takeIf { it.isNotBlank() }?.let(android.net.Uri::parse))
+                } catch (_: android.content.ActivityNotFoundException) {
+                    scope.launch { snackbar.showSnackbar("未找到系统文件夹选择器") }
+                }
+            },
         )
     }
     val actionBar: @Composable () -> Unit = {

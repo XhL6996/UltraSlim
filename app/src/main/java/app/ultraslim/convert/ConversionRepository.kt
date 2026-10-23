@@ -30,7 +30,7 @@ data class QueueItem(
     /** Overall queue progress (0–100) while this item is being converted. */
     val progress: Int = 0,
     @Embedded(prefix = "result_") val result: TranscodeResult? = null,
-    /** MediaStore content uri, or durable private file path when auto-save is off. */
+    /** MediaStore/SAF content URI, or a durable private file path before publication. */
     val outputUri: String? = null,
     val error: String? = null,
     /** Room history id, set once the conversion succeeded. */

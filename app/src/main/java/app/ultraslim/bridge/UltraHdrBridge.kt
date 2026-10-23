@@ -92,6 +92,14 @@ object UltraHdrBridge {
     @JvmStatic
     external fun nativeVersion(): String
 
+    /** Set and verify mtime on an already granted output descriptor; pipes/proxy providers may refuse. */
+    @JvmStatic
+    external fun nativeSetModifiedTime(fd: Int, timestampMillis: Long): Boolean
+
+    /** Called only for a validated local output path; 0 on success, errno otherwise. */
+    @JvmStatic
+    external fun nativeSetPathModifiedTime(pathUtf8: ByteArray, timestampMillis: Long): Int
+
     /**
      * Decodes the primary SDR rendition of an image to a small JPEG, for previews
      * the platform decoder cannot handle (e.g. ISO 21496-1 gain map HEIC).

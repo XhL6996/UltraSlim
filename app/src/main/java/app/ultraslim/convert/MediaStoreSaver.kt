@@ -11,8 +11,10 @@ import java.io.File
 import java.io.IOException
 import java.io.InputStream
 import java.security.MessageDigest
+import app.ultraslim.util.keptOutputName
+import app.ultraslim.util.confirmKeptOutputName
 
-private fun disambiguateName(desired: String, existing: Set<String>): String {
+internal fun disambiguateName(desired: String, existing: Set<String>): String {
     if (desired !in existing) return desired
     val base = desired.substringBeforeLast('.', desired)
     val ext = desired.substringAfterLast('.', "")
@@ -45,7 +47,9 @@ object MediaStoreSaver {
         dateTaken: Long? = null,
         relatedUri: Uri? = null,
         expectedFingerprint: Fingerprint? = null,
+        keepFilename: Boolean = false,
         fileModifiedTime: Long? = dateTaken,
+        onFailure: (Exception) -> Unit = {},
     ): Uri? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         if (!sourceFile.isFile) return null
@@ -53,7 +57,7 @@ object MediaStoreSaver {
         val resolver = context.contentResolver
         val collection = MediaStore.Images.Media.getContentUri(volume)
         // Stable name enables recovery if the process died after MediaStore publication.
-        val desired = if (taskId != null && !displayName.matches(STABLE_NAME_REGEX)) {
+        val desired = if (!keepFilename && taskId != null && !displayName.matches(STABLE_NAME_REGEX)) {
             // Recover records created by earlier app versions with their original stable name.
             displayName.substringBeforeLast('.') + "_" + taskId + "." + format.extension
         } else displayName
@@ -62,6 +66,15 @@ object MediaStoreSaver {
         val expected = expectedFingerprint
             ?: runCatching { sourceFile.inputStream().use(::fingerprint) }.getOrNull() ?: return null
         if (expected.bytes == 0L) return null
+        val receipt = if (keepFilename) PublicationReceipt(sourceFile, "gallery:$volume:$relativePath:$desired") else null
+        receipt?.recover(context, expected)?.let { found ->
+            return runCatching {
+                check(resolver.update(found, ContentValues().apply { put(MediaStore.Images.Media.IS_PENDING, 0) }, null, null) == 1)
+                preserveCaptureTime(context, found, dateTaken)
+                requireFileTime(context, found, fileModifiedTime)
+                found
+            }.onFailure { if (it is Exception) onFailure(it) }.getOrNull()
+        }
         val existingNames = mutableSetOf<String>()
         var recovered: Uri? = null
         val base = desired.substringBeforeLast('.', desired)
@@ -72,12 +85,13 @@ object MediaStoreSaver {
             resolver.query(collection,
                 arrayOf(MediaStore.Images.Media._ID, MediaStore.Images.Media.IS_PENDING,
                     MediaStore.Images.Media.DISPLAY_NAME),
-                "${MediaStore.Images.Media.RELATIVE_PATH} = ? AND " +
+                if (keepFilename) "${MediaStore.Images.Media.RELATIVE_PATH} = ?" else
+                    "${MediaStore.Images.Media.RELATIVE_PATH} = ? AND " +
                     "(${MediaStore.Images.Media.DISPLAY_NAME} = ? OR ${MediaStore.Images.Media.DISPLAY_NAME} LIKE ? ESCAPE '\\')",
-                arrayOf(relativePath, desired, numbered), "${MediaStore.Images.Media._ID} ASC")?.use { cursor ->
+                if (keepFilename) arrayOf(relativePath) else arrayOf(relativePath, desired, numbered), "${MediaStore.Images.Media._ID} ASC")?.use { cursor ->
                 while (cursor.moveToNext()) {
                     existingNames += cursor.getString(2)
-                    if (taskId != null && recovered == null && cursor.getInt(1) == 0) {
+                    if (!keepFilename && taskId != null && recovered == null && cursor.getInt(1) == 0) {
                         val found = android.content.ContentUris.withAppendedId(collection, cursor.getLong(0))
                         if (matches(resolver, found, expected)) recovered = found
                     }
@@ -85,12 +99,13 @@ object MediaStoreSaver {
             } ?: throw IOException("无法检查相册中已有文件")
         }.isSuccess
         if (!queried) return null
-        recovered?.let {
-            preserveFileTime(context, it, fileModifiedTime)
+        recovered?.let { return runCatching {
             preserveCaptureTime(context, it, dateTaken)
-            return it
+            requireFileTime(context, it, fileModifiedTime)
+            it
         }
-        val chosen = disambiguateName(desired, existingNames)
+            .onFailure { error -> if (error is Exception) onFailure(error) }.getOrNull() }
+        val chosen = if (keepFilename) keptOutputName(desired, existingNames, expected.sha256) else disambiguateName(desired, existingNames)
 
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, chosen)
@@ -108,6 +123,14 @@ object MediaStoreSaver {
         if (uri == null) return null
 
         return try {
+            if (keepFilename) confirmKeptOutputName(desired, chosen, existingNames, expected.sha256,
+                readName = { displayName(context, uri) },
+                rename = { renamed ->
+                    check(resolver.update(uri, ContentValues().apply {
+                        put(MediaStore.Images.Media.DISPLAY_NAME, renamed)
+                    }, null, null) == 1) { "无法设置输出文件名" }
+                })
+            receipt?.record(uri)
             // 写入时同步计算摘要：数据刚流经内存，不必再多一次整读就能确认写盘内容。
             // 短写或内容不符在这里失败，发布后的整读校验仍是最终安全门。
             val digest = MessageDigest.getInstance("SHA-256")
@@ -131,7 +154,7 @@ object MediaStoreSaver {
             }
             // Capture time and file modification time are different. Preserve both when known;
             // never rewrite EXIF or DATE_ADDED to force a gallery's sorting preference.
-            preserveFileTime(context, uri, fileModifiedTime)
+            requireFileTime(context, uri, fileModifiedTime)
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
             dateTaken?.takeIf { it > 0 }?.let { values.put(MediaStore.Images.Media.DATE_TAKEN, it) }
@@ -139,15 +162,25 @@ object MediaStoreSaver {
             // Publishing may run the scanner, which can replace DATE_TAKEN when it cannot read
             // this output's EXIF. Reapply the known source date after publication, best effort.
             preserveCaptureTime(context, uri, dateTaken)
+            // Check actual mtime after publication and capture-index repairs as well.
+            requireFileTime(context, uri, fileModifiedTime)
             check(matches(resolver, uri, expected)) { "相册副本发布校验失败" }
             uri
         } catch (e: Exception) {
+            android.util.Log.w("UltraSlimOutput", "Gallery publication failed", e)
+            onFailure(e)
             runCatching { resolver.delete(uri, null, null) }
+            receipt?.delete()
             null
         }
     }
 
     data class Fingerprint(val bytes: Long, val sha256: String)
+
+    internal fun displayName(context: Context, uri: Uri): String? =
+        context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
+            if (it.moveToFirst()) it.getString(it.getColumnIndexOrThrow(android.provider.OpenableColumns.DISPLAY_NAME)) else null
+        }
 
     /** One read of the private result; callers pass it down to avoid re-hashing the same file. */
     internal fun fingerprintOf(file: File): Fingerprint? =
@@ -187,15 +220,10 @@ object MediaStoreSaver {
         }.onFailure { android.util.Log.w("MediaStoreSaver", "Source capture time could not be indexed", it) }
     }
 
-    internal fun preserveFileTime(context: Context, uri: Uri, timestamp: Long?) {
-        if (timestamp == null || timestamp <= 0) return
-        runCatching {
-            context.contentResolver.openFileDescriptor(uri, "rw")?.use { descriptor ->
-                // Resolve the descriptor we own; opening /proc/self/fd directly for utime is denied by FUSE.
-                val path = android.system.Os.readlink("/proc/self/fd/${descriptor.fd}")
-                check(File(path).setLastModified(timestamp)) { "Provider declined timestamp update" }
-            }
-        }.onFailure { android.util.Log.w("MediaStoreSaver", "Original file timestamp could not be preserved", it) }
+    /** SAF has no writable mtime column. Try the granted descriptor, then the local FUSE path. */
+    internal fun requireFileTime(context: Context, uri: Uri, timestamp: Long?) {
+        if (timestamp == null) return
+        OutputFileTime.require(context, uri, timestamp)
     }
 
 }

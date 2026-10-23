@@ -221,6 +221,7 @@ ExternalProject_Add(libjxl
     CMAKE_ARGS ${COMMON_CMAKE_ARGS}
                -DBUILD_TESTING=OFF
                -DJPEGXL_ENABLE_TOOLS=OFF
+               -DJPEGXL_ENABLE_JNI=OFF
                -DJPEGXL_ENABLE_EXAMPLES=OFF
                -DJPEGXL_ENABLE_MANPAGES=OFF
                -DJPEGXL_ENABLE_BENCHMARK=OFF
@@ -235,6 +236,7 @@ ExternalProject_Add(libjxl
     BUILD_COMMAND ${CMAKE_COMMAND} --build <BINARY_DIR> --target jxl jxl_cms jxl_threads brotli --parallel
     INSTALL_COMMAND ${CMAKE_COMMAND} --install <BINARY_DIR> --config Release)
 ExternalProject_Add_Step(libjxl verify_pin
+    INDEPENDENT TRUE
     COMMAND ${CMAKE_COMMAND} -DSRC_DIR=<SOURCE_DIR> -DEXPECTED=${ULTRASLIM_LIBJXL_COMMIT}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/patches/verify_git_pin.cmake
     COMMENT "Verifying libjxl resolves to the pinned commit"

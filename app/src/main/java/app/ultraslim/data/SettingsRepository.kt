@@ -63,7 +63,14 @@ data class ConversionDefaults(
     val resizePercent: Int = 100,
     val avifGainmapCompatibility: Boolean = true,
     val heicGainmapCompatibility: Boolean = true,
+    /** Last chosen SAF folder, retained while replacement temporarily uses the original album. */
+    val outputDirectoryUri: String = "",
+    val outputDirectoryName: String = "",
+    val keepFilename: Boolean = false,
 ) {
+    val outputToFolder: Boolean get() = outputDirectoryUri.isNotBlank() && !autoReplaceOriginals
+    val effectiveOutputDirectoryUri: String get() = if (outputToFolder) outputDirectoryUri else ""
+
     fun toConversionSettings(): ConversionSettings =
         ConversionSettings(
             format = format,
@@ -90,6 +97,7 @@ class SettingsRepository(private val context: Context) {
         val GAINMAP_SCALE = intPreferencesKey("gainmap_scale")
         val MULTI_CHANNEL = booleanPreferencesKey("multi_channel_gainmap")
         val KEEP_EXIF = booleanPreferencesKey("keep_exif")
+        val KEEP_FILENAME = booleanPreferencesKey("keep_filename")
         val ALLOW_SDR = booleanPreferencesKey("allow_sdr_transcode")
         val THEME_MODE = stringPreferencesKey("theme_mode")
         val DYNAMIC_COLOR = booleanPreferencesKey("dynamic_color")
@@ -101,6 +109,8 @@ class SettingsRepository(private val context: Context) {
         val RESIZE_PERCENT = intPreferencesKey("resize_percent")
         val AVIF_GAINMAP_COMPATIBILITY = booleanPreferencesKey("avif_gainmap_compatibility")
         val HEIC_GAINMAP_COMPATIBILITY = booleanPreferencesKey("heic_gainmap_compatibility")
+        val OUTPUT_DIRECTORY_URI = stringPreferencesKey("output_directory_uri")
+        val OUTPUT_DIRECTORY_NAME = stringPreferencesKey("output_directory_name")
     }
 
     val defaults: Flow<ConversionDefaults> = context.settingsStore().data.map { p ->
@@ -111,6 +121,7 @@ class SettingsRepository(private val context: Context) {
             gainmapScale = p[Keys.GAINMAP_SCALE] ?: 4,
             multiChannelGainmap = p[Keys.MULTI_CHANNEL] ?: true,
             keepExif = p[Keys.KEEP_EXIF] ?: true,
+            keepFilename = p[Keys.KEEP_FILENAME] ?: false,
             allowSdr = p[Keys.ALLOW_SDR] ?: true,
             autoSave = p[Keys.AUTO_SAVE] ?: true,
             autoReplaceOriginals = (p[Keys.AUTO_REPLACE] ?: false) && (p[Keys.AUTO_SAVE] ?: true),
@@ -120,6 +131,8 @@ class SettingsRepository(private val context: Context) {
             resizePercent = p[Keys.RESIZE_PERCENT] ?: 100,
             avifGainmapCompatibility = p[Keys.AVIF_GAINMAP_COMPATIBILITY] ?: true,
             heicGainmapCompatibility = p[Keys.HEIC_GAINMAP_COMPATIBILITY] ?: true,
+            outputDirectoryUri = p[Keys.OUTPUT_DIRECTORY_URI].orEmpty(),
+            outputDirectoryName = p[Keys.OUTPUT_DIRECTORY_NAME].orEmpty(),
         )
     }
 
@@ -154,6 +167,8 @@ class SettingsRepository(private val context: Context) {
         context.settingsStore().edit { it[Keys.KEEP_EXIF] = keep }
     }
 
+    suspend fun setKeepFilename(keep: Boolean) { context.settingsStore().edit { it[Keys.KEEP_FILENAME] = keep } }
+
     suspend fun setAllowSdr(allow: Boolean) {
         context.settingsStore().edit { it[Keys.ALLOW_SDR] = allow }
     }
@@ -176,7 +191,20 @@ class SettingsRepository(private val context: Context) {
     suspend fun setAutoReplaceOriginals(enabled: Boolean) {
         context.settingsStore().edit {
             it[Keys.AUTO_REPLACE] = enabled
-            if (enabled) it[Keys.AUTO_SAVE] = true
+            if (enabled) {
+                it[Keys.AUTO_SAVE] = true
+            }
+        }
+    }
+
+    suspend fun setOutputDirectory(uri: String, name: String) {
+        context.settingsStore().edit {
+            it[Keys.OUTPUT_DIRECTORY_URI] = uri
+            it[Keys.OUTPUT_DIRECTORY_NAME] = name
+            if (uri.isNotBlank()) {
+                it[Keys.AUTO_SAVE] = true
+                it[Keys.AUTO_REPLACE] = false
+            }
         }
     }
 
@@ -207,9 +235,12 @@ class SettingsRepository(private val context: Context) {
             p[Keys.GAINMAP_SCALE] = d.gainmapScale
             p[Keys.MULTI_CHANNEL] = d.multiChannelGainmap
             p[Keys.KEEP_EXIF] = d.keepExif
+            p[Keys.KEEP_FILENAME] = d.keepFilename
             p[Keys.ALLOW_SDR] = d.allowSdr
             p[Keys.AUTO_SAVE] = d.autoSave
             p[Keys.AUTO_REPLACE] = d.autoReplaceOriginals && d.autoSave
+            p[Keys.OUTPUT_DIRECTORY_URI] = d.outputDirectoryUri
+            p[Keys.OUTPUT_DIRECTORY_NAME] = d.outputDirectoryName
             p[Keys.ONLY_SMALLER] = d.onlySmaller
             p[Keys.KEEP_LOCATION] = d.keepLocation
             p[Keys.SPEED_LEVEL] = d.speedLevel.coerceIn(0, 2)
@@ -225,9 +256,11 @@ fun ConversionDefaults.encode(): String = org.json.JSONObject().apply {
     put("gainmapScale", gainmapScale); put("multiChannel", multiChannelGainmap); put("keepExif", keepExif)
     put("allowSdr", allowSdr); put("autoSave", autoSave); put("speed", speedLevel); put("resize", resizePercent)
     put("autoReplaceOriginals", autoReplaceOriginals && autoSave)
+    put("outputDirectoryUri", outputDirectoryUri); put("outputDirectoryName", outputDirectoryName)
     put("onlySmaller", onlySmaller); put("keepLocation", keepLocation)
     put("avifGainmapCompatibility", avifGainmapCompatibility)
     put("heicGainmapCompatibility", heicGainmapCompatibility)
+    put("keepFilename", keepFilename)
 }.toString()
 
 fun decodeDefaults(value: String): ConversionDefaults {
@@ -241,6 +274,9 @@ fun decodeDefaults(value: String): ConversionDefaults {
         multiChannelGainmap = j.optBoolean("multiChannel", d.multiChannelGainmap), keepExif = j.optBoolean("keepExif", d.keepExif),
         allowSdr = j.optBoolean("allowSdr", d.allowSdr), autoSave = j.optBoolean("autoSave", d.autoSave),
         autoReplaceOriginals = j.optBoolean("autoReplaceOriginals", false) && j.optBoolean("autoSave", true),
+        outputDirectoryUri = j.optString("outputDirectoryUri", ""),
+        outputDirectoryName = j.optString("outputDirectoryName", ""),
+        keepFilename = j.optBoolean("keepFilename", false),
         speedLevel = j.optInt("speed", d.speedLevel), resizePercent = j.optInt("resize", d.resizePercent),
         onlySmaller = j.optBoolean("onlySmaller", d.onlySmaller), keepLocation = j.optBoolean("keepLocation", d.keepLocation),
         // Old queued jobs and history used pixel-exact encoding. Do not relabel them.
@@ -248,4 +284,4 @@ fun decodeDefaults(value: String): ConversionDefaults {
         heicGainmapCompatibility = j.optBoolean("heicGainmapCompatibility", false))
 }
 
-fun ConversionDefaults.summary(): String = "${format.label} · 编码质量 $quality · ${if (resizePercent == 100) "原始尺寸" else "尺寸 $resizePercent%"} · ${if ((format == OutputFormat.AVIF && avifGainmapCompatibility) || (format == OutputFormat.HEIC && heicGainmapCompatibility)) "HDR 相册兼容" else "Gain Map 原样保留"} · ${if (autoSave) "自动保存" else "手动保存"}${if (autoReplaceOriginals) " · 校验后自动替换" else ""}"
+fun ConversionDefaults.summary(): String = "${format.label} · 编码质量 $quality · ${if (resizePercent == 100) "原始尺寸" else "尺寸 $resizePercent%"} · ${if ((format == OutputFormat.AVIF && avifGainmapCompatibility) || (format == OutputFormat.HEIC && heicGainmapCompatibility)) "HDR 相册兼容" else "Gain Map 原样保留"} · ${if (autoSave) "自动保存" else "手动保存"}${if (autoReplaceOriginals) " · 校验后自动替换" else ""}${if (keepFilename) " · 保留文件名" else ""}"
