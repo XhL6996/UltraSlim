@@ -24,7 +24,9 @@ import app.ultraslim.convert.QueueStatus
 import app.ultraslim.data.ConversionDefaults
 import app.ultraslim.data.BatchEntity
 import app.ultraslim.data.encode
-import app.ultraslim.data.decodeDefaults
+import app.ultraslim.data.decodeBatchSnapshot
+import app.ultraslim.data.BATCH_SNAPSHOT_ERROR
+import app.ultraslim.convert.ConversionThermalState
 import kotlinx.coroutines.flow.asFlow
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
@@ -84,6 +86,7 @@ data class HomeUiState(
     val hasFailed: Boolean = false,
     val batchTotal: Int = 0,
     val batchProcessed: Int = 0,
+    val thermalState: ConversionThermalState? = null,
 ) {
     val convertibleCount: Int
         get() = queue.count {
@@ -149,9 +152,10 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         repo.queue.sample(QUEUE_SAMPLE_MILLIS),
         runDefaults,
         app.historyRepository.stats,
-        workRunning,
+        combine(workRunning, app.conversionThermalState) { running, thermal -> running to thermal },
         activeBatchIds,
-    ) { queue, defaults, stats, running, batchIds ->
+    ) { queue, defaults, stats, workState, batchIds ->
+        val (running, thermal) = workState
         val byId = queue.associateBy { it.id }
         val ids = batchIds.ifEmpty { queue.map { it.id } }
         val processed = ids.count { id -> byId[id]?.status.let {
@@ -167,6 +171,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             hasFailed = queue.any { it.status == QueueStatus.FAILED },
             batchTotal = ids.size,
             batchProcessed = processed,
+            thermalState = thermal.takeIf { queue.any { it.status == QueueStatus.READY && it.error?.startsWith("系统报告") == true } },
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
 
@@ -175,10 +180,24 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             repo.awaitReady()
             val latest = app.database.taskDao().latestBatch()
             activeBatch = latest?.id
-            activeBatchIds.value = runCatching {
-                latest?.itemIds?.let { encoded -> JSONArray(encoded).let { array -> List(array.length()) { array.getString(it) } } }
-            }.getOrNull().orEmpty()
-            runDefaults.value = if (latest != null && repo.queue.value.any { it.batchId == latest.id && it.status !in listOf(QueueStatus.DONE, QueueStatus.FAILED, QueueStatus.SKIPPED) }) decodeDefaults(latest.settings) else settings.defaults.first()
+            val snapshot = latest?.let(::decodeBatchSnapshot)
+            activeBatchIds.value = snapshot?.itemIds.orEmpty()
+            val unfinished = latest != null && repo.queue.value.any {
+                it.batchId == latest.id && it.status !in listOf(QueueStatus.DONE, QueueStatus.FAILED, QueueStatus.SKIPPED)
+            }
+            if (unfinished && snapshot?.isValid == false) {
+                val affected = snapshot.itemIds.toMutableSet().apply {
+                    repo.queue.value.filter { it.batchId == latest?.id }.mapTo(this) { it.id }
+                }
+                repo.updateAll(affected) {
+                    if (it.batchId != latest?.id || it.status in listOf(QueueStatus.DONE, QueueStatus.SKIPPED)) it
+                    else it.copy(status = QueueStatus.FAILED, error = BATCH_SNAPSHOT_ERROR)
+                }
+                repo.flush()
+                _events.emit(HomeEvent.Info(BATCH_SNAPSHOT_ERROR))
+            }
+            runDefaults.value = if (unfinished && snapshot?.isValid == true) requireNotNull(snapshot.options)
+                else settings.defaults.first()
             settings.defaults.map { it.autoReplaceOriginals }.distinctUntilChanged().collect { enabled ->
                 runDefaults.value = runDefaults.value.copy(autoReplaceOriginals = enabled,
                     autoSave = if (enabled) true else runDefaults.value.autoSave)
@@ -397,6 +416,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     fun cancelConversion() {
         val batch = activeBatch ?: return
+        app.conversionThermalState.value = null
         _stopping.value = true
         cancelledRun = true
         viewModelScope.launch {
@@ -617,6 +637,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
                 repo.flush()
                 lastRunIds = eligible.mapTo(mutableSetOf()) { it.id }
                 activeBatch = batchId; activeBatchIds.value = eligible.map { it.id }
+                app.conversionThermalState.value = null
                 cancelledRun = false; _stopping.value = false
                 ConversionService.start(app, batchId)
             } catch (e: Exception) { _events.emit(HomeEvent.Info("无法启动转换：${e.message}")) }

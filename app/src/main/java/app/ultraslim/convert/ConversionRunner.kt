@@ -23,14 +23,39 @@ import app.ultraslim.data.*
 import app.ultraslim.util.formatBytes
 import java.io.File
 import kotlinx.coroutines.*
-import org.json.JSONArray
 
 /** Durable, sequential batches. Each result is checkpointed before publishing to the album. */
 internal class ConversionRunner(
     private val applicationContext: Context,
+    private val thermalStatus: () -> Int = {
+        if (Build.VERSION.SDK_INT >= 29)
+            applicationContext.getSystemService(android.os.PowerManager::class.java).currentThermalStatus
+        else 0
+    },
     private val setForeground: suspend (ForegroundInfo) -> Unit,
 ) {
-    enum class Outcome { COMPLETE, FAILED, COOLING }
+    enum class Outcome { COMPLETE, FAILED, COOLING, PAUSED }
+
+    internal var coolingAttempt = 0
+        private set
+    private var coolingItemId: String? = null
+
+    internal fun currentThermalStatus() = thermalStatus()
+
+    internal suspend fun pauseCooling(): Outcome {
+        val app = applicationContext as UltraSlimApp
+        val state = app.conversionThermalState.value ?: return Outcome.FAILED
+        val paused = state.copy(phase = ThermalPhase.PAUSED, remainingSeconds = 0)
+        app.conversionThermalState.value = paused
+        coolingItemId?.let { id ->
+            app.conversionRepository.update(id) {
+                if (it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED) it
+                else it.copy(status = QueueStatus.READY, error = paused.message)
+            }
+        }
+        app.conversionRepository.flush()
+        return Outcome.PAUSED
+    }
 
     companion object {
         const val UNIQUE_WORK_NAME = "conversion"
@@ -38,8 +63,6 @@ internal class ConversionRunner(
         const val NOTIFICATION_ID = 42
         private const val SUMMARY_ID = 43
         const val KEY_BATCH = "batch_id"
-        /** 温控自动重试上限；超出后停下等用户手动继续。 */
-        private const val MAX_THERMAL_RESUMES = 8
     }
     fun getForegroundInfo() = createForegroundInfo(0, "正在准备转换…", null, true)
 
@@ -50,13 +73,17 @@ internal class ConversionRunner(
         val batch = app.database.taskDao().batch(batchId) ?: return Outcome.FAILED
         if (batch.cancelled) return Outcome.COMPLETE
         // 损坏的批次快照必须显式失败并留下错误信息，不能在 checkpoint 循环外静默死亡。
-        val ids = runCatching { JSONArray(batch.itemIds).let { j -> List(j.length()) { j.getString(it) } } }.getOrDefault(emptyList())
-        val options = runCatching { decodeDefaults(batch.settings) }.getOrNull()
-        if (options == null) {
+        val snapshot = decodeBatchSnapshot(batch)
+        val ids = snapshot.itemIds
+        val options = snapshot.options
+        if (!snapshot.isValid || options == null) {
             val affectedIds = ids.toMutableSet().apply {
                 repo.queue.value.filter { it.batchId == batchId }.mapTo(this) { it.id }
             }
-            repo.updateAll(affectedIds) { it.copy(status = QueueStatus.FAILED, error = "任务参数无法解析，请重新选择图片转换") }
+            repo.updateAll(affectedIds) {
+                if (it.batchId != batchId || it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED) it
+                else it.copy(status = QueueStatus.FAILED, error = BATCH_SNAPSHOT_ERROR)
+            }
             repo.flush()
             return Outcome.FAILED
         }
@@ -69,23 +96,31 @@ internal class ConversionRunner(
             return Outcome.FAILED
         }
         var done = 0; var saved = 0L
+        var thermalAttempt = runAttemptCount
         val started = System.currentTimeMillis()
         try {
             for ((index, id) in ids.withIndex()) {
                 currentCoroutineContext().ensureActive()
                 if (app.database.taskDao().batch(batchId)?.cancelled != false) break
-                if (Build.VERSION.SDK_INT >= 29 && app.getSystemService(android.os.PowerManager::class.java).currentThermalStatus >= android.os.PowerManager.THERMAL_STATUS_SEVERE) {
-                    repo.update(id) { it.copy(error = "设备温度较高，稍后自动重试") }; repo.flush()
-                    // 无限 retry 会带着前台服务常驻；超过上限后停下，条目保持 READY 可从应用内继续。
-                    if (runAttemptCount >= MAX_THERMAL_RESUMES) {
-                        repo.update(id) { it.copy(error = "设备温度较高，已暂停；请稍后在应用内继续") }
-                        repo.flush()
-                        return Outcome.FAILED
-                    }
-                    return Outcome.COOLING
-                }
                 val item = repo.find(id) ?: continue // Removed pending items never run.
                 if (item.status == QueueStatus.DONE || item.status == QueueStatus.SKIPPED) continue
+                val status = currentThermalStatus()
+                if (ConversionThermalPolicy.requiresCooling(status)) {
+                    coolingAttempt = thermalAttempt
+                    coolingItemId = id
+                    val state = ConversionThermalState(status, ThermalPhase.COOLING,
+                        ConversionThermalPolicy.remainingWaitSeconds(thermalAttempt))
+                    app.conversionThermalState.value = state
+                    // This item has not begun encoding. Keep it resumable while cooling.
+                    repo.update(id) { it.copy(status = QueueStatus.READY, error = state.message) }
+                    repo.flush()
+                    android.util.Log.i("UltraSlimConversion", "thermal status=$status attempt=$thermalAttempt remaining=${state.remainingSeconds}s")
+                    if (thermalAttempt >= ConversionThermalPolicy.MAX_RESUMES) return pauseCooling()
+                    return Outcome.COOLING
+                }
+                // A later hot period gets its own bounded wait, even within one batch.
+                thermalAttempt = 0
+                app.conversionThermalState.value = null
                 val elapsedSec = (System.currentTimeMillis() - started) / 1000.0
                 val speedText = if (done > 0 && elapsedSec > 0.5) {
                     val rate = done / elapsedSec
@@ -210,6 +245,7 @@ internal class ConversionRunner(
             repo.updateAll(ids) { if (it.status == QueueStatus.CONVERTING) it.copy(status = QueueStatus.READY, error = "已中断，可继续") else it }
             withContext(NonCancellable) { repo.flush() }
         }
+        app.conversionThermalState.value = null
         if (app.database.taskDao().batch(batchId)?.cancelled == false) {
             val pendingSave = options.autoSave && ids.toHashSet().let { batchIds ->
                 repo.queue.value.any { it.id in batchIds &&

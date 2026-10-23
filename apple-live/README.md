@@ -1,7 +1,7 @@
 # UltraSlim Live（Mac）
 
 把 UltraSlim Android 导出的动态 HEIC 导入包转换为 Apple Live Photo。
-当前交付包适用于 Apple Silicon，需要 macOS 15 或更新版本；不需要额外安装 ffmpeg、ExifTool 或第三方服务。
+目前公开提供源码，需按下文在 Mac 上构建；GitHub v1.0.0 Release 没有 Mac 安装包。构建出的应用适用于 Apple Silicon，需要 macOS 15 或更新版本；运行时不需要额外安装 ffmpeg、ExifTool 或第三方服务。
 
 ## 使用
 

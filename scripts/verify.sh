@@ -7,6 +7,7 @@ if [[ $# -gt 1 || ( $# -eq 1 && "$1" != "--device" ) ]]; then
 fi
 export ULTRASLIM_BUILD_ROOT="${ULTRASLIM_BUILD_ROOT:-$HOME/.cache/ultraslim-build}"
 python3 scripts/check_repository.py
+python3 scripts/test_release_identity.py
 host_build="$ULTRASLIM_BUILD_ROOT/host-test"
 cmake -G Ninja -S native -B "$host_build" -DULTRASLIM_HOST_TEST=ON -DCMAKE_BUILD_TYPE=Release
 cmake --build "$host_build" --parallel 4

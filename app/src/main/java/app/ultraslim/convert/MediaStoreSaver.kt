@@ -45,6 +45,7 @@ object MediaStoreSaver {
         dateTaken: Long? = null,
         relatedUri: Uri? = null,
         expectedFingerprint: Fingerprint? = null,
+        fileModifiedTime: Long? = dateTaken,
     ): Uri? {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return null
         if (!sourceFile.isFile) return null
@@ -84,7 +85,11 @@ object MediaStoreSaver {
             } ?: throw IOException("无法检查相册中已有文件")
         }.isSuccess
         if (!queried) return null
-        recovered?.let { return it }
+        recovered?.let {
+            preserveFileTime(context, it, fileModifiedTime)
+            preserveCaptureTime(context, it, dateTaken)
+            return it
+        }
         val chosen = disambiguateName(desired, existingNames)
 
         val values = ContentValues().apply {
@@ -124,13 +129,16 @@ object MediaStoreSaver {
             check(written == expected.bytes && digest.digest().joinToString("") { "%02x".format(it) } == expected.sha256) {
                 "相册副本写入校验失败"
             }
-            // DATE_TAKEN is scanner-controlled on current Android. Keep the real file timestamp too,
-            // so pictures without EXIF dates retain chronology when the provider indexes them.
-            preserveFileTime(context, uri, dateTaken)
+            // Capture time and file modification time are different. Preserve both when known;
+            // never rewrite EXIF or DATE_ADDED to force a gallery's sorting preference.
+            preserveFileTime(context, uri, fileModifiedTime)
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
             dateTaken?.takeIf { it > 0 }?.let { values.put(MediaStore.Images.Media.DATE_TAKEN, it) }
             check(resolver.update(uri, values, null, null) == 1) { "无法发布相册文件" }
+            // Publishing may run the scanner, which can replace DATE_TAKEN when it cannot read
+            // this output's EXIF. Reapply the known source date after publication, best effort.
+            preserveCaptureTime(context, uri, dateTaken)
             check(matches(resolver, uri, expected)) { "相册副本发布校验失败" }
             uri
         } catch (e: Exception) {
@@ -165,6 +173,18 @@ object MediaStoreSaver {
     internal fun matchesAlbumCopy(context: Context, uri: Uri, expected: Fingerprint?): Boolean {
         val known = expected ?: return false
         return known.bytes > 0 && matches(context.contentResolver, uri, known)
+    }
+
+    internal fun preserveCaptureTime(context: Context, uri: Uri, timestamp: Long?) {
+        if (timestamp == null || timestamp <= 0) return
+        runCatching {
+            val current = context.contentResolver.query(uri, arrayOf(MediaStore.Images.Media.DATE_TAKEN), null, null, null)?.use {
+                if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else null
+            }
+            if (current != timestamp) context.contentResolver.update(uri, ContentValues().apply {
+                put(MediaStore.Images.Media.DATE_TAKEN, timestamp)
+            }, null, null)
+        }.onFailure { android.util.Log.w("MediaStoreSaver", "Source capture time could not be indexed", it) }
     }
 
     internal fun preserveFileTime(context: Context, uri: Uri, timestamp: Long?) {

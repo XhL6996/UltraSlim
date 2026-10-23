@@ -29,15 +29,18 @@ object OutputStore {
             val file = File(current.outputUri)
             val format = OutputFormat.parse(current.format)
             val task = current.taskId ?: "history-${current.id}"
-            val date = metadata?.dateTaken ?: SourceMedia.captureTime(app, source)
+            val timestamps = metadata?.let { SourceTimestamps(it.dateTaken, it.modifiedAt) }
+                ?: SourceMedia.timestamps(app, source)
             val sameAlbum = if (replacement != null && metadata != null) MediaStoreSaver.save(app, file,
                 current.displayName, format, taskId = task, relativePath = metadata.relativePath,
-                volume = metadata.volume, dateTaken = date, relatedUri = source,
+                volume = metadata.volume, dateTaken = timestamps.dateTaken, relatedUri = source,
+                fileModifiedTime = timestamps.modifiedAt ?: timestamps.dateTaken,
                 expectedFingerprint = expected) else null
             if (sameAlbum != null) sameAlbum else {
                 if (replacement != null) AutoReplacement.finish(app, listOf(replacement), "SKIPPED",
                     "无法保存回原相册，成品保存到 UltraSlim，原图保留")
-                MediaStoreSaver.save(app, file, current.displayName, format, taskId = task, dateTaken = date,
+                MediaStoreSaver.save(app, file, current.displayName, format, taskId = task, dateTaken = timestamps.dateTaken,
+                    fileModifiedTime = timestamps.modifiedAt ?: timestamps.dateTaken,
                     expectedFingerprint = expected)
             }
         } } catch(e: kotlinx.coroutines.CancellationException) { throw e } catch(e: Exception) { null }

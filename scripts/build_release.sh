@@ -10,7 +10,8 @@ done
 export ULTRASLIM_BUILD_ROOT="${ULTRASLIM_BUILD_ROOT:-$HOME/.cache/ultraslim-build}"
 sdk_dir="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Library/Android/sdk}}"
 apksigner="$sdk_dir/build-tools/36.0.0/apksigner"
-[[ -f "$ULTRASLIM_KEYSTORE" && -x "$apksigner" ]] || { echo "Check keystore and Android build tools paths" >&2; exit 2; }
+aapt="$sdk_dir/build-tools/36.0.0/aapt"
+[[ -f "$ULTRASLIM_KEYSTORE" && -x "$apksigner" && -x "$aapt" ]] || { echo "Check keystore and Android build tools paths" >&2; exit 2; }
 python3 scripts/check_repository.py
 # Signing credentials are supplied by the environment, never persisted in configuration cache.
 ./gradlew --no-configuration-cache -Pkotlin.incremental=false :app:assembleRelease :app:lintRelease
@@ -22,6 +23,9 @@ if grep -qi 'CN=Android Debug' "$certificate"; then
   echo "Debug certificate detected; this APK is not a public release" >&2
   exit 2
 fi
+badging="$ULTRASLIM_BUILD_ROOT/release-badging.txt"
+"$aapt" dump badging "$apk" > "$badging"
+python3 scripts/check_release_identity.py "$certificate" "$badging"
 python3 - "$apk" <<'PY'
 import hashlib, pathlib, sys, zipfile
 apk = pathlib.Path(sys.argv[1])

@@ -5,6 +5,9 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.core.content.FileProvider
 import androidx.test.platform.app.InstrumentationRegistry
 import androidx.work.*
@@ -29,8 +32,8 @@ class BackgroundConversionTest {
     private val app get() = compose.activity.application as UltraSlimApp
     private fun shell(command: String): String = ParcelFileDescriptor.AutoCloseInputStream(
         instrumentation.uiAutomation.executeShellCommand(command)).bufferedReader().use { it.readText() }
-    private fun waitFor(condition: () -> Boolean) {
-        val deadline = SystemClock.elapsedRealtime() + 60_000
+    private fun waitFor(timeoutMillis: Long = 60_000, condition: () -> Boolean) {
+        val deadline = SystemClock.elapsedRealtime() + timeoutMillis
         while (!condition()) {
             check(SystemClock.elapsedRealtime() < deadline) { "Timed out waiting for background service; queue=${app.conversionRepository.queue.value}" }
             SystemClock.sleep(100)
@@ -145,12 +148,75 @@ class BackgroundConversionTest {
         try {
             withBatch { id ->
                 startAndHide(id)
-                waitFor { app.conversionRepository.find(id)?.error?.contains("温度较高") == true }
+                waitFor { app.conversionThermalState.value?.phase == ThermalPhase.COOLING }
                 assertTrue(app.conversionServiceRunning.value)
-                assertFalse(shell("dumpsys power").substringAfter("Wake Locks:").substringBefore("Suspend Blockers:").contains("UltraSlim:conversion"))
+                waitFor { !shell("dumpsys power").substringAfter("Wake Locks:").substringBefore("Suspend Blockers:").contains("UltraSlim:conversion") }
+                val cooledAt = SystemClock.elapsedRealtime()
                 shell("cmd thermalservice reset")
                 waitFor { !app.conversionServiceRunning.value }
                 assertEquals(QueueStatus.DONE, app.conversionRepository.find(id)?.status)
+                assertTrue("Cooling recovery must not wait through the old long backoff", SystemClock.elapsedRealtime() - cooledAt < 30_000)
+            }
+        } finally { shell("cmd thermalservice reset") }
+    }
+
+    @Test fun sustainedSevereStatusStopsWaitingAndKeepsManualResumeAvailable() {
+        assumeTrue(Build.VERSION.SDK_INT >= 29)
+        shell("cmd thermalservice override-status 3")
+        try {
+            withBatch { id ->
+                compose.runOnUiThread { ConversionService.start(app, id) }
+                waitFor { app.conversionThermalState.value?.phase == ThermalPhase.COOLING }
+                compose.waitUntil(5000) {
+                    compose.onAllNodesWithTag("conversion-thermal-status").fetchSemanticsNodes().isNotEmpty()
+                }
+                compose.onNodeWithTag("conversion-thermal-status").assertIsDisplayed()
+                compose.onNodeWithTag("conversion-spinner").assertDoesNotExist()
+                waitFor(timeoutMillis = 120_000) { !app.conversionServiceRunning.value }
+                val item = app.conversionRepository.find(id)!!
+                assertEquals(QueueStatus.READY, item.status)
+                assertTrue(item.error.orEmpty().contains("系统报告"))
+                assertTrue(item.error.orEmpty().contains("点击继续"))
+                assertEquals(ThermalPhase.PAUSED, app.conversionThermalState.value?.phase)
+                assertNull(runBlocking { app.database.historyDao().byTask(id) })
+                assertFalse(shell("dumpsys activity services ${app.packageName}").contains("isForeground=true"))
+            }
+        } finally {
+            app.conversionThermalState.value = null
+            shell("cmd thermalservice reset")
+        }
+    }
+
+    @Test fun cancellingCoolingDoesNotWaitForThermalBackoff() {
+        assumeTrue(Build.VERSION.SDK_INT >= 29)
+        shell("cmd thermalservice override-status 3")
+        try {
+            withBatch { id ->
+                startAndHide(id)
+                waitFor { app.conversionThermalState.value?.phase == ThermalPhase.COOLING }
+                runBlocking { app.database.taskDao().cancel(id) }
+                waitFor(timeoutMillis = 5000) { !app.conversionServiceRunning.value }
+                assertEquals(QueueStatus.READY, app.conversionRepository.find(id)?.status)
+                assertNull(app.conversionThermalState.value)
+            }
+        } finally { shell("cmd thermalservice reset") }
+    }
+
+    @Test fun clearingCoolingQueueStopsServiceWithoutWaitingForBackoff() {
+        assumeTrue(Build.VERSION.SDK_INT >= 29)
+        shell("cmd thermalservice override-status 3")
+        try {
+            withBatch { id ->
+                startAndHide(id)
+                waitFor { app.conversionThermalState.value?.phase == ThermalPhase.COOLING }
+                // Wait for the longer backoff so this catches waiting until the next runner pass.
+                waitFor { app.conversionThermalState.value?.remainingSeconds?.let { it in 85..89 } == true }
+                app.conversionRepository.remove(id)
+                waitFor(timeoutMillis = 5000) { !app.conversionServiceRunning.value }
+                assertNull(app.conversionThermalState.value)
+                assertNull(app.conversionRepository.find(id))
+                assertNull(runBlocking { app.database.historyDao().byTask(id) })
+                assertFalse(shell("dumpsys activity services ${app.packageName}").contains("isForeground=true"))
             }
         } finally { shell("cmd thermalservice reset") }
     }

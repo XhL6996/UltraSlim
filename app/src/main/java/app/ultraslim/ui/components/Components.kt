@@ -133,7 +133,7 @@ fun StatsCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        if (stats.totalSavedBytes >= 0) "累计相册瘦身减负" else "累计体积净变化",
+                        if (stats.totalSavedBytes >= 0) "累计压缩减少" else "成品累计增加",
                         style = MaterialTheme.typography.labelMedium,
                         color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.75f),
                     )
@@ -143,10 +143,10 @@ fun StatsCard(
                         style = MaterialTheme.typography.headlineLarge,
                         fontWeight = FontWeight.Bold,
                     )
-                    if (stats.countDone > 0 && stats.equivalentPhotosSaved > 0) {
+                    if (stats.countDone > 0) {
                         Spacer(Modifier.height(2.dp))
                         Text(
-                            "相当于为手机多腾出 ~${stats.equivalentPhotosSaved} 张原图空间",
+                            "仅比较原图与成品体积；保留原图时不会释放对应空间",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f),
                         )
@@ -191,7 +191,7 @@ fun StatsCard(
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
                         )
                         Text(
-                            "瘦身后 ${formatBytes(stats.totalOutputBytes)}",
+                            "成品合计 ${formatBytes(stats.totalOutputBytes)}",
                             style = MaterialTheme.typography.labelSmall,
                             fontWeight = FontWeight.Medium,
                             color = MaterialTheme.colorScheme.onPrimaryContainer,
@@ -209,7 +209,7 @@ fun StatsCard(
                 horizontalArrangement = Arrangement.SpaceBetween,
             ) {
                 Column {
-                    Text("已瘦身照片", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
+                    Text("已转换照片", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f))
                     Text("${stats.countDone} 张", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
                 }
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {

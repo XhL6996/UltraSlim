@@ -26,7 +26,7 @@ def generated(path):
 
 def candidates():
     result = subprocess.run(["git", "rev-parse", "--show-toplevel"], cwd=ROOT,
-                            capture_output=True, text=True)
+                            capture_output=True, text=True, encoding="utf-8")
     if result.returncode == 0 and Path(result.stdout.strip()).resolve() == ROOT:
         raw = subprocess.check_output(
             ["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"], cwd=ROOT)

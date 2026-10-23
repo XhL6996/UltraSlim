@@ -21,6 +21,7 @@ class UltraSlimApp : Application() {
     internal val galleryPublicationRunning = kotlinx.coroutines.flow.MutableStateFlow(false)
     internal val galleryPublishingAllowed = kotlinx.coroutines.flow.MutableStateFlow(false)
     internal val conversionServiceRunning = kotlinx.coroutines.flow.MutableStateFlow(false)
+    internal val conversionThermalState = kotlinx.coroutines.flow.MutableStateFlow<app.ultraslim.convert.ConversionThermalState?>(null)
 
     private val replacementRecovery = kotlinx.coroutines.CompletableDeferred<Unit>()
     suspend fun awaitReplacementRecovery() = replacementRecovery.await()
@@ -93,6 +94,7 @@ class UltraSlimApp : Application() {
                     if(file.lastModified() < cutoff && file.path !in referenced && uri !in referenced) file.delete()
                 }
             }
+            app.ultraslim.convert.InputMetadataStore.cleanUnreferenced(this@UltraSlimApp, referenced, cutoff)
             cleanStaleOutputs()
         }
     }

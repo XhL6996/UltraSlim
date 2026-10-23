@@ -250,7 +250,8 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replace
                     .navigationBarsPadding()
                     .padding(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 12.dp),
             ) {
-                if (state.isConverting || importing || scanning) {
+                val thermal = state.thermalState
+                if (state.isConverting || importing || scanning || thermal != null) {
                     if (state.isConverting && state.batchTotal > 0) {
                         Text("已处理 ${state.batchProcessed} / ${state.batchTotal} 张", Modifier.testTag("batch-progress-label"),
                             style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -262,15 +263,20 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replace
                     Row(Modifier.fillMaxWidth().padding(bottom = 8.dp).testTag("conversion-status"),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                        CircularProgressIndicator(Modifier.size(24.dp).testTag("conversion-spinner"), strokeWidth = 2.dp)
+                        if (thermal != null) {
+                            Icon(Icons.Rounded.PauseCircle, null, Modifier.size(24.dp).testTag("conversion-thermal-status"))
+                        } else {
+                            CircularProgressIndicator(Modifier.size(24.dp).testTag("conversion-spinner"), strokeWidth = 2.dp)
+                        }
                         Text(when {
                             importing -> importProgress.ifBlank { "正在检查导入的照片…" }
                             scanning -> scanProgress.ifBlank { "正在检查照片…" }
                             stopping -> "当前照片处理完成后停止"
+                            thermal != null -> thermal.message
                             else -> state.queue.firstOrNull { it.status == QueueStatus.CONVERTING }?.let { "正在处理：${it.displayName}" }
                                 ?: "正在准备或等待继续…"
                         }, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall,
-                            maxLines = 2, overflow = TextOverflow.Ellipsis)
+                            maxLines = if (thermal != null) 4 else 2, overflow = TextOverflow.Ellipsis)
                     }
                 }
                 val mode = when {
@@ -300,7 +306,7 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replace
                                 HomeAction.Converting -> {
                                     Icon(Icons.Rounded.Stop, null, Modifier.size(20.dp))
                                     Spacer(Modifier.width(8.dp))
-                                    Text("停止转换")
+                                    Text(if (thermal?.phase == ThermalPhase.COOLING) "停止等待" else "停止转换")
                                 }
                                 HomeAction.Stopping -> {
                                     Icon(Icons.Rounded.Stop, null, Modifier.size(20.dp))
@@ -310,7 +316,8 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replace
                                 HomeAction.Ready -> {
                                     Icon(Icons.Rounded.Compress, null, Modifier.size(20.dp))
                                     Spacer(Modifier.width(8.dp))
-                                    Text("转换 ${state.convertibleCount} 张照片")
+                                    Text(if (thermal?.phase == ThermalPhase.PAUSED) "继续转换 ${state.convertibleCount} 张照片"
+                                        else "转换 ${state.convertibleCount} 张照片")
                                 }
                                 HomeAction.Done -> {
                                     Icon(Icons.Rounded.Compress, null, Modifier.size(20.dp))
@@ -649,7 +656,8 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replace
                     Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(20.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)) {
                         Text("本次参数", style = MaterialTheme.typography.headlineSmall)
-                        Text(if (state.isConverting) "转换中 · 参数已锁定" else "选择输出方案，随时开始转换",
+                        Text(if (state.thermalState?.phase == ThermalPhase.COOLING) "等待系统解除热限制 · 参数已锁定"
+                            else if (state.isConverting) "转换中 · 参数已锁定" else "选择输出方案，随时开始转换",
                             style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         ConversionOptionsPanel(state.defaults, callbacks, enabled = !state.isConverting)
                     }

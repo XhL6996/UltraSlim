@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.Build
+import android.os.SystemClock
 import androidx.work.ForegroundInfo
 import androidx.core.content.ContextCompat
 import app.ultraslim.UltraSlimApp
@@ -17,6 +18,7 @@ class ConversionService : Service() {
         /** Call while the initiating activity is visible, after its batch has been persisted. */
         fun start(app: UltraSlimApp, batchId: String) {
             check(app.conversionServiceRunning.compareAndSet(false, true)) { "已有转换任务正在运行" }
+            app.conversionThermalState.value = null
             try {
                 ContextCompat.startForegroundService(app,
                     Intent(app, ConversionService::class.java).putExtra(ConversionWorker.KEY_BATCH, batchId))
@@ -69,18 +71,56 @@ class ConversionService : Service() {
                 app.conversionMutex.withLock {
                     acquireWakeLock()
                     var attempt = 0
+                    var coolingStartedAt = 0L
                     while (true) {
                         when (runner.run(id, attempt)) {
-                            ConversionRunner.Outcome.COMPLETE, ConversionRunner.Outcome.FAILED -> break
+                            ConversionRunner.Outcome.COMPLETE, ConversionRunner.Outcome.FAILED,
+                            ConversionRunner.Outcome.PAUSED -> break
                             ConversionRunner.Outcome.COOLING -> {
                                 // Keep the foreground service alive: do not restart it from the background.
                                 releaseWakeLock()
-                                val info = runner.createForegroundInfo(0, "设备温度较高，等待降温", "降温后自动继续，可返回应用停止", true)
-                                promote(info)
-                                // Check cancellation each second while retaining bounded exponential backoff.
-                                repeat((30L shl attempt.coerceAtMost(7)).toInt()) {
+                                attempt = runner.coolingAttempt
+                                if (attempt == 0) coolingStartedAt = SystemClock.elapsedRealtime()
+                                val deadline = coolingStartedAt + ConversionThermalPolicy.remainingWaitSeconds(0) * 1000L
+                                val retryAt = minOf(deadline, SystemClock.elapsedRealtime() +
+                                    ConversionThermalPolicy.retryDelaySeconds(attempt) * 1000L)
+                                var nextThermalCheck = SystemClock.elapsedRealtime() +
+                                    ConversionThermalPolicy.CHECK_INTERVAL_SECONDS * 1000L
+                                while (SystemClock.elapsedRealtime() < retryAt) {
+                                    val remaining = ((deadline - SystemClock.elapsedRealtime() + 999) / 1000).toInt().coerceAtLeast(0)
+                                    app.conversionThermalState.value?.let { state ->
+                                        val updated = state.copy(remainingSeconds = remaining)
+                                        app.conversionThermalState.value = updated
+                                        promote(runner.createForegroundInfo(0, "等待系统解除热限制", updated.message, false))
+                                    }
                                     delay(1000)
-                                    if (app.database.taskDao().batch(id)?.cancelled != false) return@withLock
+                                    // Pending rows can be removed while cooling. Do not leave an
+                                    // empty batch running until its backoff/deadline expires.
+                                    val batchItems = app.conversionRepository.queue.value.filter { it.batchId == id }
+                                    if (batchItems.none { it.status != QueueStatus.DONE && it.status != QueueStatus.SKIPPED }) {
+                                        app.conversionThermalState.value = null
+                                        return@withLock
+                                    }
+                                    if (app.database.taskDao().batch(id)?.cancelled != false) {
+                                        val pendingIds = batchItems.map { it.id }
+                                        app.conversionRepository.updateAll(pendingIds) {
+                                            if (it.status == QueueStatus.READY && it.error?.contains("等待降温") == true)
+                                                it.copy(error = "已停止等待降温，请稍后点击继续；原图保留") else it
+                                        }
+                                        return@withLock
+                                    }
+                                    if (SystemClock.elapsedRealtime() >= nextThermalCheck) {
+                                        val status = runner.currentThermalStatus()
+                                        if (!ConversionThermalPolicy.requiresCooling(status)) break
+                                        app.conversionThermalState.value = app.conversionThermalState.value?.copy(status = status)
+                                        nextThermalCheck = SystemClock.elapsedRealtime() +
+                                            ConversionThermalPolicy.CHECK_INTERVAL_SECONDS * 1000L
+                                    }
+                                }
+                                if (SystemClock.elapsedRealtime() >= deadline &&
+                                    ConversionThermalPolicy.requiresCooling(runner.currentThermalStatus())) {
+                                    runner.pauseCooling()
+                                    break
                                 }
                                 attempt++
                                 acquireWakeLock()
@@ -112,6 +152,8 @@ class ConversionService : Service() {
                 } finally {
                     withContext(NonCancellable + Dispatchers.Main.immediate) {
                         releaseWakeLock()
+                        if (app.conversionThermalState.value?.phase == ThermalPhase.COOLING)
+                            app.conversionThermalState.value = null
                         finished = true
                         // Don't accept a new batch in the interval between stopSelf and onDestroy.
                         if (destroyed) app.conversionServiceRunning.value = false

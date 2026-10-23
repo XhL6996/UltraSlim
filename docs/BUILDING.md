@@ -73,7 +73,7 @@ python3 scripts/check_apk_alignment.py /path/to/app.apk
 "$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --verbose /path/to/signed.apk
 ```
 
-CI 需要 macOS + Android NDK + `macos-arm64` 自托管 runner 及上述工具，仅自动执行受信任的 push 和手动触发；不自动执行外部 PR 中的代码。GitHub Actions 配置见 `.github/workflows/`，Gitea 配置见 `.gitea/workflows/`，两者都调用 `scripts/verify.sh`。其它托管平台可复用该脚本，需要自行配置 runner。
+GitHub Actions 工作流目前暂缓启用，仓库没有 `.github/workflows/`。保留的 Gitea 配置位于 `.gitea/workflows/`，调用 `scripts/verify.sh`，需要 macOS + Android NDK + `macos-arm64` 自托管 runner。恢复 CI 时只执行受信任的 push 和手动触发，不自动执行外部 PR 中的代码。其它托管平台可复用该脚本，需要自行配置 runner。
 
 ## macOS 配套工具
 

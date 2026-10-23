@@ -72,3 +72,7 @@
 
 - **release signingConfig**：`app/build.gradle.kts:83` 已有 `publicRelease` 配置。
 - **wrapper 对齐**：`gradle-wrapper.properties` 已固定 9.6.0，与 AGP 9.4.1 一致。
+
+## 用户需求待评估（2026-10-23）
+
+- **视频瘦身**：已记录公开版用户需求，当前版本仍只转码照片。需单独评估视频编码/容器、HDR 与色彩元数据、音轨、动态照片关联、硬件编码可用性、耗时/发热和中断恢复，不纳入本轮照片可靠性修复，也未承诺交付日期。

@@ -20,8 +20,13 @@ class ConversionWorker(context: Context, params: WorkerParameters) : CoroutineWo
         return (applicationContext as UltraSlimApp).conversionMutex.withLock {
             when (runner.run(batch, runAttemptCount)) {
                 ConversionRunner.Outcome.COMPLETE -> Result.success()
-                ConversionRunner.Outcome.FAILED -> Result.failure()
-                ConversionRunner.Outcome.COOLING -> Result.retry()
+                ConversionRunner.Outcome.FAILED, ConversionRunner.Outcome.PAUSED -> Result.failure()
+                ConversionRunner.Outcome.COOLING -> {
+                    // Legacy WorkManager backoff can leave a queued batch looking active for hours.
+                    // Stop the legacy job and let the user resume through the direct service.
+                    runner.pauseCooling()
+                    Result.failure()
+                }
             }
         }
     }

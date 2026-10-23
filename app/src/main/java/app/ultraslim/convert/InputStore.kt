@@ -24,6 +24,7 @@ object InputStore {
         if (runCatching { context.contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }.isSuccess) return uri
         val permission = if (Build.VERSION.SDK_INT >= 33) android.Manifest.permission.READ_MEDIA_IMAGES else android.Manifest.permission.READ_EXTERNAL_STORAGE
         if (uri.authority == "media" && ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED) return uri
+        val timestamps = SourceMedia.timestamps(context, uri)
         val file = File(context.filesDir, "inputs/$id").apply { parentFile?.mkdirs() }
         try {
             context.contentResolver.openInputStream(uri)?.use { input ->
@@ -34,6 +35,7 @@ object InputStore {
                     check(size > 0) { "图片为空" }
                 }
             } ?: error("无法读取图片，请重新授权")
+            InputMetadataStore.write(context, id, timestamps)
             return FileProvider.getUriForFile(context, "${context.packageName}.files", file)
         } catch(e: Exception) { file.delete(); throw e }
     }

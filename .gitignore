@@ -21,6 +21,8 @@ keystore.properties
 # Build caches and generated artifacts
 .gradle/
 .kotlin/
+__pycache__/
+*.pyc
 .externalNativeBuild/
 .cxx/
 /build/

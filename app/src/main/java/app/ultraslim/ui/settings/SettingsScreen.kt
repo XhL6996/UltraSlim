@@ -1,6 +1,9 @@
 package app.ultraslim.ui.settings
 
-import android.content.pm.PackageManager
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -51,17 +54,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         )
     }
 
-    val versionName = remember {
-        runCatching {
-            val pm = context.packageManager
-            if (Build.VERSION.SDK_INT >= 33) {
-                pm.getPackageInfo(context.packageName, PackageManager.PackageInfoFlags.of(0)).versionName
-            } else {
-                @Suppress("DEPRECATION")
-                pm.getPackageInfo(context.packageName, 0).versionName
-            }
-        }.getOrNull().orEmpty().ifBlank { "1.0" }
-    }
+    val versionName = remember { installedVersion(context) }
     val nativeVersion = remember {
         runCatching { UltraHdrBridge.nativeVersion() }.getOrDefault("不可用")
     }
@@ -170,6 +163,19 @@ fun SettingsScreen(onBack: () -> Unit) {
                     Text("UltraSlim", style = MaterialTheme.typography.titleLarge)
                     Text("版本 $versionName", style = MaterialTheme.typography.bodyMedium)
                     Text(nativeVersion, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("反馈问题时可复制设备、版本和配置信息，不包含照片或文件路径。",
+                        style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        TextButton(onClick = {
+                            context.getSystemService(ClipboardManager::class.java)
+                                .setPrimaryClip(ClipData.newPlainText("UltraSlim 诊断信息", feedbackInfo(context, defaults, nativeVersion)))
+                            scope.launch { snackbar.showSnackbar("诊断信息已复制，请附上出错提示与复现步骤") }
+                        }) { Text("复制诊断信息") }
+                        TextButton(onClick = {
+                            runCatching { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(FEEDBACK_URL))) }
+                                .onFailure { scope.launch { snackbar.showSnackbar("无法打开浏览器，请到 GitHub 的 UltraSlim 仓库反馈") } }
+                        }) { Text("问题反馈") }
+                    }
                     TextButton(onClick = { showNotices = true }) { Text("开源许可与声明") }
                 }
             }

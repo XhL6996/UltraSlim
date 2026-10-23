@@ -152,35 +152,41 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
     /** 原图 → MediaStore URI 的解析缓存（含逐条查询）；Default 线程解析，选择时只查表。 */
     private val trashableCache = MutableStateFlow<Map<Long, Uri>>(emptyMap())
     val trashableOriginals: StateFlow<Map<Long, Uri>> = trashableCache.asStateFlow()
-    private val trashableInFlight = java.util.concurrent.ConcurrentHashMap.newKeySet<Long>()
+    private val originalUriCache = OriginalUriCache()
+
+    private fun publishTrashableCache() {
+        trashableCache.value = originalUriCache.snapshot().mapValues { Uri.parse(it.value) }
+    }
 
     /** 补齐缺缓存条目的解析；页面加载或筛选变化时调用，重复调用只解析增量。 */
     fun ensureTrashableResolved(items: List<HistoryEntity>) {
-        // 在飞守卫：同一批 id 未完成解析前不重复派活，避免列表刷新时重复 provider 查询。
-        val missing = items.map { it.id to it.inputUri }
-            .filter { (id, _) -> id !in trashableCache.value && trashableInFlight.add(id) }
+        val missing = originalUriCache.plan(items.map { OriginalUriCache.Source(it.id, it.inputUri) })
+        // Relinked records must stop offering the old original immediately, before the new query finishes.
+        publishTrashableCache()
         if (missing.isEmpty()) return
-        viewModelScope.launch(kotlinx.coroutines.Dispatchers.Default) {
+        viewModelScope.launch {
             try {
-                // 整页一次批量查询替代逐条 provider round-trip（100 条/页原本约 200 次）。
-                val byUri = MediaStoreTrashHelper.originalStates(app, missing.map { Uri.parse(it.second) })
-                val resolved = missing.mapNotNull { (id, uri) ->
-                    val parsed = Uri.parse(uri)
-                    if (byUri[parsed] != MediaStoreTrashHelper.OriginalState.PRESENT) null
-                    else MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, parsed)?.let { id to it }
+                val resolved = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                    val byUri = MediaStoreTrashHelper.originalStates(app, missing.map { Uri.parse(it.uri) })
+                    missing.mapNotNull { source ->
+                        val parsed = Uri.parse(source.uri)
+                        if (byUri[parsed] != MediaStoreTrashHelper.OriginalState.PRESENT) null
+                        else MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, parsed)?.let { source to it.toString() }
+                    }.toMap()
                 }
-                trashableCache.update { it + resolved }
+                originalUriCache.complete(missing, resolved)
+                publishTrashableCache()
             } finally {
-                trashableInFlight.removeAll(missing.mapTo(mutableSetOf()) { it.first })
+                originalUriCache.abandon(missing)
             }
         }
     }
 
-    private fun trashableOriginalUris(ids: Set<Long>): List<Uri> =
-        ids.mapNotNull { trashableCache.value[it] }
-
     suspend fun requestTrashSelected(ids: Set<Long>): IntentSender? {
-        val uris = trashableOriginalUris(ids)
+        // The cache only controls presentation. Destructive requests use the current persisted link.
+        val rows = ids.chunked(500).flatMap { dao.byIds(it) }
+        ensureTrashableResolved(rows)
+        val uris = rows.map { Uri.parse(it.inputUri) }.distinct()
         if (uris.isEmpty()) {
             _events.tryEmit("所选照片的原图不在系统相册管理范围内")
             return null
@@ -193,7 +199,8 @@ class HistoryViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     private var pendingTrashUris = emptySet<Uri>()
     fun onSelectedOriginalsTrashed(count: Int) {
-        trashableCache.update { cache -> cache.filterValues { it !in pendingTrashUris } }
+        originalUriCache.removeUris(pendingTrashUris.mapTo(mutableSetOf()) { it.toString() })
+        publishTrashableCache()
         _events.tryEmit("已将 ${pendingTrashUris.size} 张原图移至系统相册回收站（恢复期限以系统回收站为准）")
     }
 

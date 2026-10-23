@@ -4,18 +4,45 @@ import android.content.Context
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
+import androidx.exifinterface.media.ExifInterface
 
 /** Publication metadata is read from the original, not from conversion/import wall-clock time. */
-internal data class SourceMedia(val volume: String, val relativePath: String, val dateTaken: Long?) {
+internal data class SourceMedia(val volume: String, val relativePath: String, val dateTaken: Long?, val modifiedAt: Long? = null) {
     companion object {
-        fun captureTime(context: Context, source: Uri): Long? {
-            for (column in listOf(MediaStore.Images.Media.DATE_TAKEN, android.provider.DocumentsContract.Document.COLUMN_LAST_MODIFIED)) {
-                val value = runCatching { context.contentResolver.query(source, arrayOf(column), null, null, null)?.use {
-                    if (it.moveToFirst() && !it.isNull(0)) it.getLong(0).takeIf { time -> time > 0 } else null
-                } }.getOrNull()
-                if (value != null) return value
+        fun captureTime(context: Context, source: Uri): Long? = timestamps(context, source).dateTaken
+
+        private fun queryTime(context: Context, source: Uri, column: String): Long? = runCatching {
+            context.contentResolver.query(source, arrayOf(column), null, null, null)?.use { cursor ->
+                val index = cursor.getColumnIndex(column)
+                if (index >= 0 && cursor.moveToFirst() && !cursor.isNull(index)) cursor.getLong(index).takeIf { it > 0 }
+                else null
             }
-            return null
+        }.getOrNull()
+
+        private fun exifCaptureTime(context: Context, source: Uri): Long? = runCatching {
+            context.contentResolver.openInputStream(source)?.use { input ->
+                val exif = ExifInterface(input)
+                ExifCaptureTime.parse(exif.getAttribute(ExifInterface.TAG_DATETIME_ORIGINAL),
+                    exif.getAttribute(ExifInterface.TAG_OFFSET_TIME_ORIGINAL),
+                    exif.getAttribute(ExifInterface.TAG_SUBSEC_TIME_ORIGINAL))
+            }
+        }.getOrNull()
+
+        fun timestamps(context: Context, source: Uri): SourceTimestamps {
+            InputMetadataStore.read(context, source)?.let { return it }
+            val canonical = MediaStoreTrashHelper.resolveToMediaStoreImageUri(context, source)
+            val target = canonical ?: source
+            val taken = queryTime(context, target, MediaStore.Images.Media.DATE_TAKEN) ?: exifCaptureTime(context, source)
+            val modified = if (canonical != null) queryTime(context, target, MediaStore.MediaColumns.DATE_MODIFIED)
+                ?.takeIf { it <= Long.MAX_VALUE / 1000 }?.times(1000)
+            else queryTime(context, source, android.provider.DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+            val fileTime = modified ?: runCatching {
+                context.contentResolver.openFileDescriptor(source, "r")?.use {
+                    android.system.Os.fstat(it.fileDescriptor).st_mtime.takeIf { seconds -> seconds > 0 && seconds <= Long.MAX_VALUE / 1000 }?.times(1000)
+                }
+            }.getOrNull()
+            // DATE_ADDED and file modification time are not capture time.
+            return SourceTimestamps(taken, fileTime)
         }
 
         fun read(context: Context, source: Uri): SourceMedia? {
@@ -24,15 +51,15 @@ internal data class SourceMedia(val volume: String, val relativePath: String, va
             return runCatching {
                 context.contentResolver.query(uri, arrayOf(MediaStore.MediaColumns.VOLUME_NAME,
                     MediaStore.MediaColumns.RELATIVE_PATH, MediaStore.Images.Media.DATE_TAKEN,
-                    MediaStore.MediaColumns.DATE_MODIFIED, MediaStore.MediaColumns.DATE_ADDED), null, null, null)?.use { c ->
+                    MediaStore.MediaColumns.DATE_MODIFIED), null, null, null)?.use { c ->
                     if (!c.moveToFirst()) return@use null
                     val volume = c.getString(0) ?: return@use null
                     val path = c.getString(1) ?: return@use null
                     if (volume in setOf("external", "internal") || path.isBlank() || path.startsWith('/') ||
                         path.split('/').any { it == ".." || it == "." }) return@use null
-                    val date = c.getLong(2).takeIf { it > 0 } ?: c.getLong(3).takeIf { it > 0 }?.times(1000)
-                        ?: c.getLong(4).takeIf { it > 0 }?.times(1000)
-                    SourceMedia(volume, path.trimEnd('/') + "/", date)
+                    val date = c.getLong(2).takeIf { it > 0 } ?: exifCaptureTime(context, source)
+                    val modified = c.getLong(3).takeIf { it > 0 && it <= Long.MAX_VALUE / 1000 }?.times(1000)
+                    SourceMedia(volume, path.trimEnd('/') + "/", date, modified)
                 }
             }.getOrNull()
         }

@@ -62,10 +62,9 @@ android {
         minSdk = 26
         targetSdk = 36
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
-        // 首个公开发行版。此前的 1.x 构建均为 beta；versionCode 必须继续递增，
-        // 否则已装 beta（22）的设备无法覆盖升级。
-        versionCode = 23
-        versionName = "1.0.0"
+        // 公开发行版仍沿用测试期递增的 versionCode，确保覆盖升级。
+        versionCode = 24
+        versionName = "1.0.1"
 
         // App 自身只有中文文案；剥掉 androidx/Compose 带入的其他语言资源。
         // AGP 9 起 resourceConfigurations 已弃用（Gradle 9.6 有显式警告）。
@@ -164,6 +163,7 @@ dependencies {
     androidTestImplementation(libs.androidx.test.ext.junit)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.core.splashscreen)
+    implementation(libs.androidx.exifinterface)
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
 

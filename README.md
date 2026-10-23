@@ -68,7 +68,7 @@ gradle/               Gradle Wrapper 与依赖版本目录
 
 问题报告、测试样本、文档和代码贡献都欢迎。提出问题时请附手机型号（可只写代号）、Android 版本、源文件/输出格式和复现步骤。分享测试图片前先确认可公开，并清除不希望公开的位置等元数据。开发约定见 [CONTRIBUTING.md](CONTRIBUTING.md)，安全问题的报告方式见 [SECURITY.md](SECURITY.md)。
 
-主仓库托管在 GitHub。构建完整验证需要 macOS + Android NDK 环境，CI 以自托管运行器为主：GitHub Actions 工作流只在维护者自托管 runner 上执行，Gitea 配置保留在 `.gitea/`。外部贡献者可在本机运行 `scripts/verify.sh`，需要自行准备工具链。
+主仓库托管在 GitHub。GitHub Actions 工作流目前暂缓启用，`.github/` 仅提供问题与 PR 模板；Gitea 自托管配置保留在 `.gitea/`。完整验证可在本机运行 `scripts/verify.sh`，需要自行准备构建文档中的工具链。
 
 ## 许可证
 
