@@ -33,6 +33,7 @@
 - 正式 APK 在 Mac 使用原正式密钥签名，证书 SHA-256 为 `e54990c754cbede4e7ab638d800a33b893f1d2f5f29bbacd11528905419a4d39`。签名前后全部原 ZIP 条目逐字节一致；签名、包名、递增版本和全部 3 个原生库的 16 KB LOAD/RELRO/ZIP 对齐校验通过。
 - APK SHA-256：`ee27345a260ec343ff633c576643bb7e4bb1f26534c110d547f1a164ca8f8825`。发行日志保存在忽略目录 `build/release-1.0.2/`。
 - 同一只读模拟器中安装正式 1.0.1，再用正式 1.0.2 覆盖安装成功；启动 MainActivity 返回 `Status: ok`，系统包信息为 `app.ultraslim` / 25 / 1.0.2。此项验证安装签名与启动，不等同于真实用户历史数据升级验收。
+- GitHub [v1.0.2](https://github.com/linyusenzz/UltraSlim/releases/tag/v1.0.2) 已设为最新正式版，tag 对应 `b18f1dc6e83ca39c8b32145baf32f8b9a88e052c`。APK、源码 ZIP、许可与校验清单共 4 个附件的远端大小和 SHA-256 均与本地一致；从公开下载地址重新获取 APK 和 SHA256SUMS 后，散列、签名、包名与版本再次通过。主分支发行基线更新为 25 / 1.0.2，供下一版检查使用。
 
 ## 验证边界
 
