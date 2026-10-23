@@ -46,9 +46,14 @@ class AdaptiveUiTest {
         compose.waitForIdle()
     }
     @Before fun guard() {
-        Assume.assumeTrue(android.os.Build.FINGERPRINT.contains("generic") || android.os.Build.MODEL.contains("sdk"))
+        Assume.assumeTrue(deviceUiTestsAllowed())
         emulatorVerified = true
-        originalDefaults = runBlocking { app.settingsRepository.defaults.first() }
+        originalDefaults = runBlocking {
+            app.conversionRepository.awaitReady()
+            app.conversionRepository.clearAll()
+            app.conversionRepository.flush()
+            app.settingsRepository.defaults.first()
+        }
     }
     @After fun cleanup() {
         if (!emulatorVerified) return
@@ -120,7 +125,8 @@ class AdaptiveUiTest {
     resize(360, 840)
     shell("settings put system font_scale 2.0")
     compose.waitUntil(10_000) { compose.activity.resources.configuration.fontScale >= 1.9f }
-    compose.onNodeWithText("选择照片").assertIsDisplayed()
+    compose.waitUntil(10_000) { compose.onAllNodesWithText("选择照片").fetchSemanticsNodes().isNotEmpty() }
+    compose.onNodeWithText("选择照片").performScrollTo().assertIsDisplayed()
     capture("adaptive-large-font")
     compose.onNodeWithContentDescription("设置").performClick()
     compose.onNodeWithText("JPEG").performScrollTo().assertIsDisplayed().performClick()
@@ -132,21 +138,22 @@ class AdaptiveUiTest {
     capture("adaptive-landscape")
 }
 @Test fun reportedFoldingFeatureReflowsProductionScreens() {
-    resize(1000, 1000)
+    // Leave room for physical-device cutouts and the expanded settings app bar above the hinge.
+    resize(1000, 1400)
     windowLayout.overrideWindowLayoutInfo(TestWindowLayoutInfo(listOf(FoldingFeature(
         activity = compose.activity, size = 32, state = State.HALF_OPENED, orientation = Orientation.HORIZONTAL))))
     compose.waitUntil(10_000) {
-        compose.onNodeWithTag("workspace-primary").fetchSemanticsNode().boundsInRoot.bottom <= 484
+        compose.onNodeWithTag("workspace-primary").fetchSemanticsNode().boundsInRoot.bottom <= 684
     }
-    assertTrue(compose.onNodeWithTag("workspace-secondary").fetchSemanticsNode().boundsInRoot.top >= 516)
+    assertTrue(compose.onNodeWithTag("workspace-secondary").fetchSemanticsNode().boundsInRoot.top >= 716)
     capture("adaptive-tabletop-home")
     compose.onNodeWithContentDescription("设置").performClick()
-    compose.waitUntil(10_000) { compose.onNodeWithTag("workspace-primary").fetchSemanticsNode().boundsInRoot.bottom <= 484 }
-    assertTrue(compose.onNodeWithTag("workspace-secondary").fetchSemanticsNode().boundsInRoot.top >= 516)
+    compose.waitUntil(10_000) { compose.onNodeWithTag("workspace-primary").fetchSemanticsNode().boundsInRoot.bottom <= 684 }
+    assertTrue(compose.onNodeWithTag("workspace-secondary").fetchSemanticsNode().boundsInRoot.top >= 716)
     capture("adaptive-tabletop-settings")
     compose.onNodeWithContentDescription("返回").performClick()
     compose.onNodeWithText("历史", useUnmergedTree = true).performClick()
-    compose.waitUntil(10_000) { compose.onNodeWithTag("history-list").fetchSemanticsNode().boundsInRoot.bottom <= 484 }
+    compose.waitUntil(10_000) { compose.onNodeWithTag("history-list").fetchSemanticsNode().boundsInRoot.bottom <= 684 }
     capture("adaptive-tabletop-history")
     windowLayout.overrideWindowLayoutInfo(TestWindowLayoutInfo(listOf(FoldingFeature(
         activity = compose.activity, size = 32, state = State.HALF_OPENED, orientation = Orientation.VERTICAL))))

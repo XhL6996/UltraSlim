@@ -28,7 +28,8 @@ class ImportActionsUiTest {
     private var albums = 0
     private var folders = 0
     @Before fun setup() {
-        compose.activity.runOnUiThread {
+        compose.waitForIdle()
+        compose.runOnUiThread {
             compose.activity.setContent {
                 CompositionLocalProvider(LocalDensity provides Density(1f, if (largeText) 2f else 1f)) {
                     AppTheme {

@@ -24,14 +24,36 @@ class FolderImportTest {
     private val store = ViewModelStore()
     private lateinit var vm: HomeViewModel
     private var originalIds = emptySet<String>()
+    private fun deleteTestPhotos(uris: List<Uri>) {
+        uris.chunked(400).forEach { group ->
+            app.contentResolver.delete(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                "_id IN (${group.joinToString(",") { "?" }})",
+                group.map { android.content.ContentUris.parseId(it).toString() }.toTypedArray())
+        }
+    }
     @Before fun setup() = runBlocking {
-        Assume.assumeTrue(android.os.Build.MODEL.contains("sdk"))
+        Assume.assumeTrue(deviceUiTestsAllowed())
+        // Remove only this QA package's temporary albums left by an interrupted test run.
+        val stale = app.contentResolver.query(android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+            arrayOf("_id"), "relative_path LIKE ? AND owner_package_name = ?",
+            arrayOf("Pictures/FolderImportTest-%/", app.packageName), null)!!.use { cursor ->
+            buildList { while (cursor.moveToNext()) add(android.content.ContentUris.withAppendedId(
+                android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cursor.getLong(0))) }
+        }
+        deleteTestPhotos(stale)
         // Grant through the test provider UID, just as DocumentsUI grants the chosen tree.
         instrumentation.uiAutomation.executeShellCommand(
             "am start -W -n ${instrumentation.context.packageName}/app.ultraslim.FolderGrantActivity --es target ${app.packageName}"
         ).use { android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes() }
         app.contentResolver.takePersistableUriPermission(tree, Intent.FLAG_GRANT_READ_URI_PERMISSION)
         instrumentation.uiAutomation.dropShellPermissionIdentity()
+        if (!android.os.Build.MODEL.contains("sdk")) {
+            // Import tests are foreground work; physical-device battery policies may freeze
+            // a headless instrumentation process before a large folder has finished probing.
+            instrumentation.uiAutomation.executeShellCommand(
+                "am start -W -n ${app.packageName}/app.ultraslim.MainActivity"
+            ).use { android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes() }
+        }
         app.conversionRepository.awaitReady()
         originalIds = app.conversionRepository.queue.value.map { it.id }.toSet()
         vm = withContext(Dispatchers.Main) { HomeViewModel(app).also { store.put("folder", it) } }
@@ -49,10 +71,10 @@ class FolderImportTest {
     }
     private suspend fun import(recursive: Boolean) = coroutineScope {
         val result = async(start = CoroutineStart.UNDISPATCHED) {
-            withTimeout(120_000) { vm.events.first { it is HomeEvent.Info && it.message.startsWith("已导入") } as HomeEvent.Info }
+            withTimeout(300_000) { vm.events.first { it is HomeEvent.Info } as HomeEvent.Info }
         }
         withContext(Dispatchers.Main) { vm.importFolder(tree, recursive) }
-        result.await().message
+        result.await().message.also { assertTrue(it, it.startsWith("已导入")) }
     }
     @Test fun recursivelyImportsBeyondOneThousandAndDeduplicatesCycles() = runBlocking {
         val shallow = FolderImages.images(app.contentResolver, tree, false).toList()
@@ -85,16 +107,17 @@ class FolderImportTest {
                     })!!
                 created += uri
                 resolver.openOutputStream(uri)!!.use { it.write(jpeg) }
-                resolver.update(uri, android.content.ContentValues().apply {
+                // Android only promotes supported image rows through their item URI.
+                assertEquals(1, resolver.update(uri, android.content.ContentValues().apply {
                     put(android.provider.MediaStore.Images.Media.IS_PENDING, 0)
-                }, null, null)
+                }, null, null))
             }
             val bucket = resolver.query(created.first(), arrayOf(android.provider.MediaStore.Images.Media.BUCKET_ID), null, null, null)!!.use {
                 check(it.moveToFirst()); it.getString(0)
             }
             val message = coroutineScope {
                 val result = async(start = CoroutineStart.UNDISPATCHED) {
-                    withTimeout(120_000) { vm.events.first { it is HomeEvent.Info && it.message.startsWith("已导入") } as HomeEvent.Info }
+                    withTimeout(300_000) { vm.events.first { it is HomeEvent.Info } as HomeEvent.Info }
                 }
                 withContext(Dispatchers.Main) { vm.importAlbum(HomeViewModel.AlbumBucket(bucket, "test", 1001, created.first().toString(), 0)) }
                 result.await().message
@@ -105,7 +128,7 @@ class FolderImportTest {
             assertEquals((0..1000).map { "$it.jpg" }.toSet(), added.map { it.displayName }.toSet())
             assertTrue("Album cursor must retain each source's size", added.all { it.sizeBytes == jpeg.size.toLong() })
             assertTrue(added.all { it.status == QueueStatus.READY && it.probe?.isSuccess == true })
-        } finally { created.forEach { resolver.delete(it, null, null) } }
+        } finally { deleteTestPhotos(created) }
     }
     @Test fun cancellationKeepsCommittedBatchesAndDoesNotImportTheWholeTree() = runBlocking {
         withContext(Dispatchers.Main) { vm.importFolder(tree) }

@@ -24,7 +24,9 @@ class GestureRegressionTest {
     @get:Rule val compose = createAndroidComposeRule<MainActivity>()
     private var commits = 0
     private fun row(right: Boolean = false, enabled: Boolean = true) {
-        compose.activity.runOnUiThread {
+        // Finish the activity's initial composition before replacing its content.
+        compose.waitForIdle()
+        compose.runOnUiThread {
             compose.activity.setContent {
                 AppTheme {
                     CommitSwipeRow(Modifier.width(320.dp).testTag("row"), enabled, right,
@@ -35,6 +37,9 @@ class GestureRegressionTest {
             }
         }
         compose.waitForIdle()
+        compose.waitUntil(5000) {
+            compose.onAllNodesWithTag("row").fetchSemanticsNodes(atLeastOneRootRequired = false).isNotEmpty()
+        }
     }
     @Test fun crossingThresholdThenCancellingNeverCommits() {
         row()
@@ -72,7 +77,8 @@ class GestureRegressionTest {
     }
     @Test fun upwardDiagonalScrollDoesNotRemoveRows() {
         var scrolled = false
-        compose.activity.runOnUiThread {
+        compose.waitForIdle()
+        compose.runOnUiThread {
             compose.activity.setContent {
                 val state = rememberLazyListState()
                 scrolled = state.firstVisibleItemScrollOffset > 0 || state.firstVisibleItemIndex > 0
@@ -85,6 +91,10 @@ class GestureRegressionTest {
                 }
             }
         }
+        compose.waitForIdle()
+        compose.waitUntil(5000) {
+            compose.onAllNodesWithTag("list").fetchSemanticsNodes(atLeastOneRootRequired = false).isNotEmpty()
+        }
         compose.onNodeWithTag("list").performTouchInput {
             swipe(Offset(width * .7f, height * .85f), Offset(width * .5f, height * .2f), 400)
         }
@@ -93,7 +103,13 @@ class GestureRegressionTest {
     @Test fun autoReplacementRequiresConfirmationAndCanBeDisabled() {
         val app = compose.activity.application as UltraSlimApp
         runBlocking { app.settingsRepository.setAutoReplaceOriginals(false) }
-        compose.activity.runOnUiThread { compose.activity.setContent { AppTheme { SettingsScreen {} } } }
+        compose.waitForIdle()
+        compose.runOnUiThread { compose.activity.setContent { AppTheme { SettingsScreen {} } } }
+        compose.waitForIdle()
+        compose.waitUntil(5000) {
+            compose.onAllNodesWithText("校验后自动替换原图")
+                .fetchSemanticsNodes(atLeastOneRootRequired = false).isNotEmpty()
+        }
         val option = compose.onNodeWithText("校验后自动替换原图")
         option.performScrollTo().assertIsOff().performClick()
         compose.onNodeWithText("开启校验后自动替换？").assertExists()

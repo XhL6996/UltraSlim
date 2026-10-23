@@ -25,7 +25,7 @@ class QueueActionsUiTest {
         android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes()
     }
     @Before fun setup() = runBlocking {
-        Assume.assumeTrue(android.os.Build.MODEL.contains("sdk"))
+        Assume.assumeTrue(deviceUiTestsAllowed())
         guarded = true
         shell("wm density 160")
         app.conversionRepository.awaitReady()

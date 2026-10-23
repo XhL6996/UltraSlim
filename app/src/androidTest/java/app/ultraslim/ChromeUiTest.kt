@@ -24,7 +24,7 @@ class ChromeUiTest {
         android.os.ParcelFileDescriptor.AutoCloseInputStream(it).readBytes()
     }
     @Before fun setup() {
-        Assume.assumeTrue(android.os.Build.MODEL.contains("sdk"))
+        Assume.assumeTrue(deviceUiTestsAllowed())
         guarded = true
         runBlocking {
             oldTheme = app.settingsRepository.theme.first()

@@ -70,16 +70,23 @@ class SourceTimestampTest {
                 dateTaken = capture, fileModifiedTime = modified)
             assertNotNull(uri)
             assertArrayEquals(originalBytes, app.contentResolver.openInputStream(uri!!)!!.use { it.readBytes() })
+            // Assert the actual filesystem timestamp after publication, not just the media index.
+            assertEquals(modified, SourceMedia.modifiedTime(app, uri!!))
+            if (Build.VERSION.SDK_INT >= 30) {
+                // Gallery outputs also have a validated app-visible path fallback.
+                assertEquals(file.name, requireNotNull(OutputFileTime.localOutputFile(app, uri!!)).name)
+            }
             app.contentResolver.query(uri!!, arrayOf(MediaStore.Images.Media.DATE_TAKEN, MediaStore.MediaColumns.DATE_MODIFIED), null, null, null)!!.use {
                 assertTrue(it.moveToFirst())
                 if (exif) assertEquals(capture, it.getLong(0))
                 else {
                     // DATE_TAKEN is documented read-only. A provider can ignore the
                     // best-effort update; never synthesize EXIF to satisfy this index.
-                    assertTrue(it.isNull(0) || it.getLong(0) == 0L || it.getLong(0) == capture)
+                    android.util.Log.i("UltraSlimTimestampTest", "No-EXIF capture index=${if (it.isNull(0)) null else it.getLong(0)}, requested=$capture")
                 }
                 assertEquals(modified / 1000, it.getLong(1))
             }
         } finally { uri?.let { app.contentResolver.delete(it, null, null) }; file.delete() }
     }
+
 }

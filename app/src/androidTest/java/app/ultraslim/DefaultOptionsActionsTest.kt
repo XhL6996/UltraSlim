@@ -44,7 +44,7 @@ class DefaultOptionsActionsTest {
         if (emulatorVerified) { shell("wm size reset"); shell("wm density reset") }
     }
     @Before fun setup() {
-        Assume.assumeTrue(android.os.Build.MODEL.contains("sdk"))
+        Assume.assumeTrue(deviceUiTestsAllowed())
         emulatorVerified = true
         shell("wm size 800x1200"); shell("wm density 160")
         compose.waitUntil(10_000) { compose.onRoot().fetchSemanticsNode().boundsInRoot.width.toInt() == 800 }

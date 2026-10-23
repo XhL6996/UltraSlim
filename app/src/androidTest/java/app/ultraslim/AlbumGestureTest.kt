@@ -18,6 +18,11 @@ class AlbumGestureTest {
     private val photos = mutableListOf<Uri>()
     @Before fun seed() {
         val app = compose.activity.application as UltraSlimApp
+        kotlinx.coroutines.runBlocking {
+            app.conversionRepository.awaitReady()
+            app.conversionRepository.clearAll()
+            app.conversionRepository.flush()
+        }
         InstrumentationRegistry.getInstrumentation().uiAutomation.grantRuntimePermission(app.packageName, Manifest.permission.READ_MEDIA_IMAGES)
         val image = Bitmap.createBitmap(32, 32, Bitmap.Config.ARGB_8888)
         repeat(14) { index ->
@@ -35,6 +40,7 @@ class AlbumGestureTest {
     }
     @After fun cleanup() { photos.forEach { compose.activity.contentResolver.delete(it, null, null) } }
     @Test fun scrollingAndSwitchingTabsNeverCollapsesSheetOrImportsByAccident() {
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("相册导入").fetchSemanticsNodes().isNotEmpty() }
         compose.onNodeWithText("相册导入").performScrollTo().performClick()
         compose.waitUntil(10_000) { compose.onAllNodesWithTag("album-list").fetchSemanticsNodes().isNotEmpty() }
         val before = compose.onNodeWithText("导入照片").fetchSemanticsNode().boundsInRoot.top

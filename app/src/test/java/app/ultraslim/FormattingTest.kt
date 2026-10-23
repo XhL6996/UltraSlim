@@ -6,6 +6,42 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class FormattingTest {
+    @Test fun keptFilenamesRetainNumericScreenshotMotionAndLongOriginalStems() {
+        for (source in listOf("a.jpg", "a.jpeg", "Screenshot_20250101.jpg", "123456.jpeg",
+            "holiday.edit.v2.jpg", "照片_Slim.jpg", "a:b.jpg", " name .jpg", "a".repeat(120) + ".jpg")) {
+            assertEquals(source.substringBeforeLast('.') + ".heic",
+                outputName(source, "HEIC", "any-task", 0, motionPhoto = true, keepFilename = true))
+        }
+    }
+
+    @Test fun keptFilenamesUseContentHashOnlyOnConflictAndExtendCollidingHashes() {
+        val hash = "0123456789abcdef".repeat(4)
+        assertEquals("a.heic", keptOutputName("a.heic", setOf("b.heic"), hash))
+        assertEquals("a_01234567.heic", keptOutputName("a.heic", setOf("a.heic"), hash))
+        assertEquals("a_0123456789ab.heic",
+            keptOutputName("a.heic", setOf("A.HEIC", "a_01234567.heic"), hash))
+        val names = mutableSetOf("a.heic")
+        repeat(20) { assertTrue(names.add(keptOutputName("a.heic", names, hash))) }
+        assertEquals(21, names.size)
+        val longName = "图".repeat(80) + ".heic"
+        val safe = keptOutputName(longName, setOf(longName), hash)
+        assertTrue(safe.toByteArray(Charsets.UTF_8).size <= 255)
+        assertTrue(safe.endsWith("_01234567.heic"))
+    }
+
+    @Test fun providerNumberingAndHiddenHashCollisionsAreReplacedWithLongerHashes() {
+        val hash = "0123456789abcdef".repeat(4)
+        var actual = "a (1).heic"
+        val attempts = mutableListOf<String>()
+        confirmKeptOutputName("a.heic", "a.heic", emptySet(), hash, { actual }) {
+            attempts += it
+            if (it == "a_01234567.heic") error("Hidden existing file")
+            actual = it
+        }
+        assertEquals(listOf("a_01234567.heic", "a_0123456789ab.heic"), attempts)
+        assertEquals("a_0123456789ab.heic", actual)
+    }
+
     @Test fun formatsAndSignedSavings() {
         assertEquals("image/jpeg", OutputFormat.parse("JPEG").mimeType)
         assertEquals("image/heic", OutputFormat.parse("heic").mimeType)
