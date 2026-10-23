@@ -23,7 +23,7 @@ import kotlinx.coroutines.flow.Flow
         Index(value = ["taskId"], unique = true),
         Index(value = ["createdAt"]),
         Index(value = ["status"]),
-        // flowPage/flowCount/pendingPublications 都按 saveState 过滤 + createdAt 排序。
+        // 列表与待发布分页共用 saveState / createdAt 索引。
         Index(value = ["saveState", "createdAt"]),
     ]
 )
@@ -73,8 +73,18 @@ interface HistoryDao {
     @Query("SELECT * FROM history WHERE saveState = :filter ORDER BY createdAt DESC LIMIT :limit")
     fun flowPageFiltered(limit: Int, filter: String): Flow<List<HistoryEntity>>
 
-    @Query("SELECT * FROM history WHERE saveState = 'PENDING' ORDER BY id")
-    fun pendingPublications(): Flow<List<HistoryEntity>>
+    // Only batch settings are needed to decide whether automatic publication is pending.
+    // Observe batches too, so cancellation wakes both publication and replacement review.
+    @Query("SELECT DISTINCT h.batchId, b.settings FROM history h JOIN batches b ON b.id = h.batchId " +
+        "WHERE h.saveState = 'PENDING' AND b.cancelled = 0 ORDER BY h.batchId")
+    fun pendingPublicationBatches(): Flow<List<PendingPublicationBatch>>
+
+    // Keyset pagination: rows disappearing after save cannot shift an OFFSET past unsaved rows.
+    @Query("SELECT * FROM history WHERE saveState = 'PENDING' AND batchId IN (:batchIds) " +
+        "AND createdAt >= :afterCreatedAt AND (createdAt > :afterCreatedAt OR id > :afterId) " +
+        "ORDER BY createdAt, id LIMIT :limit")
+    suspend fun pendingPublicationPage(batchIds: List<String>, afterCreatedAt: Long,
+        afterId: Long, limit: Int): List<HistoryEntity>
 
     /** 与 [flowPage] 同筛选的计数，供"加载更多"页脚比较。 */
     fun flowCount(filter: String): Flow<Int> =
@@ -147,6 +157,8 @@ interface HistoryDao {
 }
 
 data class HistoryPaths(val id: Long, val inputUri: String, val outputUri: String)
+
+data class PendingPublicationBatch(val batchId: String, val settings: String)
 
 private const val HISTORY_STATS_SQL = "SELECT COUNT(*) as countDone, COALESCE(SUM(inputBytes), 0) as totalInputBytes, COALESCE(SUM(outputBytes), 0) as totalOutputBytes, COALESCE(SUM(CASE WHEN hadGainMap THEN 1 ELSE 0 END), 0) as gainmapCount FROM history WHERE status = 'DONE'"
 

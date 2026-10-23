@@ -135,8 +135,13 @@ internal class ConversionRunner(
                 try {
                     var existing = app.database.historyDao().byTask(id)
                     if (existing != null) {
-                        if (options.autoSave && app.galleryPublishingAllowed.value && app.database.taskDao().batch(batchId)?.cancelled == false) existing = OutputStore.save(app, existing)
-                        if (options.autoReplaceOriginals) AutoReplacement.saved(app, existing)
+                        var verifiedSave = false
+                        if (options.autoSave && app.database.taskDao().batch(batchId)?.cancelled == false &&
+                            app.galleryPublishingAllowed.value) {
+                            existing = OutputStore.save(app, existing)
+                            verifiedSave = existing.saveState == "SAVED"
+                        }
+                        if (options.autoReplaceOriginals) AutoReplacement.saved(app, existing, outputVerified = verifiedSave)
                         val recovered = existing
                         repo.update(id) { it.copy(status = QueueStatus.DONE, outputUri = recovered.outputUri, historyId = recovered.id,
                             error = if(recovered.saveState == "SAVED") null else if (options.autoSave && recovered.saveState == "PENDING") "已转换，回到应用后自动保存" else "转换完成，待保存；可在详情重试") }
@@ -146,11 +151,12 @@ internal class ConversionRunner(
                     val originalHash = if (options.autoReplaceOriginals) withContext(Dispatchers.IO) {
                         runCatching { AutoReplacement.fingerprint(app, source) }.getOrNull()
                     } else null
+                    // 队列可跨重启保留，原 URI 的内容可能已被相册编辑；预算与输出校验必须使用当前元数据。
                     val probe = ImageWork.run {
                         app.contentResolver.openFileDescriptor(source, "r")?.use { UltraHdrBridge.nativeProbe(it.fd) }
                     } ?: error("无法读取原图，请重新选择或授权")
                     check(probe.isSuccess) { probe.error }
-                    repo.update(id) { it.copy(probe = probe) }
+                    if (item.probe != probe) repo.update(id) { it.copy(probe = probe) }
                     if (!probe.hasGainMap && !options.allowSdr) {
                         repo.update(id) { it.copy(status = QueueStatus.SKIPPED, error = "按设置跳过 SDR 图片") }; continue
                     }
@@ -222,14 +228,30 @@ internal class ConversionRunner(
                         taskId = id, batchId = batchId, saveState = "PENDING", settingsSummary = summary, hasExif = result.hasExif)
                     val historyId = withContext(NonCancellable) { app.database.historyDao().insert(entity) }
                     entity = entity.copy(id = historyId)
+                    val mayPublish = options.autoSave && app.galleryPublishingAllowed.value &&
+                        app.database.taskDao().batch(batchId)?.cancelled == false
+                    val outputFingerprint = if (options.autoReplaceOriginals || mayPublish) {
+                        withContext(Dispatchers.IO) { MediaStoreSaver.fingerprintOf(file) }
+                    } else null
                     if (options.autoReplaceOriginals) {
-                        AutoReplacement.stage(app, entity, originalHash)
+                        AutoReplacement.stage(
+                            app = app,
+                            history = entity,
+                            originalHash = originalHash,
+                            outputFingerprint = outputFingerprint,
+                            knownMotion = motionInfo,
+                            hasKnownMotion = true,
+                        )
                         entity = app.database.historyDao().byId(historyId) ?: entity
                     }
-                    if (options.autoSave && app.galleryPublishingAllowed.value && app.database.taskDao().batch(batchId)?.cancelled == false) {
-                        entity = OutputStore.save(app, entity)
+                    var verifiedSave = false
+                    // 指纹和自动替换校验会挂起；此时用户可能已切后台或取消批次，不能复用先前状态。
+                    if (options.autoSave && app.database.taskDao().batch(batchId)?.cancelled == false &&
+                        app.galleryPublishingAllowed.value) {
+                        entity = OutputStore.save(app, entity, outputFingerprint)
+                        verifiedSave = entity.saveState == "SAVED"
                     }
-                    if (options.autoReplaceOriginals) AutoReplacement.saved(app, entity)
+                    if (options.autoReplaceOriginals) AutoReplacement.saved(app, entity, outputVerified = verifiedSave)
                     repo.update(id) { it.copy(status = QueueStatus.DONE, progress = 100, result = result,
                         outputUri = entity.outputUri, historyId = historyId,
                         error = if (entity.saveState == "FAILED") "转换完成，保存失败；可在详情重试保存" else if (entity.saveState != "SAVED") { if (options.autoSave) "已转换，回到应用后自动保存" else "待保存，可直接分享" } else null) }

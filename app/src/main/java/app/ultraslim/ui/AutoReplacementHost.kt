@@ -10,7 +10,6 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.platform.LocalContext
 import app.ultraslim.data.ReplacementEntity
-import app.ultraslim.data.decodeDefaults
 import app.ultraslim.convert.selectReplacementPage
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -74,13 +73,9 @@ internal fun AutoReplacementHost(): ReplacementReview? {
         app.awaitReplacementRecovery()
         owner.lifecycle.repeatOnLifecycle(Lifecycle.State.RESUMED) {
             val blocked = combine(app.galleryPublishingAllowed, app.galleryPublicationRunning,
-                app.conversionServiceRunning, app.database.historyDao().pendingPublications()) { allowed, publishing, service, pending ->
+                app.conversionServiceRunning, app.historyRepository.pendingPublicationBatches) { allowed, publishing, service, pending ->
                 // A pending publication also blocks review before DeferredOutputHost starts its loop.
-                val awaitingSave = pending.map { it.batchId }.distinct().any { id ->
-                    app.database.taskDao().batch(id)?.let { batch ->
-                        !batch.cancelled && runCatching { decodeDefaults(batch.settings).autoSave }.getOrDefault(false)
-                    } == true
-                }
+                val awaitingSave = pending.isNotEmpty()
                 !allowed || publishing || service || awaitingSave
             }
             combine(app.database.replacementDao().ready(), app.settingsRepository.defaults,

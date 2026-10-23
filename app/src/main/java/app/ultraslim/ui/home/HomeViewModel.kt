@@ -87,17 +87,36 @@ data class HomeUiState(
     val batchTotal: Int = 0,
     val batchProcessed: Int = 0,
     val thermalState: ConversionThermalState? = null,
-) {
-    val convertibleCount: Int
-        get() = queue.count {
-            it.status == QueueStatus.PENDING ||
-                it.status == QueueStatus.PROBING ||
-                it.status == QueueStatus.READY
-        }
-
-    val hasFinishedItems: Boolean
-        get() = queue.any { it.status == QueueStatus.DONE }
-}
+    val convertibleCount: Int = queue.count {
+        it.status == QueueStatus.PENDING ||
+            it.status == QueueStatus.PROBING ||
+            it.status == QueueStatus.READY
+    },
+    val hasFinishedItems: Boolean = queue.any { it.status == QueueStatus.DONE },
+    val convertingItem: QueueItem? = queue.firstOrNull { it.status == QueueStatus.CONVERTING },
+    val pendingItems: List<QueueItem> = queue.filter {
+        it.status == QueueStatus.PENDING ||
+            it.status == QueueStatus.PROBING ||
+            it.status == QueueStatus.READY
+    },
+    val finishedItems: List<QueueItem> = queue.filter {
+        it.status == QueueStatus.DONE ||
+            it.status == QueueStatus.SKIPPED ||
+            it.status == QueueStatus.FAILED
+    },
+    val pendingGroups: List<app.ultraslim.util.TimeGroup<QueueItem>> =
+        app.ultraslim.util.groupByTimeSession(
+            items = pendingItems,
+            timestampSelector = { it.createdAt },
+            batchIdSelector = { it.batchId },
+        ),
+    val finishedGroups: List<app.ultraslim.util.TimeGroup<QueueItem>> =
+        app.ultraslim.util.groupByTimeSession(
+            items = finishedItems,
+            timestampSelector = { it.createdAt },
+            batchIdSelector = { it.batchId },
+        ),
+)
 
 class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
@@ -173,7 +192,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             batchProcessed = processed,
             thermalState = thermal.takeIf { queue.any { it.status == QueueStatus.READY && it.error?.startsWith("系统报告") == true } },
         )
-    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), HomeUiState())
 
     init {
         viewModelScope.launch {
@@ -262,7 +281,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             val unreadable = java.util.concurrent.atomic.AtomicInteger()
             val result = importImages(FolderImages.images(app.contentResolver, tree, includeSubfolders) {
                 unreadable.incrementAndGet()
-            }, ignoreLivePhotos)
+            }.map { ImportImage(it) }, ignoreLivePhotos)
             result.message() + if (unreadable.get() > 0) "；${unreadable.get()} 个子文件夹无法读取" else ""
         }
     }
@@ -332,8 +351,10 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     /** Stream the complete album without an arbitrary item cap. */
     fun importAlbum(album: AlbumBucket, ignoreLivePhotos: Boolean = false) {
-        launchImport { importImages(imageUris(album.id), ignoreLivePhotos).message() }
+        launchImport { importImages(albumImages(album.id), ignoreLivePhotos).message() }
     }
+
+    private data class ImportImage(val uri: Uri, val metadata: Pair<String, Long>? = null)
 
     private data class ImportResult(
         val added: Int = 0,
@@ -350,10 +371,10 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     private suspend fun addItemsInternal(uris: List<Uri>, ignoreLivePhotos: Boolean): ImportResult =
-        importImages(uris.asFlow(), ignoreLivePhotos, uris.size)
+        importImages(uris.asFlow().map { ImportImage(it) }, ignoreLivePhotos, uris.size)
 
     /** Persist small batches and probe at most four files at a time, even with thousands of inputs. */
-    private suspend fun importImages(uris: Flow<Uri>, ignoreLivePhotos: Boolean, total: Int? = null): ImportResult {
+    private suspend fun importImages(images: Flow<ImportImage>, ignoreLivePhotos: Boolean, total: Int? = null): ImportResult {
         repo.awaitReady()
         val seen = repo.queue.value.mapTo(mutableSetOf()) { it.uri }
         var added = 0
@@ -370,16 +391,13 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             repo.addAll(batch)
             added += batch.size
             // Retain committed work on import cancellation; bounded to this one batch.
-            return viewModelScope.launch {
-                for (group in batch.chunked(4)) coroutineScope {
-                    group.map { async { probeItem(it.id, Uri.parse(it.uri)) } }.awaitAll()
-                }
-            }
+            return viewModelScope.launch { probeItems(batch) }
         }
         _importing.value = true
         try {
-            uris.collect { uri ->
+            images.collect { image ->
                 coroutineContext.ensureActive()
+                val uri = image.uri
                 index++
                 if (index % 8 == 0 || index == total) {
                     _importProgress.value = "正在导入 $index" + (total?.let { "/$it" } ?: " 张") +
@@ -393,7 +411,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
                         scannedProbes.remove(uri.toString())
                         return@collect
                     }
-                    val (name, size) = withContext(Dispatchers.IO) { resolveMeta(uri) }
+                    val (name, size) = image.metadata ?: withContext(Dispatchers.IO) { resolveMeta(uri) }
                     val id = UUID.randomUUID().toString()
                     val durable = withContext(Dispatchers.IO) {
                         val importContext = coroutineContext
@@ -437,7 +455,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     fun scanAlbumForHdr(album: AlbumBucket, ignoreLivePhotos: Boolean = false) = startHdrScan("相册「${album.name}」", ignoreLivePhotos) { queryImages(album.id) }
 
-    private fun startHdrScan(scopeLabel: String, ignoreLivePhotos: Boolean, query: suspend () -> List<Uri>) {
+    private fun startHdrScan(scopeLabel: String, ignoreLivePhotos: Boolean, query: suspend () -> List<ImportImage>) {
         if (_scanning.value || importJob?.isActive == true || uiState.value.isConverting) return
         scanJob = viewModelScope.launch {
             _scanning.value = true
@@ -445,13 +463,13 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             try {
                 val candidates = withContext(Dispatchers.IO) {
                     val queued = repo.queue.value.mapTo(mutableSetOf()) { it.uri }
-                    query().filter { it.toString() !in queued }
+                    query().filter { it.uri.toString() !in queued }
                 }
                 val hdrUris = if (candidates.isEmpty()) emptyList() else filterHdr(candidates)
                 if (hdrUris.isEmpty()) {
                     _events.emit(HomeEvent.Info("${scopeLabel}没有找到 HDR 照片"))
                 } else {
-                    val result = addItemsInternal(hdrUris, ignoreLivePhotos)
+                    val result = importImages(hdrUris.asFlow(), ignoreLivePhotos, hdrUris.size)
                     _events.emit(HomeEvent.Info("发现 ${hdrUris.size} 张 HDR 图片；${result.message()}"))
                 }
             } catch (e: CancellationException) {
@@ -467,14 +485,14 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     // 并发受 probePermits 限流；结果按输入顺序收集，进度随完成数推进。
-    private suspend fun filterHdr(candidates: List<Uri>): List<Uri> = coroutineScope {
+    private suspend fun filterHdr(candidates: List<ImportImage>): List<ImportImage> = coroutineScope {
         if (candidates.isEmpty()) return@coroutineScope emptyList()
         val checked = java.util.concurrent.atomic.AtomicInteger()
         val foundCount = java.util.concurrent.atomic.AtomicInteger()
         val hits = candidates.chunked(4).flatMap { group ->
-            group.map { uri ->
+            group.map { image ->
                 async {
-                    val hit = probeHasGainMap(uri)
+                    val hit = probeHasGainMap(image.uri)
                     val done = checked.incrementAndGet()
                     if (hit) foundCount.incrementAndGet()
                     // 全库扫描上万张时逐条发射会让主线程持续重组，按批推进。
@@ -489,13 +507,13 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
     }
 
     /** 可访问图片，按最新在前；bucketId 非空时只取该相册。跳过我们自己的输出目录，无数量上限。 */
-    private suspend fun queryImages(bucketId: String? = null): List<Uri> {
-        val uris = mutableListOf<Uri>()
-        imageUris(bucketId).collect { uris += it }
-        return uris
+    private suspend fun queryImages(bucketId: String? = null): List<ImportImage> {
+        val images = mutableListOf<ImportImage>()
+        albumImages(bucketId).collect { images += it }
+        return images
     }
 
-    private fun imageUris(bucketId: String? = null): Flow<Uri> = flow {
+    private fun albumImages(bucketId: String? = null): Flow<ImportImage> = flow {
         val selection = buildString {
             append("${MediaStore.Images.Media.MIME_TYPE} IN (?,?,?,?,?)")
             if (bucketId != null) append(" AND ${MediaStore.Images.Media.BUCKET_ID} = ?")
@@ -506,6 +524,8 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         }
         val projection = buildList {
             add(MediaStore.Images.Media._ID)
+            add(MediaStore.Images.Media.DISPLAY_NAME)
+            add(MediaStore.Images.Media.SIZE)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 add(MediaStore.Images.Media.RELATIVE_PATH)
             }
@@ -518,6 +538,8 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
             "${MediaStore.Images.Media.DATE_ADDED} DESC",
         )?.use { cursor ->
             val idIndex = cursor.getColumnIndex(MediaStore.Images.Media._ID)
+            val nameIndex = cursor.getColumnIndex(MediaStore.Images.Media.DISPLAY_NAME)
+            val sizeIndex = cursor.getColumnIndex(MediaStore.Images.Media.SIZE)
             val pathIndex = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 cursor.getColumnIndex(MediaStore.Images.Media.RELATIVE_PATH)
             } else {
@@ -530,10 +552,16 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
                 }
                 if (idIndex >= 0) {
                     coroutineContext.ensureActive()
-                    emit(ContentUris.withAppendedId(
+                    val uri = ContentUris.withAppendedId(
                         MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
                         cursor.getLong(idIndex),
-                    ))
+                    )
+                    // Keep the album cursor's metadata; unknown providers still use resolveMeta.
+                    val metadata = if (nameIndex >= 0 && sizeIndex >= 0) {
+                        (cursor.getString(nameIndex)?.takeIf { it.isNotBlank() } ?: "未命名图片") to
+                            (if (cursor.isNull(sizeIndex)) 0L else cursor.getLong(sizeIndex))
+                    } else null
+                    emit(ImportImage(uri, metadata))
                 }
             }
         }
@@ -566,7 +594,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     fun restoreItem(removed: ConversionRepository.RemovedItem) {
         val item = repo.restore(removed) ?: return
-        if (item.status == QueueStatus.PENDING) viewModelScope.launch { probeItem(item.id, Uri.parse(item.uri)) }
+        if (item.status == QueueStatus.PENDING) viewModelScope.launch { probeItems(listOf(item)) }
     }
 
     fun removeBatch(itemIds: List<String>) {
@@ -597,7 +625,7 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         if (uiState.value.isConverting) { _events.tryEmit(HomeEvent.Info("请等待当前批次结束后重试")); return }
         val item = repo.find(id) ?: return
         repo.update(id) { it.copy(status = QueueStatus.PENDING, error = null, probe = null) }
-        viewModelScope.launch { probeItem(item.id, Uri.parse(item.uri)) }
+        viewModelScope.launch { probeItems(listOf(item)) }
         startConversion(onlyIds = setOf(id))
     }
 
@@ -606,8 +634,8 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
         val failed = repo.queue.value.filter { it.status == QueueStatus.FAILED }
         if (failed.isEmpty()) return
         repo.updateAll(failed.map { it.id }) { it.copy(status = QueueStatus.PENDING, error = null, probe = null) }
-        failed.forEach { item ->
-            viewModelScope.launch { probeItem(item.id, Uri.parse(item.uri)) }
+        viewModelScope.launch {
+            failed.chunked(32).forEach { probeItems(it) }
         }
         startConversion(onlyIds = failed.mapTo(mutableSetOf()) { it.id })
     }
@@ -681,33 +709,24 @@ class HomeViewModel(private val app: UltraSlimApp) : ViewModel() {
 
     // ---- internals ----
 
-    private suspend fun probeItem(id: String, uri: Uri) = probePermits.withPermit {
-        repo.update(id) {
-            if (it.status == QueueStatus.PENDING) it.copy(status = QueueStatus.PROBING) else it
+    private suspend fun probeItems(items: List<QueueItem>) {
+        val pending = repo.beginProbing(items.map { it.id })
+        if (pending.isEmpty()) return
+        val results = coroutineScope {
+            pending.chunked(SCAN_PARALLELISM).flatMap { group ->
+                group.map { item -> async { item.id to probeUri(Uri.parse(item.uri)) } }.awaitAll()
+            }.toMap()
         }
-        val probe = scannedProbes.remove(uri.toString()) ?: ImageWork.run {
+        repo.finishProbing(results)
+    }
+
+    private suspend fun probeUri(uri: Uri) = probePermits.withPermit {
+        scannedProbes.remove(uri.toString()) ?: ImageWork.run {
             runCatching {
                 app.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
                     UltraHdrBridge.nativeProbe(pfd.fd)
                 }
             }.getOrNull()
-        }
-        // Never clobber a status the worker has already moved on with.
-        repo.update(id) {
-            if (it.status != QueueStatus.PROBING) {
-                it
-            } else {
-                when {
-                    probe == null -> it.copy(status = QueueStatus.FAILED, error = "无法读取此文件")
-                    !probe.isSuccess -> it.copy(
-                        probe = probe,
-                        status = QueueStatus.FAILED,
-                        error = probe.error.ifBlank { "无法解析图片" },
-                    )
-
-                    else -> it.copy(probe = probe, status = QueueStatus.READY)
-                }
-            }
         }
     }
 

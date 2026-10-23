@@ -1,0 +1,18 @@
+# Baseline profile rules for UltraSlim startup, Compose navigation, and list scrolling.
+HSPLapp/ultraslim/UltraSlimApp;-><init>()V
+HSPLapp/ultraslim/UltraSlimApp;->**(**)**
+HSPLapp/ultraslim/MainActivity;-><init>()V
+HSPLapp/ultraslim/MainActivity;->**(**)**
+HSPLapp/ultraslim/ui/AppRootKt;->**(**)**
+HSPLapp/ultraslim/ui/home/**;->**(**)**
+HSPLapp/ultraslim/ui/history/**;->**(**)**
+HSPLapp/ultraslim/ui/detail/**;->**(**)**
+HSPLapp/ultraslim/ui/components/**;->**(**)**
+HSPLapp/ultraslim/ui/adaptive/**;->**(**)**
+HSPLapp/ultraslim/ui/theme/**;->**(**)**
+HSPLapp/ultraslim/data/**;->**(**)**
+HSPLapp/ultraslim/convert/**;->**(**)**
+HSPLapp/ultraslim/bridge/**;->**(**)**
+HSPLapp/ultraslim/model/**;->**(**)**
+HSPLapp/ultraslim/util/**;->**(**)**
+Lapp/ultraslim/**;

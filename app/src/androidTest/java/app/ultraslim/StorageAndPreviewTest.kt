@@ -4,6 +4,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.ViewModelStore
 import androidx.test.platform.app.InstrumentationRegistry
 import app.ultraslim.convert.OutputStore
+import app.ultraslim.convert.ImageWork
 import app.ultraslim.convert.QueueItem
 import app.ultraslim.convert.QueueStatus
 import app.ultraslim.data.HistoryEntity
@@ -11,7 +12,13 @@ import app.ultraslim.ui.components.PreviewCache
 import app.ultraslim.ui.home.HomeViewModel
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import org.junit.Assert.*
 import org.junit.Test
 
@@ -67,5 +74,47 @@ class StorageAndPreviewTest {
             assertEquals(before, directory.list()!!.toSet())
             assertSame(small, PreviewCache.load(context, source.path, 128))
         } finally { source.delete() }
+    }
+
+    @Test fun concurrentThumbnailRechecksDetailProducedWhileWaiting() = runBlocking {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        val context = instrumentation.targetContext
+        val source = File(context.cacheDir, "preview-concurrent-${UUID.randomUUID()}.jpg")
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val blocker = async(Dispatchers.Default) {
+            ImageWork.run("preview-test-gate") {
+                entered.countDown()
+                check(release.await(15, TimeUnit.SECONDS))
+            }
+        }
+        try {
+            instrumentation.context.assets.open("apple_gainmap_new.jpg").use { input -> source.outputStream().use { input.copyTo(it) } }
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val directory = File(context.cacheDir, "previews")
+            val before = directory.list()?.toSet().orEmpty()
+            // UNDISPATCHED reaches the first suspension before returning: the large
+            // miss owns the URI lock and waits for ImageWork; the small miss then
+            // waits for that same URI lock while no large cache entry exists yet.
+            val large = async(start = CoroutineStart.UNDISPATCHED) { PreviewCache.load(context, source.path, 2048) }
+            val small = async(start = CoroutineStart.UNDISPATCHED) { PreviewCache.load(context, source.path, 128) }
+            assertFalse(large.isCompleted)
+            assertFalse(small.isCompleted)
+            release.countDown()
+            withTimeout(15_000) {
+                assertNotNull(large.await())
+                val thumbnail = small.await()
+                assertNotNull(thumbnail)
+                assertEquals(128, maxOf(thumbnail!!.width, thumbnail.height))
+                assertSame(thumbnail, PreviewCache.load(context, source.path, 128))
+            }
+            // Only the large native decode writes a JPEG. Reusing it for the small
+            // request must not produce a second disk entry/native decode.
+            assertEquals(1, (directory.list()!!.toSet() - before).size)
+        } finally {
+            release.countDown()
+            blocker.await()
+            source.delete()
+        }
     }
 }

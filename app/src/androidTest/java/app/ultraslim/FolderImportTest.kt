@@ -64,6 +64,7 @@ class FolderImportTest {
         assertEquals(1003, added.size)
         assertTrue(added.all { it.status == QueueStatus.READY && it.probe?.isSuccess == true })
         assertTrue(added.any { it.displayName == "grandchild.jpg" })
+        assertTrue("Folder sources must retain their per-document metadata fallback", added.all { it.sizeBytes > 0 })
         assertTrue("A tree grant must avoid a private copy per image", added.all { Uri.parse(it.uri).authority == tree.authority })
         assertEquals(1, app.contentResolver.persistedUriPermissions.count { it.uri.authority == tree.authority })
         assertTrue(import(true).startsWith("已导入 0 张照片"))
@@ -99,7 +100,11 @@ class FolderImportTest {
                 result.await().message
             }
             assertEquals("已导入 1001 张照片", message)
-            assertEquals(1001, app.conversionRepository.queue.value.count { it.id !in originalIds })
+            val added = app.conversionRepository.queue.value.filter { it.id !in originalIds }
+            assertEquals(1001, added.size)
+            assertEquals((0..1000).map { "$it.jpg" }.toSet(), added.map { it.displayName }.toSet())
+            assertTrue("Album cursor must retain each source's size", added.all { it.sizeBytes == jpeg.size.toLong() })
+            assertTrue(added.all { it.status == QueueStatus.READY && it.probe?.isSuccess == true })
         } finally { created.forEach { resolver.delete(it, null, null) } }
     }
     @Test fun cancellationKeepsCommittedBatchesAndDoesNotImportTheWholeTree() = runBlocking {

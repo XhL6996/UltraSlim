@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.shareIn
@@ -38,13 +39,24 @@ data class DetailUiState(
     val canTrashOriginal: Boolean = false,
 )
 
-class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long) : ViewModel() {
+internal data class OriginalAccess(val trashed: Boolean, val canTrash: Boolean)
+
+class DetailViewModel internal constructor(
+    private val app: UltraSlimApp,
+    private val historyId: Long,
+    private val queryOriginal: (Uri) -> OriginalAccess = { uri ->
+        val trashed = MediaStoreTrashHelper.isOriginalTrashed(app, uri)
+        val accessible = MediaStoreTrashHelper.isOriginalAccessible(app, uri)
+        val resolvable = MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, uri) != null
+        OriginalAccess(trashed, MediaStoreTrashHelper.isTrashSupported && resolvable && accessible && !trashed)
+    },
+) : ViewModel() {
 
     private val dao = app.database.historyDao()
 
     private val saving = MutableStateFlow(false)
-    private val originalTrashed = MutableStateFlow(false)
-    private val canTrash = MutableStateFlow(false)
+    private data class OriginalStatus(val inputUri: String, val access: OriginalAccess)
+    private val originalStatus = MutableStateFlow<OriginalStatus?>(null)
 
     // 单一 Room 订阅：uiState 与回收站状态共用，且只有 inputUri 变化才重跑
     // MediaStore 检查（历史行的其他字段更新不再触发 provider 调用）。
@@ -54,15 +66,17 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
     val uiState: StateFlow<DetailUiState> = combine(
         entityFlow,
         saving,
-        originalTrashed,
-        canTrash,
-    ) { entity, isSaving, isTrashed, canTrashVal ->
+        originalStatus,
+    ) { entity, isSaving, status ->
+        // A delayed provider response belongs only to the URI it checked. A newly
+        // linked photo stays unavailable for trash until its own check completes.
+        val access = status?.takeIf { it.inputUri == entity?.inputUri }?.access
         DetailUiState(
             entity = entity,
             saving = isSaving,
             loading = false,
-            originalTrashed = isTrashed,
-            canTrashOriginal = canTrashVal && !isTrashed,
+            originalTrashed = access?.trashed == true,
+            canTrashOriginal = access?.let { it.canTrash && !it.trashed } == true,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), DetailUiState())
 
@@ -70,16 +84,13 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
         viewModelScope.launch {
             entityFlow
                 .distinctUntilChangedBy { it?.inputUri }
-                .collect { entity ->
+                .collectLatest { entity ->
+                    originalStatus.value = null
                     if (entity != null) {
-                        val uri = Uri.parse(entity.inputUri)
-                        withContext(Dispatchers.IO) {
-                            val trashed = MediaStoreTrashHelper.isOriginalTrashed(app, uri)
-                            val accessible = MediaStoreTrashHelper.isOriginalAccessible(app, uri)
-                            val resolvable = MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, uri) != null
-                            originalTrashed.value = trashed
-                            canTrash.value = MediaStoreTrashHelper.isTrashSupported && resolvable && accessible && !trashed
-                        }
+                        val access = withContext(Dispatchers.IO) { queryOriginal(Uri.parse(entity.inputUri)) }
+                        // Publish after withContext: cancellation rejects a late response
+                        // from a blocking provider when a different URI has arrived.
+                        originalStatus.value = OriginalStatus(entity.inputUri, access)
                     }
                 }
         }
@@ -152,11 +163,7 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
             try {
                 val durable = withContext(Dispatchers.IO) { InputStore.persist(app, uri, java.util.UUID.randomUUID().toString()) }
                 dao.update(row.copy(inputUri = durable.toString()))
-                val trashed = MediaStoreTrashHelper.isOriginalTrashed(app, durable)
-                val accessible = MediaStoreTrashHelper.isOriginalAccessible(app, durable)
-                val resolvable = MediaStoreTrashHelper.resolveToMediaStoreImageUri(app, durable) != null
-                originalTrashed.value = trashed
-                canTrash.value = MediaStoreTrashHelper.isTrashSupported && resolvable && accessible && !trashed
+                // entityFlow performs the one provider check on IO for the new URI.
                 _events.emit(DetailEvent.Message("原图已重新关联"))
             } catch (e: Exception) {
                 _events.emit(DetailEvent.Message("无法关联原图：${e.message}"))
@@ -176,8 +183,9 @@ class DetailViewModel(private val app: UltraSlimApp, private val historyId: Long
     }
 
     fun onOriginalTrashed() {
-        originalTrashed.value = true
-        canTrash.value = false
+        uiState.value.entity?.inputUri?.let {
+            originalStatus.value = OriginalStatus(it, OriginalAccess(trashed = true, canTrash = false))
+        }
         _events.tryEmit(DetailEvent.Message("原图已移入系统相册回收站（恢复期限以系统回收站为准）"))
     }
 

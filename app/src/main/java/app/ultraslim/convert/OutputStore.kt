@@ -17,14 +17,21 @@ import kotlinx.coroutines.sync.withLock
 
 object OutputStore {
     private val saveLock = Mutex()
-    suspend fun save(app: UltraSlimApp, record: HistoryEntity): HistoryEntity = saveLock.withLock {
+    suspend fun save(
+        app: UltraSlimApp,
+        record: HistoryEntity,
+        expectedFingerprint: MediaStoreSaver.Fingerprint? = null,
+    ): HistoryEntity = saveLock.withLock {
         val current = app.database.historyDao().byId(record.id) ?: error("记录已删除")
         if (current.outputUri.startsWith("content://")) return@withLock current
         val replacement = app.database.replacementDao().byId(current.id)?.takeIf { it.state == "PREPARED" }
         val source = Uri.parse(replacement?.sourceUri ?: current.inputUri)
         val metadata = withContext(Dispatchers.IO) { SourceMedia.read(app, source) }
-        // 私有成品只读一次：指纹在写盘时复用，发布后的相册副本仍整读校验两次。
-        val expected = withContext(Dispatchers.IO) { MediaStoreSaver.fingerprintOf(File(current.outputUri)) }
+        // 私有成品只读一次：调用方（如自动替换 stage）已算过指纹时直接复用；
+        // 发布后的相册副本在 MediaStoreSaver.save 内部已完成整读 SHA-256 校验。
+        val expected = expectedFingerprint ?: withContext(Dispatchers.IO) {
+            MediaStoreSaver.fingerprintOf(File(current.outputUri))
+        }
         val uri = try { withContext(Dispatchers.IO) {
             val file = File(current.outputUri)
             val format = OutputFormat.parse(current.format)
@@ -45,9 +52,8 @@ object OutputStore {
             }
         } } catch(e: kotlinx.coroutines.CancellationException) { throw e } catch(e: Exception) { null }
         // finish() may have added a replacement outcome while saving.
-        val verified = uri?.takeIf { withContext(Dispatchers.IO) {
-            MediaStoreSaver.matchesAlbumCopy(app, it, expected)
-        } }
+        // MediaStoreSaver.save only returns a non-null URI after matches(resolver, uri, expected) succeeds.
+        val verified = uri?.takeIf { expected != null && expected.bytes > 0 }
         val latest = app.database.historyDao().byId(current.id) ?: current
         val updated = if (verified != null) latest.copy(outputUri = verified.toString(), saveState = "SAVED") else latest.copy(saveState = "FAILED")
         app.database.historyDao().update(updated)

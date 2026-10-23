@@ -31,11 +31,33 @@ internal data class SourceMedia(val volume: String, val relativePath: String, va
         fun timestamps(context: Context, source: Uri): SourceTimestamps {
             InputMetadataStore.read(context, source)?.let { return it }
             val canonical = MediaStoreTrashHelper.resolveToMediaStoreImageUri(context, source)
-            val target = canonical ?: source
-            val taken = queryTime(context, target, MediaStore.Images.Media.DATE_TAKEN) ?: exifCaptureTime(context, source)
-            val modified = if (canonical != null) queryTime(context, target, MediaStore.MediaColumns.DATE_MODIFIED)
-                ?.takeIf { it <= Long.MAX_VALUE / 1000 }?.times(1000)
-            else queryTime(context, source, android.provider.DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+            var taken: Long? = null
+            var modified: Long? = null
+            if (canonical != null) {
+                val queried = runCatching {
+                    context.contentResolver.query(
+                        canonical,
+                        arrayOf(MediaStore.Images.Media.DATE_TAKEN, MediaStore.MediaColumns.DATE_MODIFIED),
+                        null, null, null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            if (!cursor.isNull(0)) taken = cursor.getLong(0).takeIf { it > 0 }
+                            if (!cursor.isNull(1)) {
+                                modified = cursor.getLong(1).takeIf { it > 0 && it <= Long.MAX_VALUE / 1000 }?.times(1000)
+                            }
+                        }
+                    }
+                }.isSuccess
+                if (!queried) {
+                    taken = queryTime(context, canonical, MediaStore.Images.Media.DATE_TAKEN)
+                    modified = queryTime(context, canonical, MediaStore.MediaColumns.DATE_MODIFIED)
+                        ?.takeIf { it <= Long.MAX_VALUE / 1000 }?.times(1000)
+                }
+            } else {
+                taken = queryTime(context, source, MediaStore.Images.Media.DATE_TAKEN)
+                modified = queryTime(context, source, android.provider.DocumentsContract.Document.COLUMN_LAST_MODIFIED)
+            }
+            if (taken == null) taken = exifCaptureTime(context, source)
             val fileTime = modified ?: runCatching {
                 context.contentResolver.openFileDescriptor(source, "r")?.use {
                     android.system.Os.fstat(it.fileDescriptor).st_mtime.takeIf { seconds -> seconds > 0 && seconds <= Long.MAX_VALUE / 1000 }?.times(1000)

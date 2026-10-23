@@ -100,7 +100,14 @@ internal object AutoReplacement {
     }
 
     /** Called before saving deletes the private output. Failure only prevents replacing the original. */
-    suspend fun stage(app: UltraSlimApp, history: HistoryEntity, originalHash: String?) = withContext(Dispatchers.IO) {
+    suspend fun stage(
+        app: UltraSlimApp,
+        history: HistoryEntity,
+        originalHash: String?,
+        outputFingerprint: MediaStoreSaver.Fingerprint? = null,
+        knownMotion: MotionPhotoInfo? = null,
+        hasKnownMotion: Boolean = false,
+    ) = withContext(Dispatchers.IO) {
         try {
             check(app.settingsRepository.defaults.first().autoReplaceOriginals) { "自动替换已关闭" }
             check(history.outputBytes in 1 until history.inputBytes) { "成品未比原图更小" }
@@ -115,27 +122,33 @@ internal object AutoReplacement {
             check(sourceHash == originalHash && targetHash == originalHash) { "原图已发生变化" }
             val output = Uri.fromFile(File(history.outputUri))
             requireReadable(app, output, history)
-            val motion = MotionPhotoHelper.detect(app, source)
+            val motion = if (hasKnownMotion) knownMotion else MotionPhotoHelper.detect(app, source)
             if (motion != null) {
                 val savedMotion = MotionPhotoHelper.detect(app, output) ?: error("成品未保留实况视频")
                 check(savedMotion == motion.copy(videoOffset = savedMotion.videoOffset) &&
                     videoHash(app, source, motion) == videoHash(app, output, savedMotion)) { "实况视频校验失败" }
             }
+            val outHash = outputFingerprint?.takeIf { it.bytes > 0 }?.sha256 ?: fingerprint(app, output)
             app.database.replacementDao().insert(ReplacementEntity(history.id, history.batchId, target.toString(), "",
-                originalHash, fingerprint(app, output)))
+                originalHash, outHash))
         } catch (e: CancellationException) { throw e } catch (e: Exception) {
             note(app, history.id, "原图保留：${e.message ?: "自动替换校验未通过"}")
         }
     }
 
-    suspend fun saved(app: UltraSlimApp, history: HistoryEntity) = withContext(Dispatchers.IO) {
+    suspend fun saved(
+        app: UltraSlimApp,
+        history: HistoryEntity,
+        outputVerified: Boolean = false,
+    ) = withContext(Dispatchers.IO) {
         val item = app.database.replacementDao().byId(history.id) ?: return@withContext
         if (item.state != "PREPARED") return@withContext
         if (history.saveState != "SAVED" || !history.outputUri.startsWith("content://")) return@withContext
         val ready = item.copy(outputUri = history.outputUri, state = "READY")
         try {
-            // 原图哈希在 stage 刚校验过，回收前还会再验一次；这里只验新发布的成品副本。
-            validate(app, ready, recheckSource = false)
+            // 原图哈希在 stage 刚校验过，相册副本哈希在 MediaStoreSaver.save 发布时刚校验过；
+            // 真正移入回收站前 validate 仍会全量复核原图与成品哈希。
+            validate(app, ready, recheckSource = false, recheckOutput = !outputVerified)
             app.database.replacementDao().update(ready)
         } catch (e: CancellationException) { throw e } catch (e: Exception) {
             finish(app, listOf(item), "SKIPPED", "原图保留：${e.message ?: "保存校验失败"}")
@@ -144,7 +157,7 @@ internal object AutoReplacement {
 
     /** Rechecked immediately before requesting trash: files/permissions/settings can change while queued. */
     suspend fun validate(app: UltraSlimApp, item: ReplacementEntity, recheckSource: Boolean = true,
-                         pass: Pass? = null) = withContext(Dispatchers.IO) {
+                         pass: Pass? = null, recheckOutput: Boolean = true) = withContext(Dispatchers.IO) {
         val enabled = pass?.autoReplaceEnabled() ?: app.settingsRepository.defaults.first().autoReplaceOriginals
         check(enabled) { "自动替换已关闭" }
         val batchActive = pass?.batchActive(item.batchId) ?: (app.database.taskDao().batch(item.batchId)?.cancelled == false)
@@ -158,7 +171,9 @@ internal object AutoReplacement {
         if (recheckSource) {
             check(fingerprint(app, sourceUri) == item.sourceHash) { "原图已变化或不可访问" }
         }
-        check(fingerprint(app, Uri.parse(item.outputUri)) == item.outputHash) { "成品已变化或不可访问" }
+        if (recheckOutput) {
+            check(fingerprint(app, Uri.parse(item.outputUri)) == item.outputHash) { "成品已变化或不可访问" }
+        }
         requireReadable(app, Uri.parse(item.outputUri), history)
         restoreOriginalAlbum(app, item)
     }

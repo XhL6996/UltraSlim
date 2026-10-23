@@ -9,6 +9,10 @@ import app.ultraslim.data.HistoryEntity
 import app.ultraslim.data.HistoryPaths
 import app.ultraslim.data.HistoryRepository
 import app.ultraslim.data.HistoryStats
+import app.ultraslim.data.BatchEntity
+import app.ultraslim.data.ConversionDefaults
+import app.ultraslim.data.PendingPublicationBatch
+import app.ultraslim.data.encode
 import java.util.concurrent.Executor
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.system.measureTimeMillis
@@ -36,9 +40,11 @@ class HistoryRepositoryTest {
     private lateinit var database: AppDatabase
     private lateinit var repositoryScope: CoroutineScope
     private val aggregateQueries = AtomicInteger()
+    private val pendingQueries = AtomicInteger()
 
     @Before fun setUp() {
         aggregateQueries.set(0)
+        pendingQueries.set(0)
         repositoryScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         database = Room.inMemoryDatabaseBuilder(
             InstrumentationRegistry.getInstrumentation().targetContext,
@@ -48,6 +54,7 @@ class HistoryRepositoryTest {
                 if (sqlQuery.contains("as countDone") && sqlQuery.contains("SUM(inputBytes)")) {
                     aggregateQueries.incrementAndGet()
                 }
+                if (sqlQuery.startsWith("SELECT DISTINCT h.batchId")) pendingQueries.incrementAndGet()
             }
         }, Executor { it.run() }).build()
     }
@@ -165,6 +172,66 @@ class HistoryRepositoryTest {
         withTimeout(5_000) {
             assertEquals(HistoryStats(18, 1_800, 1_440, 0), repository.stats.first { it.countDone == 18 })
         }
+    }
+
+    @Test fun pendingPagesDoNotSkipRowsAsPublishedItemsDisappear() = runBlocking {
+        val dao = database.historyDao()
+        // Manual-only rows sort ahead of automatic rows but must not starve the page.
+        repeat(40) { dao.insert(row((it + 1).toLong(), saveState = "PENDING").copy(batchId = "manual", createdAt = 0)) }
+        val expected = (101L..175L).toList()
+        expected.forEach { dao.insert(row(it, saveState = "PENDING").copy(batchId = "auto", createdAt = it / 3)) }
+        var afterTime = Long.MIN_VALUE
+        var afterId = Long.MIN_VALUE
+        val visited = mutableListOf<Long>()
+        while (true) {
+            val page = dao.pendingPublicationPage(listOf("auto"), afterTime, afterId, 32)
+            if (page.isEmpty()) break
+            assertTrue(page.size <= 32)
+            afterTime = page.last().createdAt
+            afterId = page.last().id
+            visited += page.map { it.id }
+            page.forEach { dao.update(it.copy(saveState = "SAVED")) }
+        }
+        assertEquals(expected, visited)
+        assertEquals(40, dao.flowCount("PENDING").first())
+    }
+
+    @Test fun publicationSignalIsSharedAndWakesOnSameBatchInsertAndCancellation() = runBlocking {
+        val dao = database.historyDao()
+        val tasks = database.taskDao()
+        tasks.putBatch(BatchEntity("auto", "[]", "{}")) // legacy defaults still auto-save
+        tasks.putBatch(BatchEntity("manual", "[]", ConversionDefaults(autoSave = false).encode()))
+        tasks.putBatch(BatchEntity("broken", "[]", "not-json"))
+        tasks.putBatch(BatchEntity("cancelled", "[]", "{}", cancelled = true))
+        listOf("auto", "manual", "broken", "cancelled").forEachIndexed { index, batch ->
+            dao.insert(row((index + 1).toLong(), saveState = "PENDING").copy(batchId = batch))
+        }
+        // Drain seed invalidations before subscribing: otherwise a late seed refresh
+        // can look like a second collector query or the same-batch insertion wakeup.
+        database.invalidationTracker.refresh("history", "batches")
+        val repository = HistoryRepository(database, repositoryScope)
+        val first = Channel<List<PendingPublicationBatch>>(Channel.UNLIMITED)
+        val second = Channel<List<PendingPublicationBatch>>(Channel.UNLIMITED)
+        val one = launch { repository.pendingPublicationBatches.collect { first.send(it) } }
+        val two = launch { repository.pendingPublicationBatches.collect { second.send(it) } }
+        try {
+            withTimeout(5_000) {
+                assertEquals(listOf("auto"), first.receive().map { it.batchId })
+                assertEquals(listOf("auto"), second.receive().map { it.batchId })
+            }
+            assertEquals("Both consumers share one query", 1, pendingQueries.get())
+            dao.insert(row(10, saveState = "PENDING").copy(batchId = "auto"))
+            withTimeout(5_000) {
+                // The projection is equal, but this wakeup is required after a page drain.
+                assertEquals(listOf("auto"), first.receive().map { it.batchId })
+                assertEquals(listOf("auto"), second.receive().map { it.batchId })
+            }
+            tasks.cancel("auto")
+            withTimeout(5_000) {
+                while (first.receive().isNotEmpty()) { }
+                while (second.receive().isNotEmpty()) { }
+            }
+        } finally { one.cancelAndJoin(); two.cancelAndJoin() }
     }
 
     private suspend fun Channel<HistoryStats>.awaitValue(expected: HistoryStats) {

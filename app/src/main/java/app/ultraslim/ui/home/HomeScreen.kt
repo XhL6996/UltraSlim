@@ -78,27 +78,11 @@ fun HomeScreen(onOpenSettings: () -> Unit, onOpenDetail: (Long) -> Unit, replace
         targetValue = if (state.batchTotal > 0) state.batchProcessed.toFloat() / state.batchTotal else 0f,
         animationSpec = Motion.effects(), label = "batchProgress",
     )
-    val convertingItem = remember(state.queue) { state.queue.firstOrNull { it.status == QueueStatus.CONVERTING } }
-    val pendingItems = remember(state.queue) {
-        state.queue.filter { it.status == QueueStatus.PENDING || it.status == QueueStatus.PROBING || it.status == QueueStatus.READY }
-    }
-    val finishedItems = remember(state.queue) {
-        state.queue.filter { it.status == QueueStatus.DONE || it.status == QueueStatus.SKIPPED || it.status == QueueStatus.FAILED }
-    }
-    val pendingGroups = remember(pendingItems) {
-        groupByTimeSession(
-            items = pendingItems,
-            timestampSelector = { it.createdAt },
-            batchIdSelector = { it.batchId },
-        )
-    }
-    val finishedGroups = remember(finishedItems) {
-        groupByTimeSession(
-            items = finishedItems,
-            timestampSelector = { it.createdAt },
-            batchIdSelector = { it.batchId },
-        )
-    }
+    val convertingItem = state.convertingItem
+    val pendingItems = state.pendingItems
+    val finishedItems = state.finishedItems
+    val pendingGroups = state.pendingGroups
+    val finishedGroups = state.finishedGroups
     var confirmClear by rememberSaveable { mutableStateOf<String?>(null) }  // "pending" | "all"
     var confirmRemoveIds by remember { mutableStateOf<List<String>?>(null) }
     val context = LocalContext.current

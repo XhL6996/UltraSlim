@@ -53,19 +53,33 @@
   `get_filename_component(... REALPATH)` 归一到仓库根再映射，复测 debug `.so` 中
   `/Users/<user>` 与仓库目录名 均 **0 次**，仅剩预期的 `/ultraslim-src`。
 
+## 已完成（2026-10-23 批次）
+
+- **流式 `readHeifXmp`**：优先使用 `HeifFdReader` 按需 `pread` 容器头与 ~1KB XMP 块，非 HEIF/AVIF（JPEG/JXL）直接早退，不再通过 `readAll(fd)` 把 15–40MB 实况视频尾部或完整 JXL 读入内存。
+- **保存与自动替换去重**：`OutputStore.save` 复用 `MediaStoreSaver.save` 发布时的 `matches` 校验与 `AutoReplacement.stage` 的私有成品指纹；`AutoReplacement.stage` 复用 `ConversionRunner` 已探测的 `motionInfo`；`SourceMedia.timestamps` 对相册项单次查询 `DATE_TAKEN` 与 `DATE_MODIFIED`。转换前仍重新 probe，防止持久化队列引用的原图变化后使用旧尺寸/HDR/EXIF；指纹与自动替换校验完成后重新检查前台及批次取消状态，再决定是否发布。
+- **HDR Preserve 路径提前释放输入内存**：`tryReuseGainMap` 在展开像素/进入缩放与编码前释放 `uhdr_decoder`、完整压缩输入 `data` 及中间 `baseBytes`/`gmBytes`/`jhgm`。
+- **SDR 输出校验免整读（B1）**：SDR 路径尺寸与 EXIF 在编码前已确定，改为 `fstat` + 16B 容器魔数 `pread` 校验，不再 `probeImage(outFd)` 整读输出文件。
+- **CPU 热点与并行**：`storeYuv444_8` NEON 4:4:4 YCbCr 转换（兼容增益图与奇数尺寸 HDR AVIF 主图，与标量逐值一致）；`prepareJxlRgb` 与 JXL 增益图转换改走 `parallelRows`；`resizeRgbaPlane` 双线性权重外提至通道循环外。
+- **UI 状态与缓存分池**：`HomeUiState` 预计算 `convertibleCount`、`hasFinishedItems` 与分组列表并经 `flowOn(Dispatchers.Default)` 移出主线程；`HistoryScreen` 缓存 `selectedItems` / `pendingCount`；`PreviewCache` 拆分为缩略图池（12MB）与详情大图池（28MB），并按 16 次写入节流磁盘 `trim`。
+- **构建与启动**：`native/CMakeLists.txt` 为 `core`/`image_io` 补齐 `-fvisibility=hidden -fvisibility-inlines-hidden`；新增 `app/src/main/baseline-prof.txt` ART 基准配置。
+
+## 已完成（2026-10-24 批次）
+
+- **导入批量更新与相册元数据复用**：每 32 张探测统一更新开始/结束状态，避免每张两次全队列映射；工作线程已领取或已删除的项目不被迟到结果覆盖。相册查询同时带回名称和大小，分享/目录入口继续使用 provider 查询兜底。
+- **预览并发复用**：同 URI 未命中请求取得锁后重新检查内存、磁盘与更大尺寸缓存，使等待期间完成的详情预览可供缩略图复用。
+- **详情原图重关联**：复用唯一 IO 查询订阅，结果绑定输入 URI；旧 provider 查询迟到不能污染新原图的回收站状态。
+- **待保存队列分页**：两个消费端共享批次级轻量通知，按 `(createdAt,id)` 每页 32 条获取待发布成品；保留同批次新增及取消通知、旧配置默认值和每张保存前的实时检查，无数据库结构变更。
+- **HEIF/JXL 内存**：HEIC/AVIF 主图从解码平面直接缩到最终尺寸，避免额外完整 RGBA 副本；增益图维持原分辨率。JXL 在编码器复制输入后释放不再需要的像素，重试所需 RGB 保留，jhgm 缓存改为移动。
+
+验证与设备边界见 [2026-10-24 优化记录](reports/2026-10-24-optimization-batch.md)。
+
 ## 仍未做（需独立立项）
 
-1. **B1 输出校验整读输出文件**：成功路径 `probeImage(outFd)` 整读输出（`readAll` 有 256MB 上限，
-   超大输出会误判 errorCode 25）。方向：header-only probe 或写盘时 tee。
-2. **#16 DetailScreen 缩放跨 1.0× 触发 2048 档重解码**；两张大 bitmap 与列表缓存互相挤出。
-   可考虑 RGB_565 或分池。
-3. **#20 queryImages 物化整库 URI**：当前只在「整个图库扫描」入口使用（一次性遍历+逐张 probe），
+1. **#20 queryImages 物化整库 URI**：当前只在「整个图库扫描」入口使用（一次性遍历+逐张 probe），
    改为直接消费 Flow 收益有限。
-4. **#7 ConversionRunner 每张图 2 次 `batch()` 取消标志查询**：PK 查询开销小，缓存有 stale 风险。
-5. **#21 PreviewCache LruCache 逐出不 recycle**：native heap 靠 GC，通常可接受。
-6. **#16(构建) Baseline Profile**：全仓库无 baselineprofile 模块；Compose 冷启动典型收益
-   20–30%，值得单独立项（profileinstaller 约 200KB）。
-7. **coil 后续 minor 升级**：沿用本次模式（只用到 AsyncImage/ImageRequest/crossfade 稳定 API，
+2. **#7 ConversionRunner 每张图 2 次 `batch()` 取消标志查询**：PK 查询开销小，缓存有 stale 风险。
+3. **#21 PreviewCache LruCache 逐出不 recycle**：native heap 靠 GC，通常可接受。
+4. **coil 后续 minor 升级**：沿用本次模式（只用到 AsyncImage/ImageRequest/crossfade 稳定 API，
    升级后仍需真机过一遍列表/详情图片加载）。
 
 ## 已确认不再需要

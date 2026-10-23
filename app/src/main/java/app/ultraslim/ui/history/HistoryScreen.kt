@@ -81,8 +81,8 @@ fun HistoryScreen(onOpenDetail: (Long) -> Unit, onSelectingChange: (Boolean) -> 
     }
     LaunchedEffect(vm) { vm.events.collect { snackbar.showSnackbar(it) } }
     val visible = remember(state.items, filter) { state.items.filter { it.matchesHistoryFilter(filter) } }
-    val selectedItems = visible.filter { it.id in selected }
-    val pendingCount = selectedItems.count { it.saveState != "SAVED" }
+    val selectedItems = remember(visible, selected) { visible.filter { it.id in selected } }
+    val pendingCount = remember(selectedItems) { selectedItems.count { it.saveState != "SAVED" } }
     LaunchedEffect(visible) {
         selected = selected.intersect(visible.map { it.id }.toSet())
         vm.ensureTrashableResolved(visible)

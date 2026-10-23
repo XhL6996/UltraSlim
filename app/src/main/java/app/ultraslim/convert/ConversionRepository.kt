@@ -186,6 +186,33 @@ class ConversionRepository(private val dao: TaskDao, scope: CoroutineScope) {
         replaceQueue(_queue.value.map { if (it.id in set) transform(it) else it })
     }
 
+    /** Claim a bounded import batch in one snapshot; removed/started items need no probe. */
+    @Synchronized internal fun beginProbing(ids: Collection<String>): List<QueueItem> {
+        if (ids.isEmpty()) return emptyList()
+        val selected = ids.toSet()
+        val probing = mutableListOf<QueueItem>()
+        replaceQueue(_queue.value.map { item ->
+            if (item.id in selected && item.status == QueueStatus.PENDING) {
+                item.copy(status = QueueStatus.PROBING).also { probing += it }
+            } else item
+        })
+        return probing
+    }
+
+    /** Publish individual results together without overwriting a worker claim or removed row. */
+    @Synchronized internal fun finishProbing(results: Map<String, ProbeResult?>) {
+        if (results.isEmpty()) return
+        replaceQueue(_queue.value.map { item ->
+            if (item.status != QueueStatus.PROBING || !results.containsKey(item.id)) item
+            else when (val probe = results[item.id]) {
+                null -> item.copy(status = QueueStatus.FAILED, error = "无法读取此文件")
+                else -> if (probe.isSuccess) item.copy(probe = probe, status = QueueStatus.READY)
+                else item.copy(probe = probe, status = QueueStatus.FAILED,
+                    error = probe.error.ifBlank { "无法解析图片" })
+            }
+        })
+    }
+
     @Synchronized fun updateByUri(uri: String, transform: (QueueItem) -> QueueItem) {
         replaceQueue(_queue.value.map { if (it.uri == uri) transform(it) else it })
     }

@@ -19,14 +19,25 @@ import kotlinx.coroutines.sync.withLock
  * and under cacheDir/previews (newest 200 files).
  */
 internal object PreviewCache {
-    private const val MAX_BYTES = 32 * 1024 * 1024
+    private const val THUMB_MAX_DIM = 512
+    private const val THUMB_MAX_BYTES = 12 * 1024 * 1024
+    private const val DETAIL_MAX_BYTES = 28 * 1024 * 1024
     private const val MAX_DISK_FILES = 200
+    private const val TRIM_INTERVAL = 16
 
-    private val memory = object : LruCache<String, Bitmap>(MAX_BYTES) {
+    // 列表缩略图（<=512）与详情页大图（1600/2048）分池管理：
+    // 防止详情页两张 2048px RGBA（约 25MB）把整页列表缩略图挤出内存缓存。
+    private val thumbMemory = object : LruCache<String, Bitmap>(THUMB_MAX_BYTES) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount.coerceAtLeast(1)
     }
+    private val detailMemory = object : LruCache<String, Bitmap>(DETAIL_MAX_BYTES) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount.coerceAtLeast(1)
+    }
+    private fun cacheFor(maxDim: Int): LruCache<String, Bitmap> =
+        if (maxDim <= THUMB_MAX_DIM) thumbMemory else detailMemory
 
     private val diskLock = Any()
+    private val writesSinceTrim = java.util.concurrent.atomic.AtomicInteger(0)
     private val requestLocks = Array(32) { kotlinx.coroutines.sync.Mutex() }
     // 档位必须是真实存在的档：详情页放大请求 2048，缺档会被 firstOrNull 抬到 4096，
     // 而 4096 长边 RGBA 超过 MAX_BYTES，LruCache.put 单条超限会先清空整表再丢弃自己。
@@ -53,39 +64,41 @@ internal object PreviewCache {
         val version = versionOf(context, uriString) ?: return null
         val key = cacheKey("$uriString:$version:v5", maxDim)
 
-        // 1. Fast-path: In-memory cache hit (no locks, no semaphore)
-        memory.get(key)?.let { return it }
+        val mem = cacheFor(maxDim)
+        // 1. Fast-path: In-memory cache hit (LruCache is internally synchronized; no diskLock needed)
+        mem.get(key)?.let { return it }
 
-        // 2. Disk cache：锁内只做内存/文件 stat，BitmapFactory 解码在锁外，
-        //    避免滚动列表时把所有并发加载串行化。
-        val dir = File(context.cacheDir, "previews")
-        val file = File(dir, "$key.jpg")
-        synchronized(diskLock) { memory.get(key)?.let { return it } }
-        readCached(file, key)?.let { return it }
-        // Detail previews can supply list thumbnails without decoding the original again.
-        for (dimension in resolutions.filter { it > maxDim }) {
-            val largerKey = cacheKey("$uriString:$version:v5", dimension)
-            val larger = memory.get(largerKey) ?: readCached(File(dir, "$largerKey.jpg"), largerKey, sampleTo = maxDim)
-            larger?.let {
-                val edge = maxOf(it.width, it.height)
-                val bitmap = if (edge <= maxDim) it else Bitmap.createScaledBitmap(it,
-                    (it.width.toLong() * maxDim / edge).toInt().coerceAtLeast(1),
-                    (it.height.toLong() * maxDim / edge).toInt().coerceAtLeast(1), true)
-                synchronized(diskLock) { memory.put(key, bitmap) }
-                return bitmap
-            }
-        }
-
-        // Native decode shares the encoder's lane; cached previews never wait for it.
+        // 同一 URI 的 miss 合并到一起；等候期间可能已产生更大的预览，取得锁后
+        // 必须完整重查。磁盘解码仍在全局 diskLock 外，不串行化所有图片的加载。
         return requestLocks[(uriString.hashCode() and Int.MAX_VALUE) % requestLocks.size].withLock {
-            memory.get(key)?.let { return@withLock it }
+            mem.get(key)?.let { return@withLock it }
+            val dir = File(context.cacheDir, "previews")
+            val file = File(dir, "$key.jpg")
+            readCached(file, key, maxDim)?.let { return@withLock it }
+            // Detail previews can supply list thumbnails without decoding the original again.
+            for (dimension in resolutions.filter { it > maxDim }) {
+                val largerKey = cacheKey("$uriString:$version:v5", dimension)
+                val larger = cacheFor(dimension).get(largerKey)
+                    ?: readCached(File(dir, "$largerKey.jpg"), largerKey, dimension, sampleTo = maxDim)
+                if (larger != null) {
+                    val edge = maxOf(larger.width, larger.height)
+                    val bitmap = if (edge <= maxDim) larger else Bitmap.createScaledBitmap(larger,
+                        (larger.width.toLong() * maxDim / edge).toInt().coerceAtLeast(1),
+                        (larger.height.toLong() * maxDim / edge).toInt().coerceAtLeast(1), true)
+                    mem.put(key, bitmap)
+                    return@withLock bitmap
+                }
+            }
+
+            // Only cache misses enter the encoder's native working-set lane.
             val bytes = ImageWork.run("preview $maxDim") { decode(context, uriString, maxDim) } ?: return@withLock null
             val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return@withLock null
+            mem.put(key, bitmap)
             synchronized(diskLock) {
                 dir.mkdirs()
                 runCatching { file.writeBytes(bytes) }
-                trim(dir)
-                memory.put(key, bitmap)
+                val n = writesSinceTrim.incrementAndGet()
+                if (n == 1 || n % TRIM_INTERVAL == 0) trim(dir)
             }
             bitmap
         }
@@ -94,7 +107,7 @@ internal object PreviewCache {
     // Decoded outside diskLock; corrupt entries are removed and decoded again on demand.
     // sampleTo > 0 时按目标尺寸带 inSampleSize 解码，且不按原 key 入内存缓存
     // （降采样结果不应占大图档位的缓存位）。
-    private fun readCached(file: File, key: String, sampleTo: Int = 0): Bitmap? {
+    private fun readCached(file: File, key: String, maxDim: Int, sampleTo: Int = 0): Bitmap? {
         if (!file.isFile || file.length() == 0L) return null
         val bitmap = if (sampleTo > 0) {
             val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
@@ -108,7 +121,7 @@ internal object PreviewCache {
         }
         if (bitmap == null) file.delete() else if (sampleTo <= 0) {
             file.setLastModified(System.currentTimeMillis())
-            memory.put(key, bitmap)
+            cacheFor(maxDim).put(key, bitmap)
         }
         return bitmap
     }
@@ -177,8 +190,10 @@ internal object PreviewCache {
 
     fun clear(context: Context) {
         synchronized(diskLock) {
-            memory.evictAll()
+            thumbMemory.evictAll()
+            detailMemory.evictAll()
             versionCache.evictAll()
+            writesSinceTrim.set(0)
             val dir = File(context.cacheDir, "previews")
             dir.deleteRecursively()
         }
@@ -186,7 +201,8 @@ internal object PreviewCache {
 
     /** Drops in-memory entries under system memory pressure; disk cache is kept for a later hit. */
     fun trimMemory() {
-        memory.evictAll()
+        thumbMemory.evictAll()
+        detailMemory.evictAll()
         versionCache.evictAll()
     }
 }

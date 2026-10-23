@@ -53,6 +53,80 @@ static void preview(const std::string& path, int limit) {
   }
   close(fd);
 }
+static void conversionResizeParity(const std::string& path) {
+  auto bytes = load(path);
+  ultraslim::SdrImage full; std::string error;
+  check(ultraslim::decodeHeifSdr(bytes, full, error), "full conversion reference decode");
+  for (int percent : {1, 37, 50, 99, 100}) {
+    int width, height; ultraslim::scaledSize(full.width, full.height, percent, width, height);
+    auto reference = full;
+    ultraslim::maybeDownscale(reference, width, height);
+    ultraslim::SdrImage direct;
+    check(ultraslim::decodeHeifSdr(bytes, direct, error, percent), "direct conversion resize decode");
+    check(direct.width == reference.width && direct.height == reference.height && direct.rgba == reference.rgba,
+          "conversion direct-plane resize matches full-copy reference pixels and even rounding");
+    check(direct.exif == reference.exif && direct.icc == reference.icc &&
+          direct.hasProfile == reference.hasProfile, "conversion resize retains EXIF and color profile");
+    if (direct.hasProfile) check(direct.profile.color_primaries == reference.profile.color_primaries &&
+        direct.profile.transfer_characteristics == reference.profile.transfer_characteristics &&
+        direct.profile.matrix_coefficients == reference.profile.matrix_coefficients &&
+        direct.profile.full_range_flag == reference.profile.full_range_flag, "conversion resize retains NCLX");
+  }
+}
+static void jxlBufferLifetime(const std::string& source, const std::string& output) {
+  auto data = load(source); ultraslim::SdrImage base; std::string error;
+  check(ultraslim::decodeJpegSdr(data, base, error), "JXL lifetime source decode");
+  // Compare the same encode with and without retained retry pixels. Decoding after
+  // source storage is released also exercises AddImageFrame's ownership contract.
+  for (bool retry : {false, true}) {
+    std::vector<uint8_t> rgb; ultraslim::prepareJxlRgb(base, rgb);
+    const auto path = output + (retry ? "/jxl-retained.jxl" : "/jxl-released.jxl");
+    int fd = open(path.c_str(), O_CREAT | O_TRUNC | O_RDWR, 0600);
+    check(fd >= 0 && ultraslim::encodeJxl(base, 90, true, fd, 2, 2, nullptr, rgb, retry, error) == 0,
+          "JXL encode after input-buffer lifetime change");
+    close(fd);
+    check(retry ? !rgb.empty() : rgb.capacity() == 0, "only retry retains JXL main RGB allocation");
+    ultraslim::SdrImage decoded;
+    check(ultraslim::decodeJxlToSdr(load(path), decoded, nullptr, error) &&
+          decoded.width == base.width && decoded.height == base.height && decoded.exif == base.exif,
+          "JXL released-input output decodes with dimensions and EXIF");
+  }
+  check(load(output + "/jxl-retained.jxl") == load(output + "/jxl-released.jxl"),
+        "JXL buffer retention does not change encoded bytes");
+}
+static void jxlGainmapBufferLifetime(const std::string& source, const std::string& output) {
+  auto data = load(source); ultraslim::DecoderPtr decoder;
+  check(ultraslim::probeImageMemory(data, &decoder).hasGainMap && bool(decoder), "JXL lifetime HDR source");
+  ultraslim::SdrImage base; ultraslim::GainMapPayload payload; std::string error;
+  auto baseBytes = ultraslim::copyBlock(uhdr_dec_get_base_image(decoder.get()));
+  auto gmBytes = ultraslim::copyBlock(uhdr_dec_get_gainmap_image(decoder.get()));
+  check(ultraslim::decodeJpegSdr(baseBytes, base, error) &&
+        ultraslim::decodeJpegSdr(gmBytes, payload.image, error), "JXL lifetime HDR pixels");
+  const auto originalMap = payload.image;
+  payload.iso = ultraslim::isoFromMetadata(*uhdr_dec_get_gainmap_metadata(decoder.get()));
+  payload.multiChannel = ultraslim::jpegChannels(gmBytes) > 1;
+  payload.cacheForRetry = true;
+  std::vector<uint8_t> rgb; ultraslim::prepareJxlRgb(base, rgb);
+  for (int quality : {90, 85}) {
+    const auto path = output + "/jxl-map-lifetime-" + std::to_string(quality) + ".jxl";
+    int fd = open(path.c_str(), O_CREAT | O_TRUNC | O_RDWR, 0600);
+    check(fd >= 0 && ultraslim::encodeJxl(base, quality, true, fd, 2, 2, &payload, rgb, true, error) == 0,
+          "JXL HDR encode reuses cached map after releasing its source pixels");
+    close(fd);
+    check(payload.image.rgba.capacity() == 0 && !payload.encodedJxl.empty(),
+          "JXL retry retains compressed gain map instead of source RGBA");
+    ultraslim::SdrImage decodedBase, decodedMap; std::vector<uint8_t> jhgm;
+    check(ultraslim::decodeJxlToSdr(load(path), decodedBase, &jhgm, error), "JXL HDR lifetime output decodes");
+    ultraslim::JxlGainMapView parsed;
+    check(ultraslim::parseJxlGainMap(jhgm, parsed), "JXL lifetime ISO payload");
+    const std::vector<uint8_t> stream(parsed.codestream.data(), parsed.codestream.data() + parsed.codestream.size());
+    check(ultraslim::decodeJxlToSdr(stream, decodedMap, nullptr, error) &&
+          decodedMap.width == originalMap.width && decodedMap.height == originalMap.height &&
+          decodedMap.rgba == originalMap.rgba, "released JXL gain-map pixels remain exact through retry");
+    check(std::vector<uint8_t>(parsed.iso.data(), parsed.iso.data() + parsed.iso.size()) == payload.iso,
+          "JXL lifetime retains exact ISO metadata");
+  }
+}
 static std::string convert(const std::string& source, const std::string& target, int codec, bool compatibility) {
   int in = openFile(source), out = open(target.c_str(), O_CREAT | O_TRUNC | O_RDWR, 0600);
   ultraslim::TranscodeOptions options; options.outCodec = codec; options.speedLevel = 2; options.codecThreads = 2;
@@ -78,6 +152,31 @@ static void thumbnailFixture(const std::string& path, bool largeFtyp = false) {
   check(heif_context_encode_thumbnail(ctx, image, base, enc, nullptr, 192, &thumb).code == heif_error_Ok && thumb, "encode embedded thumbnail");
   check(heif_context_write_to_file(ctx, path.c_str()).code == heif_error_Ok, "save thumbnail fixture");
   heif_image_handle_release(thumb); heif_image_handle_release(base); heif_image_release(image); heif_encoder_release(enc); heif_context_free(ctx);
+}
+static void rotatedOddFixture(const std::string& path, int codec, int orientation) {
+  auto* ctx = heif_context_alloc(); heif_encoder* encoder = nullptr;
+  const heif_encoder_descriptor* descriptor = nullptr;
+  check(heif_context_get_encoder_descriptors(ctx, codec == 1 ? heif_compression_HEVC : heif_compression_AV1,
+      codec == 1 ? "x265" : "aom", &descriptor, 1) == 1, "odd fixture encoder descriptor");
+  check(heif_context_get_encoder(ctx, descriptor, &encoder).code == heif_error_Ok, "odd fixture encoder");
+  if (codec == 1) heif_encoder_set_parameter_string(encoder, "preset", "ultrafast");
+  else heif_encoder_set_parameter_integer(encoder, "speed", 8);
+  heif_image* image = nullptr;
+  check(heif_image_create(163, 99, heif_colorspace_RGB, heif_chroma_interleaved_RGB, &image).code == heif_error_Ok &&
+        heif_image_add_plane(image, heif_channel_interleaved, 163, 99, 8).code == heif_error_Ok, "odd fixture plane");
+  int stride; auto* pixels = heif_image_get_plane(image, heif_channel_interleaved, &stride);
+  for (int y = 0; y < 99; ++y) for (int x = 0; x < 163; ++x) {
+    pixels[y * stride + 3*x] = uint8_t(x * 13 + y * 7);
+    pixels[y * stride + 3*x + 1] = uint8_t(x * 3 + y * 11);
+    pixels[y * stride + 3*x + 2] = uint8_t(x + y * 17);
+  }
+  auto* options = heif_encoding_options_alloc(); check(options, "odd fixture options");
+  options->image_orientation = static_cast<heif_orientation>(orientation);
+  heif_image_handle* handle = nullptr;
+  check(heif_context_encode_image(ctx, image, encoder, options, &handle).code == heif_error_Ok &&
+        heif_context_write_to_file(ctx, path.c_str()).code == heif_error_Ok, "write rotated odd fixture");
+  heif_encoding_options_free(options); heif_image_handle_release(handle);
+  heif_image_release(image); heif_encoder_release(encoder); heif_context_free(ctx);
 }
 int main(int argc, char** argv) {
   check(argc == 3, "usage preview_probe fixtures output");
@@ -109,7 +208,8 @@ int main(int argc, char** argv) {
   ultraslim_codec_threads = 2;
   const auto jpg = fixtures + "/apple_gainmap_new.jpg";
   const auto sdr = fixtures + "/minnie-320x240-yuv-icc.jpg";
-  parity(jpg); parity(sdr); preview(jpg, 97);
+  parity(jpg); parity(sdr); preview(jpg, 97); jxlBufferLifetime(sdr, output);
+  jxlGainmapBufferLifetime(jpg, output);
   // Padded stride and exact no-resize copy must ignore row padding.
   std::vector<uint8_t> packed(7 * 5 * 4), padded(40 * 5, 0xff);
   for (size_t i = 0; i < packed.size(); ++i) packed[i] = uint8_t(i * 31);
@@ -120,7 +220,7 @@ int main(int argc, char** argv) {
   check(!ultraslim::previewFits(INT32_MAX, INT32_MAX, 64, UINT64_MAX), "overflow dimensions rejected");
   for (int codec : {1, 2}) for (bool compatibility : {false, true}) {
     const auto path = convert(jpg, output + "/probe-hdr-" + std::to_string(codec) + (compatibility ? "-compat" : "-strict"), codec, compatibility);
-    parity(path); preview(path, 97); preview(path, 4096);
+    parity(path); preview(path, 97); preview(path, 4096); conversionResizeParity(path);
     auto data = load(path);
     int directFd = openFile(path);
     ultraslim::HeifFdReader directReader(directFd); check(directReader.open(), "direct reader opens");
@@ -152,11 +252,17 @@ int main(int argc, char** argv) {
     equalProbe(ultraslim::probeImageMemory(data), ultraslim::probeHeifReader(reader, container));
     check(reader.bytesRead < 1024 * 1024, "probe reads metadata, not whole payload");
     check(lseek(fd, 0, SEEK_CUR) == 0, "reader leaves fd cursor unchanged");
+    check(ultraslim::readHeifXmp(fd).empty() && lseek(fd, 0, SEEK_CUR) == 0, "streaming XMP probe leaves fd cursor unchanged");
     std::cout << "probe file=32MiB read=" << reader.bytesRead << " bytes\n"; close(fd);
   }
   for (int codec : {1, 2, 3}) {
     auto path = convert(sdr, output + "/probe-sdr-" + std::to_string(codec), codec, false);
     parity(path); preview(path, 97);
+    if (codec != 3) conversionResizeParity(path);
+  }
+  for (int codec : {1, 2}) for (int orientation = 1; orientation <= 8; ++orientation) {
+    const auto path = output + "/resize-odd-" + std::to_string(codec) + "-" + std::to_string(orientation);
+    rotatedOddFixture(path, codec, orientation); conversionResizeParity(path);
   }
   const auto thumb = output + "/preview-thumbnail.heic"; thumbnailFixture(thumb); parity(thumb);
   int fd = openFile(thumb);
